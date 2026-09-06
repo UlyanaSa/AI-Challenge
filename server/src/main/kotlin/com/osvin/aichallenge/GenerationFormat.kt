@@ -6,16 +6,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
- * Постоянная системная инструкция: чат работает только с вопросами о породах собак.
- * Модель вежливо отказывается отвечать на любые другие вопросы.
- */
-object DogBreedChat {
-    const val SYSTEM_INSTRUCTION =
-        "Ты — эксперт по породам собак. Отвечай только на вопросы о породах собак. " +
-            "Если вопрос не про породу собаки, вежливо откажись отвечать."
-}
-
-/**
  * Инструкция для формата «нумерованные пункты, каждый пункт — одно предложение».
  */
 private const val BULLET_INSTRUCTION =

@@ -16,7 +16,8 @@ import kotlinx.serialization.json.JsonObject
  * @param stop Стоп-слова завершения генерации: модель останавливается при их появлении.
  * @param runs Количество прогонов одного и того же вопроса для сверки формата ответа.
  * @param format Канонический ключ формата ответа (см. GenerationFormat).
- * @param dogsOnly Отвечать только на вопросы о собаках (иначе — вежливый отказ).
+ * @param systemPrompt Содержимое дополнительного системного сообщения модели
+ *                     (сейчас — инструкция «отвечать о собаках»).
  */
 @Serializable
 data class ChatRequest(
@@ -26,5 +27,5 @@ data class ChatRequest(
     val stop: List<String>? = null,
     val runs: Int? = null,
     val format: String? = null,
-    val dogsOnly: Boolean? = null
+    val systemPrompt: String? = null
 )
