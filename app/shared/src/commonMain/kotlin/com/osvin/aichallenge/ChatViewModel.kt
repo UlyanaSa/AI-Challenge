@@ -4,8 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.repository.ChatRepository
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -19,9 +22,20 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
 
+    // Текущие настройки генерации из шторки настроек
+    private val _settings = MutableStateFlow(GenerationSettings())
+    val settings: StateFlow<GenerationSettings> = _settings.asStateFlow()
+
     init {
         // Проверяем связь при создании ViewModel
         checkHealth()
+    }
+
+    /**
+     * Применение настроек генерации из шторки настроек.
+     */
+    fun updateSettings(settings: GenerationSettings) {
+        _settings.value = settings
     }
 
     /**
@@ -34,11 +48,11 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Отправка сообщения.
+     * Отправка сообщения с текущими настройками генерации.
      */
     fun sendMessage(text: String) {
         viewModelScope.launch {
-            repository.sendMessage(text)
+            repository.sendMessage(text, _settings.value)
         }
     }
 

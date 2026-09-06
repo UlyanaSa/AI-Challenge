@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -17,6 +18,7 @@ import androidx.compose.ui.unit.sp
  * @param text Текущий текст в поле ввода.
  * @param onTextChange Вызывается при изменении текста.
  * @param onSend Вызывается при нажатии кнопки отправки.
+ * @param onOpenSettings Вызывается при нажатии кнопки открытия шторки настроек.
  * @param isLoading Состояние ожидания ответа.
  * @param enabled Активна ли панель (зависит от статуса сервера).
  */
@@ -25,6 +27,7 @@ fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
+    onOpenSettings: () -> Unit,
     isLoading: Boolean,
     enabled: Boolean,
     modifier: Modifier = Modifier
@@ -46,7 +49,7 @@ fun ChatInputBar(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(24.dp)),
-                placeholder = { Text("Сообщение...") },
+                placeholder = { Text("Спросите о породе собаки...") },
                 enabled = !isLoading && enabled,
                 colors = TextFieldDefaults.colors(
                     focusedIndicatorColor = Color.Transparent,
@@ -56,8 +59,23 @@ fun ChatInputBar(
                 maxLines = 4
             )
             
-            Spacer(modifier = Modifier.width(12.dp))
-            
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // Кнопка открытия шторки настроек генерации
+            IconButton(
+                onClick = onOpenSettings,
+                enabled = !isLoading && enabled,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Text(
+                    text = "⚙",
+                    fontSize = 20.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
             Button(
                 onClick = onSend,
                 enabled = !isLoading && text.isNotBlank() && enabled,

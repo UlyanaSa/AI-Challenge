@@ -56,8 +56,9 @@ class ChatRepository(
     /**
      * Отправка сообщения нейросети.
      * @param message Текст сообщения пользователя.
+     * @param settings Настройки генерации из шторки настроек.
      */
-    suspend fun sendMessage(message: String) {
+    suspend fun sendMessage(message: String, settings: GenerationSettings = GenerationSettings()) {
         if (message.isBlank()) return
         
         _state.value = ChatUiState.Loading
@@ -65,7 +66,16 @@ class ChatRepository(
         try {
             val response = client.post("$baseUrl/v1/chat/completions") {
                 contentType(ContentType.Application.Json)
-                setBody(ChatRequest(message, _messages.value))
+                setBody(
+                    ChatRequest(
+                        message = message,
+                        maxTokens = settings.maxTokens,
+                        stop = settings.stopWords.ifEmpty { null },
+                        runs = settings.runs,
+                        format = settings.responseFormat.key,
+                        dogsOnly = settings.dogsOnly
+                    )
+                )
             }
             
             if (response.status.isSuccess()) {

@@ -21,6 +21,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.dotenv.kotlin)
     implementation(libs.logback)
+
+    testImplementation(libs.kotlin.test)
+    testImplementation(libs.ktor.server.test.host)
 }
 
 // ✅ Альтернативный способ создания fat JAR (без Shadow)

@@ -13,7 +13,8 @@ data class DeepSeekResponse(
 ) {
     @Serializable
     data class Choice(
-        val message: ChatMessage
+        val message: ChatMessage,
+        @SerialName("finish_reason") val finishReason: String? = null
     )
 
     @Serializable
