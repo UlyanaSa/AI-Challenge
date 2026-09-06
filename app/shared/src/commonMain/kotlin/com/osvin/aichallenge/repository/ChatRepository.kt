@@ -16,8 +16,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
 
-class ChatRepository(private val baseUrl: String) {
-    private val client = HttpClient {
+/**
+ * Репозиторий для работы с сетевым API чата.
+ * Отвечает за отправку сообщений и получение ответов от DeepSeek.
+ */
+class ChatRepository(
+    private val baseUrl: String,
+    private val client: HttpClient = HttpClient {
         install(ContentNegotiation) {
             json(Json {
                 ignoreUnknownKeys = true
@@ -25,33 +30,37 @@ class ChatRepository(private val baseUrl: String) {
             })
         }
     }
-    
+) {
+    // Внутренние потоки данных (StateFlow)
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
     
-    private val _state = MutableStateFlow<ChatState>(ChatState.Idle)
-    val state: StateFlow<ChatState> = _state.asStateFlow()
+    private val _state = MutableStateFlow<ChatUiState>(ChatUiState.Idle)
+    val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     private val _isServerOnline = MutableStateFlow<Boolean?>(null)
     val isServerOnline: StateFlow<Boolean?> = _isServerOnline.asStateFlow()
     
+    /**
+     * Проверка доступности сервера.
+     */
     suspend fun checkHealth() {
         try {
-            // Тестовый запрос к HTTPS ресурсу
-            val response = client.get("https://www.google.com")
-            println("ChatRepository: Google check status: ${response.status}")
-            
-            val realResponse = client.get("$baseUrl/v1/health")
-            _isServerOnline.value = realResponse.status.isSuccess()
+            val response = client.get("$baseUrl/v1/health")
+            _isServerOnline.value = response.status.isSuccess()
         } catch (e: Exception) {
-            println("ChatRepository: Health check failed: ${e.message}")
-            e.printStackTrace()
             _isServerOnline.value = false
         }
     }
 
+    /**
+     * Отправка сообщения нейросети.
+     * @param message Текст сообщения пользователя.
+     */
     suspend fun sendMessage(message: String) {
-        _state.value = ChatState.Loading
+        if (message.isBlank()) return
+        
+        _state.value = ChatUiState.Loading
         
         try {
             val response = client.post("$baseUrl/v1/chat/completions") {
@@ -59,25 +68,30 @@ class ChatRepository(private val baseUrl: String) {
                 setBody(ChatRequest(message, _messages.value))
             }
             
-            _isServerOnline.value = response.status.isSuccess()
-
             if (response.status.isSuccess()) {
                 val chatResponse = response.body<ChatResponse>()
+                
+                // Добавляем сообщение пользователя и ответ ассистента в историю
                 _messages.value = _messages.value + 
-                    ChatMessage("user", message) +
-                    ChatMessage("assistant", chatResponse.reply)
-                _state.value = ChatState.Success(chatResponse)
+                    ChatMessage(MessageRole.USER, message) +
+                    ChatMessage(MessageRole.ASSISTANT, chatResponse.reply)
+                
+                _state.value = ChatUiState.Success(chatResponse.reply)
+                _isServerOnline.value = true
             } else {
-                _state.value = ChatState.Error("HTTP ${response.status.value}")
+                _state.value = ChatUiState.Error("Ошибка сервера: ${response.status.value}")
             }
         } catch (e: Exception) {
             _isServerOnline.value = false
-            _state.value = ChatState.Error(e.message ?: "Unknown error")
+            _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
         }
     }
     
+    /**
+     * Очистка истории текущего диалога.
+     */
     fun clearHistory() {
         _messages.value = emptyList()
-        _state.value = ChatState.Idle
+        _state.value = ChatUiState.Idle
     }
 }

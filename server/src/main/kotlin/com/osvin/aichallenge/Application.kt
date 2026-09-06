@@ -1,5 +1,7 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.models.*
+import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
@@ -28,72 +30,14 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
 
-@Serializable
-data class ChatMessage(
-    val role: String,
-    val content: String
-)
-
-@Serializable
-data class ChatRequest(
-    val message: String,
-    val history: List<ChatMessage> = emptyList()
-)
-
-@Serializable
-data class ChatResponse(
-    val success: Boolean,
-    val reply: String,
-    val usage: Map<String, Int>? = null
-)
-
-@Serializable
-data class ErrorResponse(
-    val success: Boolean,
-    val error: String
-)
-
-@Serializable
-data class HealthResponse(
-    val status: String,
-    val deepseek: String,
-    val message: String? = null,
-    val code: Int? = null
-)
-
-@Serializable
-data class DeepSeekRequest(
-    val model: String,
-    val messages: List<ChatMessage>,
-    @SerialName("max_tokens") val maxTokens: Int? = null,
-    val temperature: Double? = null
-)
-
-@Serializable
-data class DeepSeekResponse(
-    val choices: List<Choice>,
-    val usage: Usage? = null
-) {
-    @Serializable
-    data class Choice(
-        val message: ChatMessage
-    )
-
-    @Serializable
-    data class Usage(
-        @SerialName("prompt_tokens") val promptTokens: Int,
-        @SerialName("completion_tokens") val completionTokens: Int,
-        @SerialName("total_tokens") val totalTokens: Int
-    )
-}
-
-// Клиент для запросов к DeepSeek
+/**
+ * HTTP-клиент для взаимодействия с внешним API DeepSeek.
+ * Сконфигурирован с поддержкой JSON и игнорированием неизвестных полей.
+ */
 val client = HttpClient(CIO) {
     install(ClientContentNegotiation) {
         json(Json {
@@ -103,17 +47,25 @@ val client = HttpClient(CIO) {
     }
 }
 
-// Основная функция
+/**
+ * Точка входа в приложение.
+ * Запускает встроенный сервер Netty.
+ */
 fun main() {
     embeddedServer(
         Netty,
-        port = 8080,
-        host = "0.0.0.0",
+        port = AppConfig.DEFAULT_PORT,
+        host = AppConfig.DEFAULT_HOST,
         module = Application::module
     ).start(wait = true)
 }
 
+/**
+ * Основной модуль сервера Ktor.
+ * Настраивает плагины и маршрутизацию.
+ */
 fun Application.module() {
+    // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
         json(Json {
             ignoreUnknownKeys = true
@@ -121,16 +73,18 @@ fun Application.module() {
         })
     }
 
+    // Глобальная обработка исключений
     install(StatusPages) {
         exception<Throwable> { call, cause ->
             call.application.environment.log.error("Internal Server Error", cause)
             call.respond(
                 HttpStatusCode.InternalServerError,
-                ErrorResponse(success = false, error = cause.message ?: "Unknown error")
+                ErrorResponse(success = false, error = cause.message ?: "Неизвестная ошибка сервера")
             )
         }
     }
 
+    // Настройка CORS для возможности запросов с разных доменов (полезно для Web/JS)
     install(CORS) {
         anyHost()
         allowMethod(HttpMethod.Post)
@@ -139,13 +93,17 @@ fun Application.module() {
         allowHeader(HttpHeaders.Authorization)
     }
 
+    // Ограничение частоты запросов для защиты API
     install(RateLimit) {
         register(RateLimitName("chat")) {
-            rateLimiter(limit = 15, refillPeriod = 60.seconds)
+            rateLimiter(limit = 20, refillPeriod = 60.seconds)
         }
     }
 
     routing {
+        /**
+         * Проверка состояния сервера и API ключа.
+         */
         get("/v1/health") {
             val apiKey = System.getenv("DEEPSEEK_API_KEY")
 
@@ -155,14 +113,14 @@ fun Application.module() {
                     HealthResponse(
                         status = "error",
                         deepseek = "unknown",
-                        message = "DEEPSEEK_API_KEY is not set"
+                        message = "Ключ DEEPSEEK_API_KEY не задан в переменных окружения"
                     )
                 )
                 return@get
             }
 
             try {
-                // Проверяем связь с DeepSeek, запрашивая список доступных моделей
+                // Простая проверка связи с API через список моделей
                 val response = client.get("https://api.deepseek.com/v1/models") {
                     header(HttpHeaders.Authorization, "Bearer $apiKey")
                 }
@@ -187,23 +145,28 @@ fun Application.module() {
             }
         }
 
+        /**
+         * Основной endpoint для чата.
+         * Пробрасывает запрос в DeepSeek API с возможностью переопределения параметров.
+         */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
             val apiKey = System.getenv("DEEPSEEK_API_KEY")
-                ?: error("API key not configured")
+                ?: error("API ключ не настроен")
 
-            // Формируем запрос к DeepSeek
+            // Подготавливаем историю сообщений для нейросети
             val messages = request.history + ChatMessage("user", request.message)
 
+            // Выполняем запрос к внешнему DeepSeek API
             val deepSeekResponse = client.post("https://api.deepseek.com/v1/chat/completions") {
                 contentType(ContentType.Application.Json)
                 header(HttpHeaders.Authorization, "Bearer $apiKey")
                 setBody(
                     DeepSeekRequest(
-                        model = "deepseek-chat",
+                        model = request.model ?: AppConfig.DEFAULT_MODEL,
                         messages = messages,
-                        maxTokens = 2000,
-                        temperature = 0.7
+                        maxTokens = request.maxTokens ?: AppConfig.DEFAULT_MAX_TOKENS,
+                        temperature = request.temperature ?: AppConfig.DEFAULT_TEMPERATURE
                     )
                 )
             }
@@ -216,9 +179,10 @@ fun Application.module() {
             val responseBody = deepSeekResponse.body<DeepSeekResponse>()
 
             if (responseBody.choices.isEmpty()) {
-                error("DeepSeek returned empty choices")
+                error("DeepSeek вернул пустой список ответов")
             }
 
+            // Отправляем ответ клиенту
             call.respond(
                 ChatResponse(
                     success = true,
