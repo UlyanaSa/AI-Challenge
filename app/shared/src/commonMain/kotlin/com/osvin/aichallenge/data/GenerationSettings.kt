@@ -26,9 +26,25 @@ enum class ResponseFormat(
 }
 
 /**
+ * Модель DeepSeek, доступная в шторке настроек.
+ * Три модели взяты из живого списка DeepSeek /v1/models:
+ * начало, середина и конец списка (день 5: сравнение версий моделей).
+ *
+ * @param id Идентификатор модели в API DeepSeek.
+ * @param title Короткое название для шторки.
+ * @param subtitle Пояснение: уровень и типичное применение.
+ */
+data class ModelOption(
+    val id: String,
+    val title: String,
+    val subtitle: String
+)
+
+/**
  * Настройки генерации ответа модели.
  * Заполняются в шторке настроек и передаются на сервер вместе с каждым сообщением.
  *
+ * @param model Модель DeepSeek (см. [GenerationSettings.MODELS]).
  * @param maxTokens Максимальное количество токенов в ответе модели —
  *                  ограничение длины ответа.
  * @param stopWords Стоп-слова завершения: генерация останавливается, как только модель
@@ -40,6 +56,7 @@ enum class ResponseFormat(
  *                    0.7 — баланс точности и креативности, 1.2 — креативный.
  */
 data class GenerationSettings(
+    val model: String = DEFAULT_MODEL,
     val maxTokens: Int = DEFAULT_MAX_TOKENS,
     val stopWords: List<String> = emptyList(),
     val responseFormat: ResponseFormat = ResponseFormat.FREE_FORM,
@@ -47,6 +64,32 @@ data class GenerationSettings(
     val temperature: Double = DEFAULT_TEMPERATURE
 ) {
     companion object {
+        /** Модель по умолчанию: самая быстрая и дешёвая из списка DeepSeek. */
+        const val DEFAULT_MODEL = "deepseek-v4-flash"
+
+        /**
+         * Модели DeepSeek в порядке живого списка API:
+         * flash — начало списка (быстрая, дешёвая), pro — середина (сильная),
+         * flash-vision — конец (экспериментальная, со зрением).
+         */
+        val MODELS = listOf(
+            ModelOption(
+                id = "deepseek-v4-flash",
+                title = "V4 Flash — быстрая",
+                subtitle = "Дешёвая модель для повседневных вопросов"
+            ),
+            ModelOption(
+                id = "deepseek-v4-pro",
+                title = "V4 Pro — сильная",
+                subtitle = "Тяжёлая модель для сложных задач и рассуждений"
+            ),
+            ModelOption(
+                id = "deepseek-v4-flash-vision-exp",
+                title = "V4 Flash Vision (экспериментальная)",
+                subtitle = "Flash со зрением; в текстовых задачах ведёт себя как Flash"
+            )
+        )
+
         /** Значение по умолчанию повторяет серверное (AppConfig), чтобы поведение чата не изменилось. */
         const val DEFAULT_MAX_TOKENS = 2000
 

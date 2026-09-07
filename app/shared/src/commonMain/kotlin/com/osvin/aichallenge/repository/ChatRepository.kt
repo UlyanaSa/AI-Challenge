@@ -69,6 +69,7 @@ class ChatRepository(
                 setBody(
                     ChatRequest(
                         message = message,
+                        model = settings.model,
                         maxTokens = settings.maxTokens,
                         stop = settings.stopWords.ifEmpty { null },
                         runs = settings.runs,

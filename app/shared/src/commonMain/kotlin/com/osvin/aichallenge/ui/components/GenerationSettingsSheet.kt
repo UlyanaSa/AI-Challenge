@@ -55,6 +55,7 @@ fun GenerationSettingsSheet(
     modifier: Modifier = Modifier
 ) {
     // Черновик формы; применяется только по кнопке «Применить»
+    var model by remember { mutableStateOf(initial.model) }
     var maxTokensText by remember { mutableStateOf(initial.maxTokens.toString()) }
     var stopText by remember { mutableStateOf(initial.stopWords.joinToString(", ")) }
     var responseFormat by remember { mutableStateOf(initial.responseFormat) }
@@ -86,6 +87,34 @@ fun GenerationSettingsSheet(
 
             Spacer(Modifier.height(16.dp))
 
+            // Версия модели: три модели из списка DeepSeek (день 5)
+            Text(
+                text = "Модель",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = "Один и тот же вопрос можно прогнать на разных моделях " +
+                    "и сравнить качество, скорость и стоимость.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            GenerationSettings.MODELS.forEach { option ->
+                RadioOptionRow(
+                    title = option.title,
+                    subtitle = option.subtitle,
+                    selected = model == option.id,
+                    onSelect = { model = option.id }
+                )
+            }
+
+            Spacer(Modifier.height(20.dp))
+
             // Температура генерации: детерминированность против креативности
             Text(
                 text = "Температура",
@@ -103,19 +132,19 @@ fun GenerationSettingsSheet(
 
             Spacer(Modifier.height(4.dp))
 
-            TemperatureRow(
+            RadioOptionRow(
                 title = "0 — точность",
                 subtitle = "Один и тот же ответ на один и тот же вопрос",
                 selected = temperature == 0.0,
                 onSelect = { temperature = 0.0 }
             )
-            TemperatureRow(
+            RadioOptionRow(
                 title = "0.7 — баланс",
                 subtitle = "Точность и лёгкая вариативность (по умолчанию)",
                 selected = temperature == GenerationSettings.DEFAULT_TEMPERATURE,
                 onSelect = { temperature = GenerationSettings.DEFAULT_TEMPERATURE }
             )
-            TemperatureRow(
+            RadioOptionRow(
                 title = "1.2 — креативность",
                 subtitle = "Разнообразные и неожиданные формулировки",
                 selected = temperature == 1.2,
@@ -219,6 +248,7 @@ fun GenerationSettingsSheet(
             ) {
                 TextButton(
                     onClick = {
+                        model = GenerationSettings.DEFAULT_MODEL
                         maxTokensText = GenerationSettings.DEFAULT_MAX_TOKENS.toString()
                         stopText = ""
                         responseFormat = ResponseFormat.FREE_FORM
@@ -235,6 +265,7 @@ fun GenerationSettingsSheet(
                     onClick = {
                         onApply(
                             GenerationSettings(
+                                model = model,
                                 maxTokens = maxTokens ?: GenerationSettings.DEFAULT_MAX_TOKENS,
                                 stopWords = parseStopWords(stopText),
                                 responseFormat = responseFormat,
@@ -253,10 +284,11 @@ fun GenerationSettingsSheet(
 }
 
 /**
- * Строка выбора температуры: кликабельны и сам radio, и подпись.
+ * Строка выбора radio-варианта (модель, температура): кликабельны
+ * и сам radio, и подпись.
  */
 @Composable
-private fun TemperatureRow(
+private fun RadioOptionRow(
     title: String,
     subtitle: String,
     selected: Boolean,

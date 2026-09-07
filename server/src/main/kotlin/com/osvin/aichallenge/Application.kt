@@ -5,6 +5,7 @@ import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -30,6 +31,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import java.util.Locale
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
@@ -37,6 +39,8 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientCon
 /**
  * HTTP-клиент для взаимодействия с внешним API DeepSeek.
  * Сконфигурирован с поддержкой JSON и игнорированием неизвестных полей.
+ * Таймауты подняты: сильные модели (deepseek-v4-pro) на длинных ответах
+ * отвечают дольше дефолтных 15 секунд движка CIO (день 5: сравнение моделей).
  */
 val client = HttpClient(CIO) {
     install(ClientContentNegotiation) {
@@ -44,6 +48,11 @@ val client = HttpClient(CIO) {
             ignoreUnknownKeys = true
             isLenient = true
         })
+    }
+    install(HttpTimeout) {
+        requestTimeoutMillis = 300_000
+        connectTimeoutMillis = 20_000
+        socketTimeoutMillis = 300_000
     }
 }
 
@@ -196,6 +205,7 @@ fun Application.module() {
             val stopLine = stopSequences?.joinToString(", ") ?: "нет"
             val report = buildString {
                 appendLine("=== Настройки ===")
+                appendLine("Модель: $model")
                 appendLine("Формат: ${format.label}")
                 appendLine("Прогонов одного вопроса: $runs")
                 appendLine("Максимум токенов: $maxTokens")
@@ -213,6 +223,7 @@ fun Application.module() {
                         else -> ""
                     }
                     appendLine("Прогон ${index + 1} — $status$suffix")
+                    appendLine("   " + runMetricsLine(model, outcome))
                 }
                 appendLine()
                 appendLine("=== Ответ ===")
@@ -239,9 +250,18 @@ fun Application.module() {
                 }
             }
 
-            // Отправляем ответ клиенту
+            // Отправляем ответ клиенту вместе с расходом токенов последнего прогона
+            val last = outcomes.last()
             call.respond(
-                ChatResponse(success = true, reply = finalText)
+                ChatResponse(
+                    success = true,
+                    reply = finalText,
+                    usage = mapOf(
+                        "prompt_tokens" to last.promptTokens,
+                        "completion_tokens" to last.completionTokens,
+                        "total_tokens" to (last.promptTokens + last.completionTokens)
+                    )
+                )
             )
         }
     }
@@ -255,6 +275,9 @@ fun Application.module() {
  * @param attempts Сколько запросов к DeepSeek потребовалось (повторы при обрыве по лимиту).
  * @param finalBudget Итоговый лимит токенов после округления и повышения.
  * @param truncatedAtCap Ответ всё ещё обрывается по лимиту даже на максимальном бюджете.
+ * @param elapsedMs Время прогона в миллисекундах (включая повторы при обрыве по лимиту).
+ * @param promptTokens Токены запроса последнего ответа (день 5: замер ресурсоёмкости).
+ * @param completionTokens Токены ответа последнего ответа (день 5).
  */
 private data class RunOutcome(
     val reply: String,
@@ -262,8 +285,30 @@ private data class RunOutcome(
     val reason: String?,
     val attempts: Int,
     val finalBudget: Int,
-    val truncatedAtCap: Boolean
+    val truncatedAtCap: Boolean,
+    val elapsedMs: Long,
+    val promptTokens: Int,
+    val completionTokens: Int
 )
+
+/**
+ * Строка с замерами одного прогона для отчёта: время, токены, скорость,
+ * стоимость. Стоимость считается по тарифу модели (см. AppConfig.MODEL_PRICES_USD_PER_1M);
+ * для моделей без опубликованного тарифа выводится прочерк.
+ */
+private fun runMetricsLine(model: String, outcome: RunOutcome): String {
+    val seconds = outcome.elapsedMs / 1000.0
+    val speed = if (seconds > 0) (outcome.completionTokens / seconds).toInt() else 0
+    val cost = AppConfig.MODEL_PRICES_USD_PER_1M[model]?.let { (priceIn, priceOut) ->
+        val usd = (outcome.promptTokens * priceIn + outcome.completionTokens * priceOut) / 1_000_000.0
+        String.format(Locale.US, " · ≈\$%.5f", usd)
+    } ?: " · стоимость: нет опубликованного тарифа"
+    return String.format(
+        Locale.US,
+        "время %.1f с · токены %d\u2192%d · скорость %d ток/с",
+        seconds, outcome.promptTokens, outcome.completionTokens, speed
+    ) + cost
+}
 
 /**
  * Один прогон вопроса: запрос к DeepSeek с автоувеличением лимита токенов.
@@ -284,6 +329,8 @@ private suspend fun runSingle(
     var attempts = 0
     var reply: String? = null
     var finishReason: String? = null
+    var usage: DeepSeekResponse.Usage? = null
+    val startedAt = System.currentTimeMillis()
 
     while (true) {
         attempts++
@@ -311,6 +358,7 @@ private suspend fun runSingle(
         if (responseBody.choices.isEmpty()) {
             error("DeepSeek вернул пустой список ответов")
         }
+        usage = responseBody.usage
 
         reply = responseBody.choices.first().message.content
         finishReason = responseBody.choices.first().finishReason
@@ -331,6 +379,9 @@ private suspend fun runSingle(
         reason = mismatchReason,
         attempts = attempts,
         finalBudget = budget,
-        truncatedAtCap = finishReason == "length" && budget >= AppConfig.MAX_TOKEN_CEILING
+        truncatedAtCap = finishReason == "length" && budget >= AppConfig.MAX_TOKEN_CEILING,
+        elapsedMs = System.currentTimeMillis() - startedAt,
+        promptTokens = usage?.promptTokens ?: 0,
+        completionTokens = usage?.completionTokens ?: 0
     )
 }
