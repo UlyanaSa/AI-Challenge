@@ -18,7 +18,8 @@ import androidx.compose.ui.unit.sp
  * @param text Текущий текст в поле ввода.
  * @param onTextChange Вызывается при изменении текста.
  * @param onSend Вызывается при нажатии кнопки отправки.
- * @param onOpenSettings Вызывается при нажатии кнопки открытия шторки настроек.
+ * @param onOpenCompare Вызывается при нажатии кнопки открытия шторки сравнения
+ *                      способов решения.
  * @param isLoading Состояние ожидания ответа.
  * @param enabled Активна ли панель (зависит от статуса сервера).
  */
@@ -27,7 +28,7 @@ fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenCompare: () -> Unit,
     isLoading: Boolean,
     enabled: Boolean,
     modifier: Modifier = Modifier
@@ -49,7 +50,7 @@ fun ChatInputBar(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(24.dp)),
-                placeholder = { Text("Спросите о породе собаки...") },
+                placeholder = { Text("Сообщение...") },
                 enabled = !isLoading && enabled,
                 colors = TextFieldDefaults.colors(
                     focusedIndicatorColor = Color.Transparent,
@@ -59,16 +60,16 @@ fun ChatInputBar(
                 maxLines = 4
             )
             
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(4.dp))
 
-            // Кнопка открытия шторки настроек генерации
+            // Кнопка открытия шторки сравнения способов решения
             IconButton(
-                onClick = onOpenSettings,
+                onClick = onOpenCompare,
                 enabled = !isLoading && enabled,
                 modifier = Modifier.size(48.dp)
             ) {
                 Text(
-                    text = "⚙",
+                    text = "⚖",
                     fontSize = 20.sp,
                     textAlign = TextAlign.Center
                 )

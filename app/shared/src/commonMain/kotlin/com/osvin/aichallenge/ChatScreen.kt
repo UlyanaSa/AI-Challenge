@@ -27,7 +27,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     
     // Локальное состояние ввода
     var inputText by remember { mutableStateOf("") }
-    var showSettings by remember { mutableStateOf(false) }
+    var showVariants by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     // Автопрокрутка к последнему сообщению при обновлении списка
@@ -52,7 +52,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                     viewModel.sendMessage(inputText)
                     inputText = ""
                 },
-                onOpenSettings = { showSettings = true },
+                onOpenCompare = { showVariants = true },
                 isLoading = uiState is ChatUiState.Loading,
                 enabled = isOnline == true
             )
@@ -89,15 +89,15 @@ fun ChatScreen(viewModel: ChatViewModel) {
         }
     }
 
-    // Шторка настроек генерации, вызывается кнопкой ⚙ из панели ввода
-    if (showSettings) {
-        GenerationSettingsSheet(
+    // Шторка настройки вариантов ответа, вызывается кнопкой ⚖ из панели ввода
+    if (showVariants) {
+        AnswerVariantsSheet(
             initial = settings,
             onApply = {
                 viewModel.updateSettings(it)
-                showSettings = false
+                showVariants = false
             },
-            onDismiss = { showSettings = false }
+            onDismiss = { showVariants = false }
         )
     }
 }

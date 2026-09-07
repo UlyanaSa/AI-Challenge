@@ -1,76 +1,53 @@
 package com.osvin.aichallenge.data
 
 /**
- * Формат ответа модели, выбираемый в шторке настроек.
- * Варианты взаимоисключающие: активен ровно один, по умолчанию — FREE_FORM.
- *
- * @param key Канонический ключ формата, передаётся на сервер; сервер по нему
- *            подбирает инструкцию модели и правило сверки ответа.
- * @param label Подпись варианта в шторке настроек.
+ * Вариант ответа модели на задачу.
+ * @param key Ключ для передачи на сервер.
+ * @param title Название для отображения.
  */
-enum class ResponseFormat(
-    val key: String,
-    val label: String
-) {
-    /** Свободная форма — без дополнительных требований к построению ответа. */
-    FREE_FORM("FREE_FORM", "Свободная форма"),
+enum class AnswerVariant(val key: String, val title: String) {
+    DIRECT("direct", "Прямой ответ без дополнительных инструкций"),
+    STEP_BY_STEP("step_by_step", "Инструкция «решай пошагово»"),
+    COMPOSED_PROMPT("composed_prompt", "Сначала промпт для решения, затем решение по нему"),
+    EXPERT_GROUP("expert_group", "Группа экспертов: аналитик, инженер, критик");
 
-    /** Нумерованные пункты, каждый пункт — одно предложение. */
-    BULLET_SENTENCE("BULLET_SENTENCE", "Нумерованные пункты, каждый пункт — одно предложение"),
-
-    /** Чёткий JSON с полями о породе. */
-    STRICT_JSON(
-        "STRICT_JSON",
-        "Чёткий JSON (breed, lifespan, color, origin, temperament)"
-    )
+    companion object {
+        fun fromKey(key: String?): AnswerVariant? =
+            entries.firstOrNull { it.key == key }
+    }
 }
 
 /**
- * Настройки генерации ответа модели.
- * Заполняются в шторке настроек и передаются на сервер вместе с каждым сообщением.
- *
- * @param maxTokens Максимальное количество токенов в ответе модели —
- *                  ограничение длины ответа.
- * @param stopWords Стоп-слова завершения: генерация останавливается, как только модель
- *                  начинает выдавать одно из этих слов.
- * @param responseFormat Формат ответа (см. [ResponseFormat]); по умолчанию — свободная форма.
- * @param runs Количество прогонов одного и того же вопроса: сервер повторяет запрос
- *             заданное число раз и сверяет, что формат ответа совпадает с заданным.
- * @param dogsOnly Отвечать только на вопросы о собаках; на любые другие вопросы
- *                 модель вежливо отказывается (выключается системная инструкция).
+ * Способ запуска выбранных вариантов ответа.
+ * @param key Ключ для передачи на сервер.
+ * @param label Название для отображения.
  */
-data class GenerationSettings(
-    val maxTokens: Int = DEFAULT_MAX_TOKENS,
-    val stopWords: List<String> = emptyList(),
-    val responseFormat: ResponseFormat = ResponseFormat.FREE_FORM,
-    val runs: Int = DEFAULT_RUNS,
-    val dogsOnly: Boolean = true
-) {
+enum class RunMode(val key: String, val label: String) {
+    SEQUENTIAL(
+        "sequential",
+        "Все последовательно: один отчёт, у каждого варианта характеристики, в конце вердикт судьи"
+    ),
+    SEPARATE(
+        "separate",
+        "По отдельности: каждый выбранный вариант запускается отдельным ответом в чате"
+    );
+
     companion object {
-        /** Значение по умолчанию повторяет серверное (AppConfig), чтобы поведение чата не изменилось. */
-        const val DEFAULT_MAX_TOKENS = 2000
-
-        /** Верхняя граница max_tokens, которую принимает DeepSeek API. */
-        const val MAX_TOKENS_LIMIT = 8192
-
-        /** Максимум стоп-слов за один запрос (лимит DeepSeek API). */
-        const val MAX_STOP_WORDS = 16
-
-        /** Количество прогонов одного вопроса по умолчанию. */
-        const val DEFAULT_RUNS = 3
-
-        /** Нижняя граница прогонов. */
-        const val MIN_RUNS = 1
-
-        /** Верхняя граница прогонов (защита от перерасхода API). */
-        const val MAX_RUNS = 10
-
-        /**
-         * Системная инструкция чата о собаках: отправляется модели как
-         * дополнительное системное сообщение, когда включён [GenerationSettings.dogsOnly].
-         */
-        const val DOGS_ONLY_SYSTEM_PROMPT =
-            "Ты — эксперт по породам собак. Отвечай только на вопросы о породах собак. " +
-                "Если вопрос не про породу собаки, вежливо откажись отвечать."
+        fun fromKey(key: String?): RunMode =
+            entries.firstOrNull { it.key == key } ?: SEQUENTIAL
     }
 }
+
+/**
+ * Настройки вариантов ответа, задаются в шторке ⚖.
+ *
+ * Если список [variants] пуст — чат работает как обычный: один прямой ответ
+ * модели без дополнительных инструкций и без характеристик.
+ *
+ * @param variants Выбранные варианты ответа (порядок = порядок запуска).
+ * @param runMode Способ запуска: все последовательно или по отдельности.
+ */
+data class GenerationSettings(
+    val variants: List<AnswerVariant> = emptyList(),
+    val runMode: RunMode = RunMode.SEQUENTIAL
+)

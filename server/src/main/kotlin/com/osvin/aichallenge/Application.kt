@@ -9,6 +9,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -37,6 +38,8 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientCon
 /**
  * HTTP-клиент для взаимодействия с внешним API DeepSeek.
  * Сконфигурирован с поддержкой JSON и игнорированием неизвестных полей.
+ * Таймауты увеличены: длинные генерации (группа экспертов, судья) могут
+ * занимать заметно больше стандартных 15 секунд.
  */
 val client = HttpClient(CIO) {
     install(ClientContentNegotiation) {
@@ -44,6 +47,11 @@ val client = HttpClient(CIO) {
             ignoreUnknownKeys = true
             isLenient = true
         })
+    }
+    install(HttpTimeout) {
+        requestTimeoutMillis = 180_000
+        connectTimeoutMillis = 20_000
+        socketTimeoutMillis = 180_000
     }
 }
 
@@ -146,194 +154,64 @@ fun Application.module() {
         }
 
         /**
-         * Основной endpoint для чата.
-         * Гоняет один и тот же вопрос заданное число раз и сверяет формат каждого
-         * ответа с заданным. В ответе сверху — текущие настройки и статус сверки
-         * по каждому прогону, затем тела ответов: только неудачные прогоны,
-         * либо последний успешный, если все прогоны прошли сверку.
+         * Обычный ответ чата: один прямой запрос к модели без инструкций
+         * и без характеристик.
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
             val apiKey = System.getenv("DEEPSEEK_API_KEY")
                 ?: error("API ключ не настроен")
 
-            val format = GenerationFormat.fromKey(request.format)
-            val runs = (request.runs ?: AppConfig.DEFAULT_RUNS).coerceIn(1, AppConfig.MAX_RUNS)
-            val maxTokens = (request.maxTokens ?: AppConfig.DEFAULT_MAX_TOKENS)
-                .coerceIn(1, AppConfig.MAX_TOKEN_CEILING)
-            val model = request.model ?: AppConfig.DEFAULT_MODEL
-            val stopSequences = request.stop
-                ?.map { it.trim() }
-                ?.filter { it.isNotEmpty() }
-                ?.distinct()
-                ?.take(AppConfig.MAX_STOP_SEQUENCES)
-                ?.takeIf { it.isNotEmpty() }
+            val outcome = deepSeekComplete(
+                apiKey = apiKey,
+                model = AppConfig.DEFAULT_MODEL,
+                messages = listOf(ChatMessage("user", request.message))
+            )
+            call.respond(ChatResponse(success = true, reply = outcome.text))
+        }
 
-            // Сообщения модели: дополнительное системное сообщение из запроса
-            // (сейчас — инструкция «только о собаках»), затем инструкция о формате
-            // ответа. История диалога не передаётся — каждый вопрос (все его
-            // прогоны) проверяется изолированно.
-            val messages = buildList {
-                request.systemPrompt
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { add(ChatMessage("system", it)) }
-                format.instruction?.let { add(ChatMessage("system", it)) }
-                add(ChatMessage("user", request.message))
-            }
+        /**
+         * Запуск одного варианта ответа: решение + основные характеристики
+         * (токены, скорость, длина, стоимость, глубина, точность).
+         */
+        post("/v1/chat/variant") {
+            val request = call.receive<VariantRequest>()
+            val apiKey = System.getenv("DEEPSEEK_API_KEY")
+                ?: error("API ключ не настроен")
 
-            // Прогоны одного и того же вопроса
-            val outcomes = (1..runs).map {
-                runSingle(
-                    apiKey = apiKey,
-                    model = model,
-                    messages = messages,
-                    format = format,
-                    initialMaxTokens = maxTokens,
-                    stopSequences = stopSequences
-                )
-            }
-
-            // Формируем итоговое сообщение: настройки и статус сверки — сверху
-            val stopLine = stopSequences?.joinToString(", ") ?: "нет"
-            val report = buildString {
-                appendLine("=== Настройки ===")
-                appendLine("Формат: ${format.label}")
-                appendLine("Прогонов одного вопроса: $runs")
-                appendLine("Максимум токенов: $maxTokens")
-                appendLine("Стоп-слова: $stopLine")
-                appendLine(
-                    "Только вопросы о собаках: " +
-                        if (request.systemPrompt.isNullOrBlank()) "нет" else "да"
-                )
-                appendLine()
-                appendLine("=== Сверка формата с заданным ===")
-                outcomes.forEachIndexed { index, outcome ->
-                    val status = if (outcome.ok) "OK" else "ОШИБКА: ${outcome.reason}"
-                    val suffix = when {
-                        outcome.truncatedAtCap ->
-                            " (обрыв по лимиту даже при ${outcome.finalBudget})"
-                        outcome.attempts > 1 ->
-                            " (лимит увеличен до ${outcome.finalBudget})"
-                        else -> ""
-                    }
-                    appendLine("Прогон ${index + 1} — $status$suffix")
-                }
-                appendLine()
-                appendLine("=== Ответ ===")
-            }
-
-            val failed = outcomes.mapIndexedNotNull { index, outcome ->
-                if (outcome.ok) null else index + 1 to outcome
-            }
-
-            // Печатаем только неудачные прогоны; если все корректны — последний успешный
-            val finalText = if (failed.isEmpty()) {
-                val last = outcomes.last()
-                report +
-                    "--- Прогон ${outcomes.size} (последний успешный) ---\n" +
-                    last.reply
-            } else {
-                report + buildString {
-                    appendLine("--- Неудачные прогоны (формат не совпал) ---")
-                    failed.forEachIndexed { index, (runNumber, outcome) ->
-                        if (index > 0) appendLine()
-                        appendLine("--- Прогон $runNumber ---")
-                        appendLine(outcome.reply)
-                    }
-                }
-            }
-
-            // Отправляем ответ клиенту
+            val solved = VariantRunner.solveVariant(
+                apiKey = apiKey,
+                model = AppConfig.DEFAULT_MODEL,
+                question = request.message,
+                variantKey = request.variant
+            )
             call.respond(
-                ChatResponse(success = true, reply = finalText)
-            )
-        }
-    }
-}
-
-/**
- * Результат одного прогона вопроса.
- * @param reply Текст ответа модели.
- * @param ok Прошёл ли ответ сверку формата.
- * @param reason Причина рассогласования формата (если не прошёл).
- * @param attempts Сколько запросов к DeepSeek потребовалось (повторы при обрыве по лимиту).
- * @param finalBudget Итоговый лимит токенов после округления и повышения.
- * @param truncatedAtCap Ответ всё ещё обрывается по лимиту даже на максимальном бюджете.
- */
-private data class RunOutcome(
-    val reply: String,
-    val ok: Boolean,
-    val reason: String?,
-    val attempts: Int,
-    val finalBudget: Int,
-    val truncatedAtCap: Boolean
-)
-
-/**
- * Один прогон вопроса: запрос к DeepSeek с автоувеличением лимита токенов.
- * Если модель оборвала ответ по лимиту (finish_reason = length), бюджет округляется
- * вверх и увеличивается, пока ответ не завершится осмысленно или не будет достигнут
- * максимальный лимит.
- */
-private suspend fun runSingle(
-    apiKey: String,
-    model: String,
-    messages: List<ChatMessage>,
-    format: GenerationFormat,
-    initialMaxTokens: Int,
-    stopSequences: List<String>?
-): RunOutcome {
-    var budget = initialMaxTokens
-    var attempts = 0
-    var reply: String? = null
-    var finishReason: String? = null
-
-    while (true) {
-        attempts++
-        val response = client.post("https://api.deepseek.com/v1/chat/completions") {
-            contentType(ContentType.Application.Json)
-            header(HttpHeaders.Authorization, "Bearer $apiKey")
-            setBody(
-                DeepSeekRequest(
-                    model = model,
-                    messages = messages,
-                    maxTokens = budget,
-                    temperature = AppConfig.DEFAULT_TEMPERATURE,
-                    stop = stopSequences,
-                    responseFormat = if (format.jsonMode) GenerationFormat.STRICT_JSON_MODE else null
+                VariantResponse(
+                    success = true,
+                    title = solved.title,
+                    content = solved.content,
+                    metrics = solved.metrics
                 )
             )
         }
 
-        if (!response.status.isSuccess()) {
-            val errorBody = response.body<String>()
-            error("DeepSeek API error: ${response.status} - $errorBody")
-        }
+        /**
+         * Вердикт судьи по готовым решениям одной задачи.
+         * Судья оценивает каждое решение по параметрам (правильность, полнота,
+         * обоснованность, ясность) и называет наиболее точное.
+         */
+        post("/v1/chat/analyze") {
+            val request = call.receive<AnalysisRequest>()
+            val apiKey = System.getenv("DEEPSEEK_API_KEY")
+                ?: error("API ключ не настроен")
 
-        val responseBody = response.body<DeepSeekResponse>()
-        if (responseBody.choices.isEmpty()) {
-            error("DeepSeek вернул пустой список ответов")
+            val verdict = VariantRunner.judgeSolutions(
+                apiKey = apiKey,
+                model = AppConfig.DEFAULT_MODEL,
+                question = request.question,
+                solutions = request.solutions
+            )
+            call.respond(AnalysisResponse(success = true, verdict = verdict))
         }
-
-        reply = responseBody.choices.first().message.content
-        finishReason = responseBody.choices.first().finishReason
-
-        // Ответ оборвался по лимиту и лимит ещё можно увеличить —
-        // повторяем с округлённым вверх бюджетом до смыслового завершения
-        if (finishReason == "length" && budget < AppConfig.MAX_TOKEN_CEILING) {
-            budget = minOf(AppConfig.MAX_TOKEN_CEILING, roundUpTokens(budget * 3 / 2))
-            continue
-        }
-        break
     }
-
-    val mismatchReason = format.verify(reply ?: "")
-    return RunOutcome(
-        reply = reply ?: "",
-        ok = mismatchReason == null,
-        reason = mismatchReason,
-        attempts = attempts,
-        finalBudget = budget,
-        truncatedAtCap = finishReason == "length" && budget >= AppConfig.MAX_TOKEN_CEILING
-    )
 }

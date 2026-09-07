@@ -14,4 +14,11 @@ object AppConfig {
     const val MAX_STOP_SEQUENCES = 16
     const val DEFAULT_PORT = 8080
     const val DEFAULT_HOST = "0.0.0.0"
+
+    /** Цена DeepSeek deepseek-chat за 1M токенов, USD. */
+    const val PRICE_INPUT_PER_1M_USD = 0.27
+    const val PRICE_OUTPUT_PER_1M_USD = 1.10
+
+    /** Курс для отображения стоимости в рублях. */
+    const val RUB_PER_USD = 90.0
 }
