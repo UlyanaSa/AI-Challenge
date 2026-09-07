@@ -11,8 +11,7 @@ import kotlinx.serialization.Serializable
  * @param stop Стоп-слова завершения генерации.
  * @param runs Количество прогонов одного и того же вопроса для сверки формата ответа.
  * @param format Канонический ключ формата ответа (см. [ResponseFormat.key]).
- * @param systemPrompt Содержимое дополнительного системного сообщения модели.
- *                     Сейчас содержит только инструкцию «отвечать о собаках».
+ * @param temperature Температура генерации (0.0–2.0); по умолчанию 0.7.
  */
 @Serializable
 data class ChatRequest(
@@ -21,5 +20,5 @@ data class ChatRequest(
     val stop: List<String>? = null,
     val runs: Int? = null,
     val format: String? = null,
-    val systemPrompt: String? = null
+    val temperature: Double? = null
 )

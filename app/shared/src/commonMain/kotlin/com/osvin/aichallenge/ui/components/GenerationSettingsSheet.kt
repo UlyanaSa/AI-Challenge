@@ -18,7 +18,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,7 +59,7 @@ fun GenerationSettingsSheet(
     var stopText by remember { mutableStateOf(initial.stopWords.joinToString(", ")) }
     var responseFormat by remember { mutableStateOf(initial.responseFormat) }
     var runsText by remember { mutableStateOf(initial.runs.toString()) }
-    var dogsOnly by remember { mutableStateOf(initial.dogsOnly) }
+    var temperature by remember { mutableStateOf(initial.temperature) }
 
     val maxTokens = maxTokensText.toIntOrNull()
     val isMaxTokensValid = maxTokens != null && maxTokens in 1..GenerationSettings.MAX_TOKENS_LIMIT
@@ -86,36 +86,41 @@ fun GenerationSettingsSheet(
 
             Spacer(Modifier.height(16.dp))
 
-            // Поведение чата: отвечать только на вопросы о собаках
+            // Температура генерации: детерминированность против креативности
             Text(
-                text = "Поведение чата",
+                text = "Температура",
                 style = MaterialTheme.typography.titleMedium
             )
 
             Spacer(Modifier.height(4.dp))
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { dogsOnly = !dogsOnly },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Отвечать только на вопросы о собаках",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        text = "Вне темы модель вежливо откажется отвечать.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = dogsOnly,
-                    onCheckedChange = { dogsOnly = it }
-                )
-            }
+            Text(
+                text = "Управляет случайностью ответов: 0 — почти детерминированный, " +
+                    "0.7 — баланс точности и креативности, 1.2 — максимум разнообразия.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            TemperatureRow(
+                title = "0 — точность",
+                subtitle = "Один и тот же ответ на один и тот же вопрос",
+                selected = temperature == 0.0,
+                onSelect = { temperature = 0.0 }
+            )
+            TemperatureRow(
+                title = "0.7 — баланс",
+                subtitle = "Точность и лёгкая вариативность (по умолчанию)",
+                selected = temperature == GenerationSettings.DEFAULT_TEMPERATURE,
+                onSelect = { temperature = GenerationSettings.DEFAULT_TEMPERATURE }
+            )
+            TemperatureRow(
+                title = "1.2 — креативность",
+                subtitle = "Разнообразные и неожиданные формулировки",
+                selected = temperature == 1.2,
+                onSelect = { temperature = 1.2 }
+            )
 
             Spacer(Modifier.height(20.dp))
 
@@ -218,7 +223,7 @@ fun GenerationSettingsSheet(
                         stopText = ""
                         responseFormat = ResponseFormat.FREE_FORM
                         runsText = GenerationSettings.DEFAULT_RUNS.toString()
-                        dogsOnly = true
+                        temperature = GenerationSettings.DEFAULT_TEMPERATURE
                     }
                 ) {
                     Text("Сбросить")
@@ -234,7 +239,7 @@ fun GenerationSettingsSheet(
                                 stopWords = parseStopWords(stopText),
                                 responseFormat = responseFormat,
                                 runs = runs ?: GenerationSettings.DEFAULT_RUNS,
-                                dogsOnly = dogsOnly
+                                temperature = temperature
                             )
                         )
                     },
@@ -243,6 +248,42 @@ fun GenerationSettingsSheet(
                     Text("Применить")
                 }
             }
+        }
+    }
+}
+
+/**
+ * Строка выбора температуры: кликабельны и сам radio, и подпись.
+ */
+@Composable
+private fun TemperatureRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onSelect
+        )
+        Column(modifier = Modifier.padding(start = 4.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

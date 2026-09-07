@@ -161,6 +161,8 @@ fun Application.module() {
             val runs = (request.runs ?: AppConfig.DEFAULT_RUNS).coerceIn(1, AppConfig.MAX_RUNS)
             val maxTokens = (request.maxTokens ?: AppConfig.DEFAULT_MAX_TOKENS)
                 .coerceIn(1, AppConfig.MAX_TOKEN_CEILING)
+            val temperature = (request.temperature ?: AppConfig.DEFAULT_TEMPERATURE)
+                .coerceIn(0.0, 2.0)
             val model = request.model ?: AppConfig.DEFAULT_MODEL
             val stopSequences = request.stop
                 ?.map { it.trim() }
@@ -169,14 +171,10 @@ fun Application.module() {
                 ?.take(AppConfig.MAX_STOP_SEQUENCES)
                 ?.takeIf { it.isNotEmpty() }
 
-            // Сообщения модели: дополнительное системное сообщение из запроса
-            // (сейчас — инструкция «только о собаках»), затем инструкция о формате
-            // ответа. История диалога не передаётся — каждый вопрос (все его
-            // прогоны) проверяется изолированно.
+            // Сообщения модели: инструкция о формате ответа. История диалога
+            // не передаётся — каждый вопрос (все его прогоны) проверяется
+            // изолированно. Чат отвечает на любые вопросы.
             val messages = buildList {
-                request.systemPrompt
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { add(ChatMessage("system", it)) }
                 format.instruction?.let { add(ChatMessage("system", it)) }
                 add(ChatMessage("user", request.message))
             }
@@ -189,6 +187,7 @@ fun Application.module() {
                     messages = messages,
                     format = format,
                     initialMaxTokens = maxTokens,
+                    temperature = temperature,
                     stopSequences = stopSequences
                 )
             }
@@ -200,11 +199,8 @@ fun Application.module() {
                 appendLine("Формат: ${format.label}")
                 appendLine("Прогонов одного вопроса: $runs")
                 appendLine("Максимум токенов: $maxTokens")
+                appendLine("Температура: $temperature")
                 appendLine("Стоп-слова: $stopLine")
-                appendLine(
-                    "Только вопросы о собаках: " +
-                        if (request.systemPrompt.isNullOrBlank()) "нет" else "да"
-                )
                 appendLine()
                 appendLine("=== Сверка формата с заданным ===")
                 outcomes.forEachIndexed { index, outcome ->
@@ -281,6 +277,7 @@ private suspend fun runSingle(
     messages: List<ChatMessage>,
     format: GenerationFormat,
     initialMaxTokens: Int,
+    temperature: Double,
     stopSequences: List<String>?
 ): RunOutcome {
     var budget = initialMaxTokens
@@ -298,7 +295,7 @@ private suspend fun runSingle(
                     model = model,
                     messages = messages,
                     maxTokens = budget,
-                    temperature = AppConfig.DEFAULT_TEMPERATURE,
+                    temperature = temperature,
                     stop = stopSequences,
                     responseFormat = if (format.jsonMode) GenerationFormat.STRICT_JSON_MODE else null
                 )

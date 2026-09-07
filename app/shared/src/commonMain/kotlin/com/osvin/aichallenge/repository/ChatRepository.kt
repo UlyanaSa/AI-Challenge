@@ -73,11 +73,7 @@ class ChatRepository(
                         stop = settings.stopWords.ifEmpty { null },
                         runs = settings.runs,
                         format = settings.responseFormat.key,
-                        systemPrompt = if (settings.dogsOnly) {
-                            GenerationSettings.DOGS_ONLY_SYSTEM_PROMPT
-                        } else {
-                            null
-                        }
+                        temperature = settings.temperature
                     )
                 )
             }

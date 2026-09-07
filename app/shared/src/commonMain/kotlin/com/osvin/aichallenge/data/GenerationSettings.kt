@@ -36,15 +36,15 @@ enum class ResponseFormat(
  * @param responseFormat Формат ответа (см. [ResponseFormat]); по умолчанию — свободная форма.
  * @param runs Количество прогонов одного и того же вопроса: сервер повторяет запрос
  *             заданное число раз и сверяет, что формат ответа совпадает с заданным.
- * @param dogsOnly Отвечать только на вопросы о собаках; на любые другие вопросы
- *                 модель вежливо отказывается (выключается системная инструкция).
+ * @param temperature Температура генерации (0.0–2.0): 0 — детерминированный ответ,
+ *                    0.7 — баланс точности и креативности, 1.2 — креативный.
  */
 data class GenerationSettings(
     val maxTokens: Int = DEFAULT_MAX_TOKENS,
     val stopWords: List<String> = emptyList(),
     val responseFormat: ResponseFormat = ResponseFormat.FREE_FORM,
     val runs: Int = DEFAULT_RUNS,
-    val dogsOnly: Boolean = true
+    val temperature: Double = DEFAULT_TEMPERATURE
 ) {
     companion object {
         /** Значение по умолчанию повторяет серверное (AppConfig), чтобы поведение чата не изменилось. */
@@ -65,12 +65,13 @@ data class GenerationSettings(
         /** Верхняя граница прогонов (защита от перерасхода API). */
         const val MAX_RUNS = 10
 
+        /** Температура генерации по умолчанию. */
+        const val DEFAULT_TEMPERATURE = 0.7
+
         /**
-         * Системная инструкция чата о собаках: отправляется модели как
-         * дополнительное системное сообщение, когда включён [GenerationSettings.dogsOnly].
+         * Значения температуры, доступные в шторке настроек:
+         * эксперимент дня 4 гоняет один и тот же запрос при 0 / 0.7 / 1.2.
          */
-        const val DOGS_ONLY_SYSTEM_PROMPT =
-            "Ты — эксперт по породам собак. Отвечай только на вопросы о породах собак. " +
-                "Если вопрос не про породу собаки, вежливо откажись отвечать."
+        val TEMPERATURE_OPTIONS = listOf(0.0, 0.7, 1.2)
     }
 }
