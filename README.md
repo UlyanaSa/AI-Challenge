@@ -208,10 +208,43 @@ HTTP 200
 Агент собрал сообщения из system prompt, истории и текущего запроса, вызвал LLM через API и вернул ответ модели как есть (`Улан`).
 
 
+### task-7
+
+День 7. Сохранение контекста
+
+Добавьте агенту сохранение контекста:
+
+- храните историю диалога (messages) в JSON или SQLite
+- при перезапуске агента загружайте историю обратно
+- продолжайте диалог так, как будто агент не выключался
+
+**Результат:** агент, который сохраняет и восстанавливает контекст между запусками.
+
+**Заключение.** История диалога лежит в SQLite через Room и поднимается обратно при старте приложения:
+
+- **`ChatHistoryStore`** (`app/shared/src/commonMain/kotlin/com/osvin/aichallenge/data/ChatHistoryStore.kt`) — контракт хранилища: `load()`, `append(message)`, `clear()`. Он в общем коде, поэтому репозиторий и UI не знают, куда именно пишутся сообщения.
+- **`RoomChatHistoryStore`** (`app/androidApp/src/main/kotlin/com/osvin/aichallenge/data/RoomChatHistoryStore.kt`) — реализация на Room: таблица `chat_messages` (`ChatMessageEntity` — id, role, content, timestamp), DAO с suspend-запросами (`all()` / `insert()` / `deleteAll()`), база `ChatHistoryDatabase` (версия 1, файл `chat-history.db`). Room подключён к Android-модулю (KSP + `androidx.room`), так как для iOS/Web его артефактов нет; на этих таргетах работает `InMemoryChatHistoryStore` — там история живёт в памяти процесса и перезапуск не переживает.
+- **`ChatRepository`** получает хранилище в конструкторе, грузит историю (`loadHistory()`) и дописывает оба сообщения — и пользователя, и ассистента; `clearHistory()` чистит и память, и базу.
+- **`ChatViewModel`** загружает сохранённый диалог в `init` и отдаёт UI признак `historyLoaded`.
+- **`App`** по этому признаку выбирает первый экран: есть сохранённые сообщения — сразу открывается чат с прежней перепиской, нет — экран «Новый чат».
+
+**Проверка на устройстве** (эмулятор Android, `./gradlew :app:androidApp:assembleDebug` → `adb install -r`):
+
+1. «My name is Ulan» → ассистент: «Nice to meet you, Ulan! How can I help you today?». В `chat-history.db` появились две строки: `role=user` и `role=assistant`.
+2. `adb shell am force-stop com.osvin.aichallenge` — приложение и его процесс убиты.
+3. Запуск заново: открылся не экран настройки, а чат с теми же двумя сообщениями — история восстановлена из Room.
+4. «What name do I have answer with one word» → ассистент: «Ulan». Контекст прежнего диалога сохранён, агент отвечает так, как будто не выключался.
+5. Кнопка «＋» → «Начать чат»: экран пустой, таблица `chat_messages` пуста — новый диалог стирает историю и в памяти, и в базе.
+
+
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 * [/app/iosApp](./app/iosApp/iosApp) contains an iOS application. Even if you’re sharing your UI with Compose Multiplatform,
   you need this entry point for your iOS app. This is also where you should add SwiftUI code for your project.
+
+* [/app/androidApp](./app/androidApp/src/main/kotlin) is the Android application: the Compose entry point
+  (`MainActivity`) and the Room storage of the dialog history
+  (`data/RoomChatHistoryStore.kt`, `data/ChatHistoryDatabase.kt`).
 
 * [/app/shared](./app/shared/src) is for code that will be shared across your Compose Multiplatform applications.
   It contains several subfolders:

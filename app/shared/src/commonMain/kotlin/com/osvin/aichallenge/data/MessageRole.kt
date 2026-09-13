@@ -13,10 +13,12 @@ import kotlinx.serialization.Serializable
  *
  * SYSTEM - Задает общий контекст, инструкции и правила поведения
  * для модели на протяжении всего диалога
+ *
+ * @param wire Значение роли в API DeepSeek и в хранилище истории.
  */
 @Serializable
-enum class MessageRole {
-    @SerialName("user") USER,
-    @SerialName("assistant") ASSISTANT,
-    @SerialName("system") SYSTEM
+enum class MessageRole(val wire: String) {
+    @SerialName("user") USER("user"),
+    @SerialName("assistant") ASSISTANT("assistant"),
+    @SerialName("system") SYSTEM("system")
 }

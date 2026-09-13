@@ -26,8 +26,16 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     private val _settings = MutableStateFlow(GenerationSettings())
     val settings: StateFlow<GenerationSettings> = _settings.asStateFlow()
 
+    // Признак того, что сохранённая история уже загружена из хранилища
+    private val _historyLoaded = MutableStateFlow(false)
+    val historyLoaded: StateFlow<Boolean> = _historyLoaded.asStateFlow()
+
     init {
-        // Проверяем связь при создании ViewModel
+        // Восстанавливаем сохранённый диалог, затем проверяем связь
+        viewModelScope.launch {
+            repository.loadHistory()
+            _historyLoaded.value = true
+        }
         checkHealth()
     }
 
@@ -54,13 +62,8 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
      */
     fun startNewChat(settings: GenerationSettings) {
         _settings.value = settings
-        repository.clearHistory()
-    }
-
-    /**
-     * Очистка истории переписки.
-     */
-    fun clearHistory() {
-        repository.clearHistory()
+        viewModelScope.launch {
+            repository.clearHistory()
+        }
     }
 }

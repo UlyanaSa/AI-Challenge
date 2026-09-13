@@ -22,6 +22,7 @@ import kotlinx.serialization.json.Json
  */
 class ChatRepository(
     private val baseUrl: String,
+    private val historyStore: ChatHistoryStore,
     private val client: HttpClient = HttpClient {
         install(ContentNegotiation) {
             json(Json {
@@ -54,6 +55,13 @@ class ChatRepository(
     }
 
     /**
+     * Загрузка сохранённой истории диалога (например, после перезапуска приложения).
+     */
+    suspend fun loadHistory() {
+        _messages.value = historyStore.load()
+    }
+
+    /**
      * Отправка сообщения нейросети.
      * @param message Текст сообщения пользователя.
      * @param settings Настройки генерации из шторки настроек.
@@ -83,10 +91,13 @@ class ChatRepository(
                 val chatResponse = response.body<ChatResponse>()
                 
                 // Добавляем сообщение пользователя и ответ ассистента в историю
-                _messages.value = _messages.value + 
-                    ChatMessage(MessageRole.USER, message) +
-                    ChatMessage(MessageRole.ASSISTANT, chatResponse.reply)
-                
+                // и сохраняем их, чтобы диалог пережил перезапуск приложения
+                val userMessage = ChatMessage(MessageRole.USER, message)
+                val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply)
+                _messages.value = _messages.value + userMessage + assistantMessage
+                historyStore.append(userMessage)
+                historyStore.append(assistantMessage)
+
                 _state.value = ChatUiState.Success(chatResponse.reply)
                 _isServerOnline.value = true
             } else {
@@ -99,10 +110,11 @@ class ChatRepository(
     }
     
     /**
-     * Очистка истории текущего диалога.
+     * Очистка истории текущего диалога: и в памяти, и в хранилище.
      */
-    fun clearHistory() {
+    suspend fun clearHistory() {
         _messages.value = emptyList()
         _state.value = ChatUiState.Idle
+        historyStore.clear()
     }
 }

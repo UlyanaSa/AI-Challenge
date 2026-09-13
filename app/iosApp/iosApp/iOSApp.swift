@@ -4,7 +4,8 @@ import shared
 @main
 struct iOSApp: App {
     let repository = ChatRepository(
-        baseUrl: "http://localhost:8080"
+        baseUrl: "http://localhost:8080",
+        historyStore: InMemoryChatHistoryStore()
     )
 
     var body: some Scene {
