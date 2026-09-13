@@ -40,7 +40,7 @@ import com.osvin.aichallenge.data.ResponseFormat
  *  - стоп-слово завершения генерации,
  *  - формат ответа: набор чекбоксов, активен ровно один,
  *    по умолчанию — «Свободная форма»,
- *  - количество прогонов одного и того же вопроса для сверки формата.
+ *  - свой system prompt (общий контекст диалога).
  *
  * @param initial Текущие настройки для предзаполнения формы.
  * @param onApply Сохранение изменённых настроек.
@@ -59,14 +59,11 @@ fun GenerationSettingsSheet(
     var maxTokensText by remember { mutableStateOf(initial.maxTokens.toString()) }
     var stopText by remember { mutableStateOf(initial.stopWords.joinToString(", ")) }
     var responseFormat by remember { mutableStateOf(initial.responseFormat) }
-    var runsText by remember { mutableStateOf(initial.runs.toString()) }
+    var systemPrompt by remember { mutableStateOf(initial.systemPrompt) }
     var temperature by remember { mutableStateOf(initial.temperature) }
 
     val maxTokens = maxTokensText.toIntOrNull()
     val isMaxTokensValid = maxTokens != null && maxTokens in 1..GenerationSettings.MAX_TOKENS_LIMIT
-
-    val runs = runsText.toIntOrNull()
-    val isRunsValid = runs != null && runs in GenerationSettings.MIN_RUNS..GenerationSettings.MAX_RUNS
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -161,7 +158,7 @@ fun GenerationSettingsSheet(
                 label = { Text("Максимум токенов") },
                 supportingText = {
                     if (isMaxTokensValid) {
-                        Text("Ограничивает длину ответа. При обрыве по лимиту сервер сам увеличит бюджет.")
+                        Text("Ограничивает длину ответа модели.")
                     } else {
                         Text("Целое число от 1 до ${GenerationSettings.MAX_TOKENS_LIMIT}")
                     }
@@ -189,6 +186,21 @@ fun GenerationSettingsSheet(
                 singleLine = true
             )
 
+            Spacer(Modifier.height(16.dp))
+
+            // Свой system prompt: общий контекст и правила поведения модели
+            OutlinedTextField(
+                value = systemPrompt,
+                onValueChange = { systemPrompt = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Системный промпт") },
+                placeholder = { Text("Например: отвечай кратко и по делу") },
+                supportingText = {
+                    Text("Общий контекст и правила поведения модели. Передаётся с каждым сообщением.")
+                },
+                minLines = 2
+            )
+
             Spacer(Modifier.height(24.dp))
 
             // Формат ответа — набор чекбоксов, активен ровно один вариант
@@ -200,7 +212,7 @@ fun GenerationSettingsSheet(
             Spacer(Modifier.height(4.dp))
 
             Text(
-                text = "Заданный формат сверяется по каждому прогону.",
+                text = "Модель получит инструкцию следовать выбранному формату.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -217,29 +229,6 @@ fun GenerationSettingsSheet(
                 )
             }
 
-            Spacer(Modifier.height(20.dp))
-
-            // Количество прогонов одного и того же вопроса
-            OutlinedTextField(
-                value = runsText,
-                onValueChange = { runsText = it.filter { char -> char.isDigit() } },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Прогонов одного вопроса") },
-                supportingText = {
-                    if (isRunsValid) {
-                        Text("Вопрос повторится $runs раз(а), ответы сверяются по формату.")
-                    } else {
-                        Text(
-                            "Целое число от ${GenerationSettings.MIN_RUNS} " +
-                                "до ${GenerationSettings.MAX_RUNS}"
-                        )
-                    }
-                },
-                isError = runsText.isNotEmpty() && !isRunsValid,
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-            )
-
             Spacer(Modifier.height(16.dp))
 
             Row(
@@ -252,7 +241,7 @@ fun GenerationSettingsSheet(
                         maxTokensText = GenerationSettings.DEFAULT_MAX_TOKENS.toString()
                         stopText = ""
                         responseFormat = ResponseFormat.FREE_FORM
-                        runsText = GenerationSettings.DEFAULT_RUNS.toString()
+                        systemPrompt = ""
                         temperature = GenerationSettings.DEFAULT_TEMPERATURE
                     }
                 ) {
@@ -269,12 +258,12 @@ fun GenerationSettingsSheet(
                                 maxTokens = maxTokens ?: GenerationSettings.DEFAULT_MAX_TOKENS,
                                 stopWords = parseStopWords(stopText),
                                 responseFormat = responseFormat,
-                                runs = runs ?: GenerationSettings.DEFAULT_RUNS,
+                                systemPrompt = systemPrompt,
                                 temperature = temperature
                             )
                         )
                     },
-                    enabled = isMaxTokensValid && isRunsValid
+                    enabled = isMaxTokensValid
                 ) {
                     Text("Применить")
                 }

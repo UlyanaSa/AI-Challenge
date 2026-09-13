@@ -153,10 +153,9 @@ fun Application.module() {
 
         /**
          * Основной endpoint для чата.
-         * Транспортный адаптер: принимает HTTP-запрос, передаёт его агенту
-         * ([LlmAgent]) и возвращает ответ клиенту. Вся работа с моделью —
-         * сборка запроса, прогоны, повтор при обрыве по лимиту, сверка формата
-         * и отчёт — инкапсулирована в агенте.
+         * Транспортный адаптер: принимает HTTP-запрос, передаёт набор параметров
+         * агенту ([LlmAgent]) и возвращает ответ клиенту. Вся работа с моделью
+         * инкапсулирована в агенте.
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
@@ -170,9 +169,10 @@ fun Application.module() {
                     model = request.model,
                     maxTokens = request.maxTokens,
                     stop = request.stop,
-                    runs = request.runs,
                     format = request.format,
-                    temperature = request.temperature
+                    temperature = request.temperature,
+                    systemPrompt = request.systemPrompt,
+                    history = request.history ?: emptyList()
                 )
             )
 

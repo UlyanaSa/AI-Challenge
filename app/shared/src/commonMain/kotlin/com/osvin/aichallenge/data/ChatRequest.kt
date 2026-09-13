@@ -4,15 +4,15 @@ import kotlinx.serialization.Serializable
 
 /**
  * Модель запроса к чат-серверу.
- * История диалога не передаётся: каждый вопрос проверяется изолированно
- * (заданное число прогонов одного и того же вопроса).
-lf * @param message Текущее сообщение пользователя.
+ *
+ * @param message Текущее сообщение пользователя.
  * @param model Идентификатор модели DeepSeek (см. [GenerationSettings.MODELS]).
  * @param maxTokens Максимальное количество токенов в ответе — ограничение длины ответа.
  * @param stop Стоп-слова завершения генерации.
- * @param runs Количество прогонов одного и того же вопроса для сверки формата ответа.
  * @param format Канонический ключ формата ответа (см. [ResponseFormat.key]).
  * @param temperature Температура генерации (0.0–2.0); по умолчанию 0.7.
+ * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
+ * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
  */
 @Serializable
 data class ChatRequest(
@@ -20,7 +20,8 @@ data class ChatRequest(
     val model: String? = null,
     val maxTokens: Int? = null,
     val stop: List<String>? = null,
-    val runs: Int? = null,
     val format: String? = null,
-    val temperature: Double? = null
+    val temperature: Double? = null,
+    val systemPrompt: String? = null,
+    val history: List<ChatMessage>? = null
 )

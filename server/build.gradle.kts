@@ -14,6 +14,7 @@ application {
 
 dependencies {
     api(project(":core"))
+    implementation(project(":agent"))
     implementation(libs.bundles.ktor.server)
     implementation(libs.bundles.ktor.client)
     implementation(libs.ktor.serialization.kotlinx.json)

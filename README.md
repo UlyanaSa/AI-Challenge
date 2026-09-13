@@ -176,33 +176,36 @@
 
 **Результат:** агент принимает запрос и корректно вызывает LLM через API.
 
-**Заключение.** Вся работа с моделью вынесена из HTTP-маршрута в отдельную сущность — агент `LlmAgent` (`server/src/main/kotlin/com/osvin/aichallenge/agent/LlmAgent.kt`):
+**Заключение.** Вся работа с моделью вынесена из HTTP-маршрута в отдельную сущность — агент `LlmAgent`, размещённый в отдельном Gradle-модуле `:agent` (`agent/src/main/kotlin/com/osvin/aichallenge/agent/LlmAgent.kt`). Сервер зависит от модуля (`implementation(project(":agent"))`), но не содержит логики обращения к модели:
 
-- **`LlmAgent`** — сам агент. Инкапсулирует полный цикл: нормализацию настроек (модель, лимит токенов, температура, стоп-слова, формат), сборку сообщений (системная инструкция формата + запрос пользователя), прогоны запроса, повтор при обрыве ответа по лимиту токенов, сверку ответа с заданным форматом и сборку готового текста для интерфейса. Возвращает `AgentResult` — ответ и расход токенов последнего прогона.
+- **`LlmAgent`** — сам агент: принимает набор параметров `AgentOptions` (модель, лимит токенов, температура, стоп-слова, формат, свой system prompt и история диалога), нормализует их к допустимым границам, собирает сообщения (system prompt → инструкция формата → история → текущий запрос), делает один вызов LLM через `LlmClient` и возвращает `AgentResult` — ответ модели и расход токенов.
 - **`LlmClient`** — контракт транспорта к LLM API. Агент не знает про HTTP: транспорт передаётся снаружи, поэтому логика агента тестируется без сети.
 - **`DeepSeekClient`** — HTTP-реализация контракта через Ktor: авторизация, отправка `DeepSeekRequest`, разбор ответа и ошибок API.
-- Маршрут `POST /v1/chat/completions` стал тонким адаптером: принять `ChatRequest`, создать агента через `DeepSeekClient`, вызвать `agent.run(...)`, вернуть `ChatResponse`. Логики обращения к модели в маршруте больше нет.
+- **`GenerationFormat`, DTO `DeepSeekRequest`/`DeepSeekResponse`/`ChatMessage` и `AppConfig`** — формат ответа, модели LLM API и конфигурация агента; лежат в том же модуле `:agent`.
+- Маршрут `POST /v1/chat/completions` в `:server` стал тонким адаптером: принять `ChatRequest` (включая `systemPrompt` и `history`), создать агента через `DeepSeekClient`, вызвать `agent.run(...)`, вернуть `ChatResponse`. Логики обращения к модели в маршруте больше нет.
 
-Интерфейс — существующий чат (Compose Multiplatform: Android / iOS / Web): он отправляет запрос на тот же endpoint по HTTP и показывает ответ агента сообщением ассистента. Формат ответа сервера не изменился, поэтому UI работает без правок.
+Многократные прогоны одного вопроса и сверка формата убраны: агент просто ходит в API с заданными параметрами. Параметр `format` остался — он влияет на запрос (системная инструкция и JSON-режим ответа).
 
-**Проверка.** Юнит-тесты агента (`server/src/test/kotlin/com/osvin/aichallenge/agent/LlmAgentTest.kt`) на подменном `LlmClient` проверяют без сети: сборку запроса (системная инструкция формата + сообщение пользователя, модель / температура / лимит / стоп-слова), включение JSON-режима для строгого формата, повтор с увеличенным бюджетом при обрыве по лимиту, пометку рассогласования формата и число прогонов с расходом токенов последнего.
+Интерфейс — существующий чат (Compose Multiplatform: Android / iOS / Web): он отправляет запрос на тот же endpoint по HTTP и показывает ответ агента сообщением ассистента. Чат передаёт агенту свой system prompt из шторки настроек и предыдущие сообщения диалога, поэтому модель отвечает с учётом контекста. Формат ответа сервера не изменился.
 
-Реальный прогон через API (сервер поднят, запрос отправлен HTTP-клиентом):
+**Проверка.** Юнит-тесты агента (`agent/src/test/kotlin/com/osvin/aichallenge/agent/LlmAgentTest.kt`) на подменном `LlmClient` проверяют без сети: сборку одного запроса (модель / температура / лимит / стоп-слова), порядок сообщений (system prompt → инструкция формата → история → текущий запрос), включение JSON-режима для строгого формата и возврат ответа модели с расходом токенов.
+
+Запрос через API с system prompt и историей (сервер поднят, запрос отправлен HTTP-клиентом; имя есть только в истории):
 
 ```
 curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"message":"Ответь одним словом: столица Франции?","model":"deepseek-v4-flash","maxTokens":64,"runs":1,"format":"FREE_FORM","temperature":0}'
+  -d '{"message":"Как меня зовут? Ответь одним словом.","model":"deepseek-v4-flash","maxTokens":128,"format":"FREE_FORM","temperature":0,
+       "systemPrompt":"Отвечай предельно кратко, одним словом.",
+       "history":[{"role":"user","content":"Меня зовут Улан"},{"role":"assistant","content":"Приятно познакомиться, Улан"}]}'
 ```
 
 ```
 HTTP 200
-{"success":true,"reply":"=== Настройки ===\nМодель: deepseek-v4-flash\nФормат: Свободная форма\n…
-\n=== Ответ ===\n--- Прогон 1 (последний успешный) ---\nПариж",
- "usage":{"prompt_tokens":42,"completion_tokens":20,"total_tokens":62}}
+{"success":true,"reply":"Улан","usage":{"prompt_tokens":75,"completion_tokens":50,"total_tokens":125}}
 ```
 
-Агент принял запрос, вызвал LLM через API и вернул корректный ответ (`Париж`).
+Агент собрал сообщения из system prompt, истории и текущего запроса, вызвал LLM через API и вернул ответ модели как есть (`Улан`).
 
 
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
@@ -223,7 +226,12 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
   The most important subfolder is [commonMain](./core/src/commonMain/kotlin). If preferred, you
   can add code to the platform-specific folders here too.
 
-* [/server](./server/src/main/kotlin) is for the Ktor server application.
+* [/agent](./agent/src/main/kotlin) is a separate module with the LLM agent logic: the `LlmAgent` itself,
+  the `LlmClient` transport contract, the Ktor `DeepSeekClient` implementation, the response formats
+  and the DeepSeek API DTOs. The server depends on it and only adapts HTTP.
+
+* [/server](./server/src/main/kotlin) is for the Ktor server application: HTTP routes, server plugins
+  and the client-facing request/response models.
 
 ### Running the apps
 
@@ -241,6 +249,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 Use the run button in your IDE's editor gutter, or run tests using Gradle tasks:
 
 - Android tests: `./gradlew :app:shared:testAndroidHostTest`
+- Agent tests: `./gradlew :agent:test`
 - Server tests: `./gradlew :server:test`
 - Web tests:
   - Wasm target: `./gradlew :app:shared:wasmJsTest`

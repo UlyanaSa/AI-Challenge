@@ -72,9 +72,10 @@ class ChatRepository(
                         model = settings.model,
                         maxTokens = settings.maxTokens,
                         stop = settings.stopWords.ifEmpty { null },
-                        runs = settings.runs,
                         format = settings.responseFormat.key,
-                        temperature = settings.temperature
+                        temperature = settings.temperature,
+                        systemPrompt = settings.systemPrompt.ifBlank { null },
+                        history = _messages.value.takeIf { it.isNotEmpty() }
                     )
                 )
             }
