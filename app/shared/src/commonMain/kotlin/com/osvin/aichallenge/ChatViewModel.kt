@@ -32,13 +32,6 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Применение настроек генерации из шторки настроек.
-     */
-    fun updateSettings(settings: GenerationSettings) {
-        _settings.value = settings
-    }
-
-    /**
      * Запуск проверки доступности сервера.
      */
     fun checkHealth() {
@@ -54,6 +47,14 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
         viewModelScope.launch {
             repository.sendMessage(text, _settings.value)
         }
+    }
+
+    /**
+     * Начало нового диалога: применяет настройки агента и очищает историю.
+     */
+    fun startNewChat(settings: GenerationSettings) {
+        _settings.value = settings
+        repository.clearHistory()
     }
 
     /**

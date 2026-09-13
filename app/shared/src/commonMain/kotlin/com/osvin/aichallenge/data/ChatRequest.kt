@@ -9,7 +9,6 @@ import kotlinx.serialization.Serializable
  * @param model Идентификатор модели DeepSeek (см. [GenerationSettings.MODELS]).
  * @param maxTokens Максимальное количество токенов в ответе — ограничение длины ответа.
  * @param stop Стоп-слова завершения генерации.
- * @param format Канонический ключ формата ответа (см. [ResponseFormat.key]).
  * @param temperature Температура генерации (0.0–2.0); по умолчанию 0.7.
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
@@ -20,7 +19,6 @@ data class ChatRequest(
     val model: String? = null,
     val maxTokens: Int? = null,
     val stop: List<String>? = null,
-    val format: String? = null,
     val temperature: Double? = null,
     val systemPrompt: String? = null,
     val history: List<ChatMessage>? = null

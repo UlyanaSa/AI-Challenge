@@ -169,7 +169,6 @@ fun Application.module() {
                     model = request.model,
                     maxTokens = request.maxTokens,
                     stop = request.stop,
-                    format = request.format,
                     temperature = request.temperature,
                     systemPrompt = request.systemPrompt,
                     history = request.history ?: emptyList()

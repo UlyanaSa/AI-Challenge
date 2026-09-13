@@ -1,31 +1,6 @@
 package com.osvin.aichallenge.data
 
 /**
- * Формат ответа модели, выбираемый в шторке настроек.
- * Варианты взаимоисключающие: активен ровно один, по умолчанию — FREE_FORM.
- *
- * @param key Канонический ключ формата, передаётся на сервер; сервер по нему
- *            подбирает инструкцию для модели.
- * @param label Подпись варианта в шторке настроек.
- */
-enum class ResponseFormat(
-    val key: String,
-    val label: String
-) {
-    /** Свободная форма — без дополнительных требований к построению ответа. */
-    FREE_FORM("FREE_FORM", "Свободная форма"),
-
-    /** Нумерованные пункты, каждый пункт — одно предложение. */
-    BULLET_SENTENCE("BULLET_SENTENCE", "Нумерованные пункты, каждый пункт — одно предложение"),
-
-    /** Чёткий JSON с полями о породе. */
-    STRICT_JSON(
-        "STRICT_JSON",
-        "Чёткий JSON (breed, lifespan, color, origin, temperament)"
-    )
-}
-
-/**
  * Модель DeepSeek, доступная в шторке настроек.
  * Три модели взяты из живого списка DeepSeek /v1/models:
  * начало, середина и конец списка (день 5: сравнение версий моделей).
@@ -49,7 +24,6 @@ data class ModelOption(
  *                  ограничение длины ответа.
  * @param stopWords Стоп-слова завершения: генерация останавливается, как только модель
  *                  начинает выдавать одно из этих слов.
- * @param responseFormat Формат ответа (см. [ResponseFormat]); по умолчанию — свободная форма.
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели;
  *                     пустая строка — не передаётся.
  * @param temperature Температура генерации (0.0–2.0): 0 — детерминированный ответ,
@@ -59,7 +33,6 @@ data class GenerationSettings(
     val model: String = DEFAULT_MODEL,
     val maxTokens: Int = DEFAULT_MAX_TOKENS,
     val stopWords: List<String> = emptyList(),
-    val responseFormat: ResponseFormat = ResponseFormat.FREE_FORM,
     val systemPrompt: String = "",
     val temperature: Double = DEFAULT_TEMPERATURE
 ) {

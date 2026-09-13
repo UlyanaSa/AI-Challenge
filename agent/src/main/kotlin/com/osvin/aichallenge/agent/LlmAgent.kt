@@ -1,6 +1,5 @@
 package com.osvin.aichallenge.agent
 
-import com.osvin.aichallenge.GenerationFormat
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.config.AppConfig
@@ -17,7 +16,6 @@ data class AgentOptions(
     val model: String? = null,
     val maxTokens: Int? = null,
     val stop: List<String>? = null,
-    val format: String? = null,
     val temperature: Double? = null,
     val systemPrompt: String? = null,
     val history: List<ChatMessage> = emptyList()
@@ -49,8 +47,8 @@ data class AgentResult(
  *
  * Агент не знает про HTTP и про сервер: обращение к модели идёт через [LlmClient].
  * Внутри агента только подготовка запроса: нормализация настроек (модель, лимит
- * токенов, температура, стоп-слова, формат) и сборка сообщений — свой system prompt,
- * инструкция формата, история диалога и текущий запрос пользователя.
+ * токенов, температура, стоп-слова) и сборка сообщений — свой system prompt,
+ * история диалога и текущий запрос пользователя.
  *
  * @param llm Транспорт к LLM API.
  */
@@ -62,7 +60,6 @@ class LlmAgent(private val llm: LlmClient) {
      * @param options Настройки генерации; null-поля заменяются значениями по умолчанию.
      */
     suspend fun run(userMessage: String, options: AgentOptions = AgentOptions()): AgentResult {
-        val format = GenerationFormat.fromKey(options.format)
         val model = options.model ?: AppConfig.DEFAULT_MODEL
         val maxTokens = (options.maxTokens ?: AppConfig.DEFAULT_MAX_TOKENS)
             .coerceIn(1, AppConfig.MAX_TOKEN_CEILING)
@@ -75,11 +72,10 @@ class LlmAgent(private val llm: LlmClient) {
             ?.take(AppConfig.MAX_STOP_SEQUENCES)
             ?.takeIf { it.isNotEmpty() }
 
-        // Сообщения модели: свой system prompt, инструкция формата, история
-        // диалога и текущий запрос пользователя — в этом порядке.
+        // Сообщения модели: свой system prompt, история диалога и текущий
+        // запрос пользователя — в этом порядке.
         val messages = buildList {
             options.systemPrompt?.takeIf { it.isNotBlank() }?.let { add(ChatMessage("system", it)) }
-            format.instruction?.let { add(ChatMessage("system", it)) }
             options.history.forEach { message ->
                 if (message.content.isNotBlank()) add(message)
             }
@@ -92,8 +88,7 @@ class LlmAgent(private val llm: LlmClient) {
                 messages = messages,
                 maxTokens = maxTokens,
                 temperature = temperature,
-                stop = stopSequences,
-                responseFormat = if (format.jsonMode) GenerationFormat.STRICT_JSON_MODE else null
+                stop = stopSequences
             )
         )
 

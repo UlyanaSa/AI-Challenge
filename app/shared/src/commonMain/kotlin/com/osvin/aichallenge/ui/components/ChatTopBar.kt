@@ -7,17 +7,20 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 
 /**
  * Верхняя панель чата.
  * @param isOnline Статус подключения сервера.
  * @param onTitleClick Обработчик нажатия на заголовок (для ручной проверки связи).
+ * @param onNewChat Создание нового чата с настройкой агента.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(
     isOnline: Boolean?,
     onTitleClick: () -> Unit,
+    onNewChat: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
@@ -34,6 +37,12 @@ fun ChatTopBar(
                     fontWeight = FontWeight.Bold
                 )
                 ConnectionStatus(isOnline)
+            }
+        },
+        actions = {
+            // Кнопка создания нового чата: возвращает к настройке агента
+            IconButton(onClick = onNewChat) {
+                Text("＋", fontSize = 20.sp)
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(

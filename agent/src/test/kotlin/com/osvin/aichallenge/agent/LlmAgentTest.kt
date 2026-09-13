@@ -1,6 +1,5 @@
 package com.osvin.aichallenge.agent
 
-import com.osvin.aichallenge.GenerationFormat
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.DeepSeekResponse
@@ -37,7 +36,7 @@ class LlmAgentTest {
     /** Агент формулирует ровно один запрос к API: сообщение пользователя + настройки генерации. */
     @Test
     fun agentSendsUserMessageAndGenerationSettings() = runBlocking {
-        val llm = FakeLlmClient(response("1. Первый пункт.\n2. Второй пункт."))
+        val llm = FakeLlmClient(response("Привет"))
         val agent = LlmAgent(llm)
 
         agent.run(
@@ -46,8 +45,7 @@ class LlmAgentTest {
                 model = "deepseek-v4-pro",
                 maxTokens = 512,
                 temperature = 0.2,
-                stop = listOf("  СТОП  ", "   "),
-                format = GenerationFormat.BULLET_SENTENCE.key
+                stop = listOf("  СТОП  ", "   ")
             )
         )
 
@@ -56,23 +54,7 @@ class LlmAgentTest {
         assertEquals(512, request.maxTokens)
         assertEquals(0.2, request.temperature)
         assertEquals(listOf("СТОП"), request.stop)
-        assertEquals(
-            listOf(
-                ChatMessage("system", GenerationFormat.BULLET_SENTENCE.instruction!!),
-                ChatMessage("user", "Опиши породу")
-            ),
-            request.messages
-        )
-    }
-
-    /** Строгий JSON-формат требует от API ответа ровно одним JSON-объектом. */
-    @Test
-    fun strictJsonFormatEnablesJsonMode() = runBlocking {
-        val llm = FakeLlmClient(response("{}"))
-
-        LlmAgent(llm).run("Порода", AgentOptions(format = GenerationFormat.STRICT_JSON.key))
-
-        assertEquals(GenerationFormat.STRICT_JSON_MODE, llm.requests.single().responseFormat)
+        assertEquals(listOf(ChatMessage("user", "Опиши породу")), request.messages)
     }
 
     /** Свой system prompt и история диалога идут перед текущим запросом. */
@@ -88,8 +70,7 @@ class LlmAgentTest {
                     ChatMessage("user", "Привет"),
                     ChatMessage("assistant", "Здравствуйте"),
                     ChatMessage("assistant", "   ")
-                ),
-                format = GenerationFormat.FREE_FORM.key
+                )
             )
         )
 
@@ -109,7 +90,7 @@ class LlmAgentTest {
     fun agentReturnsModelReplyAndUsage() = runBlocking {
         val llm = FakeLlmClient(response("Париж", promptTokens = 42, completionTokens = 3))
 
-        val result = LlmAgent(llm).run("Столица Франции?", AgentOptions(format = GenerationFormat.FREE_FORM.key))
+        val result = LlmAgent(llm).run("Столица Франции?")
 
         assertEquals("Париж", result.reply)
         assertEquals(42, result.promptTokens)
