@@ -1,9 +1,11 @@
 package com.osvin.aichallenge
 
 import com.osvin.aichallenge.agent.AgentOptions
+import com.osvin.aichallenge.agent.ContextStrategy
 import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
+import com.osvin.aichallenge.agent.InMemoryFactsStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
@@ -66,6 +68,14 @@ val client = HttpClient(CIO) {
  * а сводка должна пережить запрос и заменить свёрнутые сообщения в следующем.
  */
 val summaryStore = InMemorySummaryStore()
+
+/**
+ * Память фактов диалогов: отдельно от сообщений, по сессии.
+ *
+ * Как и сводки, хранилище общее на все запросы: агент создаётся на каждый запрос,
+ * а накопленные факты должны пережить запрос и обновляться в следующем.
+ */
+val factsStore = InMemoryFactsStore()
 
 /**
  * Точка входа в приложение.
@@ -227,19 +237,14 @@ fun Application.module() {
             val apiKey = deepSeekApiKey()
                 ?: error("API ключ не настроен")
 
-            val agent = LlmAgent(DeepSeekClient(apiKey, client), summaryStore = summaryStore)
+            val agent = LlmAgent(
+                DeepSeekClient(apiKey, client),
+                summaryStore = summaryStore,
+                factsStore = factsStore
+            )
             val result = agent.run(
                 userMessage = request.message,
-                options = AgentOptions(
-                    model = request.model,
-                    maxTokens = request.maxTokens,
-                    stop = request.stop,
-                    temperature = request.temperature,
-                    systemPrompt = request.systemPrompt,
-                    history = request.history ?: emptyList(),
-                    sessionId = request.sessionId,
-                    compressHistory = request.compressHistory ?: true
-                )
+                options = request.toAgentOptions()
             )
 
             call.respond(
@@ -260,6 +265,7 @@ fun Application.module() {
         delete("/v1/chats/{sessionId}") {
             val sessionId = call.parameters["sessionId"].orEmpty()
             summaryStore.clear(sessionId)
+            factsStore.clear(sessionId)
             call.respond(HttpStatusCode.NoContent)
         }
     }

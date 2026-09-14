@@ -3,6 +3,7 @@ package com.osvin.aichallenge.agent
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.DeepSeekResponse
+import com.osvin.aichallenge.models.DialogBranch
 import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -101,18 +102,27 @@ internal fun stage(title: String) {
     log("режим: $mode")
 }
 
-/** Настройки демонстрации: модель, история диалога, сессия и переключатель сжатия. */
+/**
+ * Настройки демонстрации: модель, стратегия управления контекстом, история диалога
+ * и сессия, по которой живут сводка и память фактов.
+ */
 internal fun options(
     history: List<ChatMessage>,
     maxTokens: Int? = null,
     sessionId: String? = null,
-    compressHistory: Boolean = false
+    strategy: ContextStrategy = ContextStrategy.FULL,
+    windowMessages: Int? = null,
+    branches: List<DialogBranch> = emptyList(),
+    activeBranchId: String? = null
 ) = AgentOptions(
     model = DEMO_MODEL,
     maxTokens = maxTokens,
     history = history,
     sessionId = sessionId,
-    compressHistory = compressHistory
+    strategy = strategy,
+    windowMessages = windowMessages,
+    branches = branches,
+    activeBranchId = activeBranchId
 )
 
 /** Стоимость вызова по тарифу модели: вход и ответ считаются отдельно. */

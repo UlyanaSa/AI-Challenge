@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.osvin.aichallenge.data.Chat
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.DialogBranch
+import com.osvin.aichallenge.data.Fact
 import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.repository.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +26,9 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
 
     // Экспонируем потоки данных из репозитория для UI
     val messages: StateFlow<List<ChatMessage>> = repository.messages
+    val branches: StateFlow<List<DialogBranch>> = repository.branches
+    val activeBranchId: StateFlow<String?> = repository.activeBranchId
+    val facts: StateFlow<List<Fact>> = repository.facts
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
 
@@ -78,6 +83,24 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun deleteChat(id: String) {
         viewModelScope.launch {
             repository.deleteChat(id)
+        }
+    }
+
+    /**
+     * Ветка от сообщения активного пути: продолжение диалога отдельно от соседей.
+     */
+    fun createBranchFrom(message: ChatMessage) {
+        viewModelScope.launch {
+            repository.createBranchFrom(message)
+        }
+    }
+
+    /**
+     * Переключение активной ветки диалога; null — основная линия.
+     */
+    fun switchBranch(branchId: String?) {
+        viewModelScope.launch {
+            repository.switchBranch(branchId)
         }
     }
 

@@ -5,7 +5,9 @@ package com.osvin.aichallenge.data
  *
  * У каждого чата своя история и своя сессия агента: идентификатор чата ([Chat.id])
  * одновременно служит идентификатором сессии, поэтому сообщения и сессия живут
- * ровно до удаления чата.
+ * ровно до удаления чата. Ветки диалога ([DialogBranch]) тоже принадлежат чату:
+ * сообщение помечается веткой ([ChatMessage.branchId]), а активная ветка хранится
+ * в самом чате ([Chat.activeBranchId]).
  *
  * Платформенные реализации: на Android — Room ([RoomChatStore]),
  * на остальных таргетах — [InMemoryChatStore].
@@ -20,7 +22,7 @@ interface ChatStore {
     /** Создаёт чат. */
     suspend fun create(chat: Chat)
 
-    /** Сообщения чата в порядке отправки. */
+    /** Сообщения чата в порядке отправки: все ветки вместе, у каждого своя метка. */
     suspend fun messages(chatId: String): List<ChatMessage>
 
     /** Дописывает сообщение в конец чата и обновляет время последнего сообщения. */
@@ -29,17 +31,30 @@ interface ChatStore {
     /** Меняет заголовок чата. */
     suspend fun retitle(chatId: String, title: String)
 
-    /** Удаляет чат вместе с его сообщениями и сессией. */
+    /** Удаляет чат вместе с его сообщениями, ветками и сессией. */
     suspend fun delete(chatId: String)
+
+    /** Ветки чата в порядке создания. */
+    suspend fun branches(chatId: String): List<DialogBranch>
+
+    /** Активная ветка чата; null — основная линия диалога. */
+    suspend fun activeBranch(chatId: String): String?
+
+    /** Добавляет ветку чата, не переключая на неё диалог. */
+    suspend fun createBranch(chatId: String, branch: DialogBranch)
+
+    /** Делает ветку активной; null — возвращает диалог на основную линию. */
+    suspend fun setActiveBranch(chatId: String, branchId: String?)
 }
 
 /**
- * Хранилище в памяти процесса: чаты и сообщения не переживают перезапуск.
+ * Хранилище в памяти процесса: чаты, сообщения и ветки не переживают перезапуск.
  * Используется на таргетах, где недоступен Room (iOS, Web), и в тестах.
  */
 class InMemoryChatStore : ChatStore {
     private val chats = mutableMapOf<String, Chat>()
     private val messages = mutableMapOf<String, MutableList<ChatMessage>>()
+    private val branches = mutableMapOf<String, MutableList<DialogBranch>>()
 
     override suspend fun chats(): List<Chat> = chats.values.sortedByDescending { it.updatedAt }
 
@@ -63,5 +78,18 @@ class InMemoryChatStore : ChatStore {
     override suspend fun delete(chatId: String) {
         chats.remove(chatId)
         messages.remove(chatId)
+        branches.remove(chatId)
+    }
+
+    override suspend fun branches(chatId: String): List<DialogBranch> = branches[chatId].orEmpty().toList()
+
+    override suspend fun activeBranch(chatId: String): String? = chats[chatId]?.activeBranchId
+
+    override suspend fun createBranch(chatId: String, branch: DialogBranch) {
+        branches.getOrPut(chatId) { mutableListOf() } += branch
+    }
+
+    override suspend fun setActiveBranch(chatId: String, branchId: String?) {
+        chats[chatId]?.let { chats[chatId] = it.copy(activeBranchId = branchId) }
     }
 }

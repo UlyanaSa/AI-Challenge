@@ -25,6 +25,10 @@ import kotlin.random.Random
  * Каждый чат — отдельная сессия агента: идентификатор чата ([Chat.id]) уходит на
  * сервер как `sessionId`, поэтому сводка истории на сервере своя у каждого чата.
  * Идентификатор хранится в БД устройства ([ChatStore]), пока чат не удалён.
+ *
+ * Диалог может ветвиться ([DialogBranch]): сообщения всех веток лежат в хранилище,
+ * но в чате ([messages]) и в запросе к модели участвует только путь активной ветки
+ * (см. [DialogBranches]).
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -47,6 +51,15 @@ class ChatRepository(
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+
+    private val _branches = MutableStateFlow<List<DialogBranch>>(emptyList())
+    val branches: StateFlow<List<DialogBranch>> = _branches.asStateFlow()
+
+    private val _activeBranchId = MutableStateFlow<String?>(null)
+    val activeBranchId: StateFlow<String?> = _activeBranchId.asStateFlow()
+
+    private val _facts = MutableStateFlow<List<Fact>>(emptyList())
+    val facts: StateFlow<List<Fact>> = _facts.asStateFlow()
 
     private val _state = MutableStateFlow<ChatUiState>(ChatUiState.Idle)
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -75,39 +88,51 @@ class ChatRepository(
 
     /**
      * Новый чат со своей историей и своей сессией агента.
+     * Диалог начинается с основной линии: веток ещё нет, активной ветки тоже.
      */
     suspend fun createChat(): Chat {
-        val chat = Chat(id = newChatId(), title = NEW_CHAT_TITLE)
+        val chat = Chat(id = newHexId(), title = NEW_CHAT_TITLE)
         store.create(chat)
         _activeChat.value = chat
         _messages.value = emptyList()
+        _branches.value = emptyList()
+        _activeBranchId.value = null
+        _facts.value = emptyList()
         _state.value = ChatUiState.Idle
         _chats.value = store.chats()
         return chat
     }
 
     /**
-     * Открытие чата: поднимаем его сообщения из БД.
+     * Открытие чата: поднимаем его сообщения из БД вместе с ветками.
      * Дальше запросы уходят с идентификатором этого чата, поэтому и сессия агента,
-     * и сводка истории на сервере — те же, что были в прошлый раз.
+     * и сводка истории на сервере — те же, что были в прошлый раз. Диалог
+     * продолжается в той ветке, в которой пользователь остановился.
      */
     suspend fun openChat(id: String) {
         val chat = store.chat(id) ?: return
+        val branches = store.branches(id)
         _activeChat.value = chat
-        _messages.value = store.messages(id)
+        _branches.value = branches
+        _activeBranchId.value = chat.activeBranchId
+        _facts.value = emptyList()
+        _messages.value = DialogBranches.activePath(store.messages(id), branches, chat.activeBranchId)
         _state.value = ChatUiState.Idle
     }
 
     /**
-     * Удаление чата вместе с историей и сессией агента.
-     * На сервере сессию тоже чистим — иначе сводки копились бы в его памяти;
-     * если сервер недоступен, чат на устройстве всё равно удалён.
+     * Удаление чата вместе с историей, ветками и сессией агента.
+     * На сервере сессию тоже чистим — иначе сводки и память фактов копились бы
+     * в его памяти; если сервер недоступен, чат на устройстве всё равно удалён.
      */
     suspend fun deleteChat(id: String) {
         store.delete(id)
         if (_activeChat.value?.id == id) {
             _activeChat.value = null
             _messages.value = emptyList()
+            _branches.value = emptyList()
+            _activeBranchId.value = null
+            _facts.value = emptyList()
             _state.value = ChatUiState.Idle
         }
         _chats.value = store.chats()
@@ -115,7 +140,56 @@ class ChatRepository(
     }
 
     /**
+     * Ветка от сообщения активного пути: точка ветвления — само это сообщение,
+     * поэтому ветка начинается сразу после него и продолжается отдельно от соседей.
+     * Созданная ветка сразу становится активной: пользователь продолжает диалог в ней.
+     */
+    suspend fun createBranchFrom(message: ChatMessage) {
+        val chat = _activeChat.value ?: return
+        val path = DialogBranches.activePath(
+            history = store.messages(chat.id),
+            branches = store.branches(chat.id),
+            activeBranchId = _activeBranchId.value
+        )
+        val index = path.indexOfFirst { it == message }
+        if (index < 0) return
+
+        val branch = DialogBranch(
+            id = newHexId(),
+            // Родитель — ветка самого сообщения: у сообщения основной линии его нет
+            parentId = message.branchId,
+            // Общих с родителем сообщений ровно столько, сколько в пути до этого сообщения
+            forkedAfter = index + 1
+        )
+        store.createBranch(chat.id, branch)
+        switchBranch(branch.id)
+    }
+
+    /**
+     * Переключение активной ветки диалога; null — возврат на основную линию.
+     * Дальше и экран, и запросы к модели видят только путь новой ветки,
+     * а сообщения соседних веток остаются в хранилище со своими метками.
+     */
+    suspend fun switchBranch(branchId: String?) {
+        val chat = _activeChat.value ?: return
+        val branches = store.branches(chat.id)
+        val target = branchId?.takeIf { id -> branches.any { it.id == id } }
+        store.setActiveBranch(chat.id, target)
+        _activeChat.value = chat.copy(activeBranchId = target)
+        _branches.value = branches
+        _activeBranchId.value = target
+        _messages.value = DialogBranches.activePath(store.messages(chat.id), branches, target)
+    }
+
+    /**
      * Отправка сообщения нейросети в активный чат.
+     *
+     * На сервер уезжает вся история чата: агент сам решает, что из неё уходит
+     * в модель, — по выбранной стратегии ([GenerationSettings.strategy]) и по
+     * пути активной ветки (см. [DialogBranches]). Метки веток при истории
+     * сохраняются, иначе агент не собрал бы этот путь, а `branchId`/`branches`
+     * нужны только стратегии «ветки диалога».
+     *
      * @param message Текст сообщения пользователя.
      * @param settings Настройки генерации из шторки настроек.
      */
@@ -129,7 +203,14 @@ class ChatRepository(
         }
 
         _state.value = ChatUiState.Loading
-        
+
+        // Ветка, в которой продолжается диалог: её метку получат оба новых сообщения
+        val activeBranchId = _activeBranchId.value
+        val branches = if (settings.strategy == ContextStrategy.BRANCHES) store.branches(chat.id) else null
+
+        // История чата до этого вопроса: все ветки вместе, у каждой своя метка
+        val history = store.messages(chat.id)
+
         try {
             val response = client.post("$baseUrl/v1/chat/completions") {
                 contentType(ContentType.Application.Json)
@@ -141,24 +222,29 @@ class ChatRepository(
                         stop = settings.stopWords.ifEmpty { null },
                         temperature = settings.temperature,
                         systemPrompt = settings.systemPrompt.ifBlank { null },
-                        history = _messages.value.takeIf { it.isNotEmpty() },
-                        sessionId = chat.id
+                        history = history.takeIf { it.isNotEmpty() },
+                        sessionId = chat.id,
+                        strategy = settings.strategy.wire,
+                        windowMessages = settings.windowMessages,
+                        branchId = activeBranchId.takeIf { branches != null },
+                        branches = branches
                     )
                 )
             }
 
             // Вопрос пользователя попадает в диалог в любом случае: и при ответе,
             // и при ошибке — иначе при пустом ответе модели он пропадает с экрана.
-            val userMessage = ChatMessage(MessageRole.USER, message)
+            val userMessage = ChatMessage(MessageRole.USER, message, branchId = activeBranchId)
             _messages.value += userMessage
             store.append(chat.id, userMessage)
 
-            // Заголовок чата берём из первого вопроса: в списке чатов видно,
-            // о чём каждый диалог.
-            if (_messages.value.count { it.role == MessageRole.USER } == 1) {
+            // Заголовок чата берём из первого вопроса пользователя за всю переписку:
+            // в списке чатов видно, о чём каждый диалог. Считаем по всей истории,
+            // а не по активному пути: в ветке вопрос уже не первый.
+            if (history.none { it.role == MessageRole.USER }) {
                 val title = titleFrom(message)
                 store.retitle(chat.id, title)
-                _activeChat.value = chat.copy(title = title)
+                _activeChat.value = _activeChat.value?.copy(title = title)
             }
             _chats.value = store.chats()
 
@@ -167,11 +253,13 @@ class ChatRepository(
 
                 // Отчёт агента печатаем в лог платформы (на Android — в logcat):
                 // строки те же, что агент пишет на сервере, но видны рядом с приложением.
+                // Память фактов оттуда же попадает в блок на экране чата.
                 chatResponse.tokens?.let { report ->
                     platformLog("agent", report.logEntry(settings.model))
+                    _facts.value = report.facts
                 }
 
-                val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply)
+                val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply, branchId = activeBranchId)
                 _messages.value = _messages.value + assistantMessage
                 store.append(chat.id, assistantMessage)
                 _chats.value = store.chats()
@@ -219,10 +307,12 @@ class ChatRepository(
     }
 
     /**
-     * Идентификатор чата: 32 hex-символа. Он же уходит на сервер как идентификатор
-     * сессии, поэтому у чатов он разный, а у одного чата — один и тот же всегда.
+     * Идентификатор чата и ветки диалога: 32 hex-символа. Идентификатор чата
+     * уходит на сервер как идентификатор сессии, поэтому у чатов он разный,
+     * а у одного чата — один и тот же всегда; идентификатор ветки — её метка
+     * на сообщениях и в структуре веток.
      */
-    private fun newChatId(): String = buildString {
+    private fun newHexId(): String = buildString {
         repeat(32) { append("0123456789abcdef"[Random.nextInt(16)]) }
     }
 

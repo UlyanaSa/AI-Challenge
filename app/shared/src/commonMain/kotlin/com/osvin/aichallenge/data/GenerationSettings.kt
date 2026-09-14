@@ -29,13 +29,20 @@ data class ModelOption(
  *                     сообщение чата.
  * @param temperature Температура генерации (0.0–2.0): 0 — детерминированный ответ,
  *                    0.7 — баланс точности и креативности, 1.2 — креативный.
+ * @param strategy Стратегия управления контекстом диалога: что из истории уходит
+ *                 в модель (см. [ContextStrategy]).
+ * @param windowMessages Сколько последних сообщений отправляют стратегии со скользящим
+ *                 окном и памятью фактов: [ContextStrategy.SLIDING_WINDOW] и
+ *                 [ContextStrategy.FACTS]. Остальные стратегии его не читают.
  */
 data class GenerationSettings(
     val model: String = DEFAULT_MODEL,
     val maxTokens: Int = DEFAULT_MAX_TOKENS,
     val stopWords: List<String> = emptyList(),
     val systemPrompt: String = "",
-    val temperature: Double = DEFAULT_TEMPERATURE
+    val temperature: Double = DEFAULT_TEMPERATURE,
+    val strategy: ContextStrategy = ContextStrategy.SUMMARY,
+    val windowMessages: Int = DEFAULT_WINDOW_MESSAGES
 ) {
     companion object {
         /** Модель по умолчанию: самая быстрая и дешёвая из списка DeepSeek. */
@@ -79,6 +86,15 @@ data class GenerationSettings(
 
         /** Температура генерации по умолчанию. */
         const val DEFAULT_TEMPERATURE = 0.7
+
+        /** Размер окна стратегий «скользящее окно» и «память фактов» по умолчанию. */
+        const val DEFAULT_WINDOW_MESSAGES = 10
+
+        /** Нижняя граница окна в шторке настроек: совсем короткий контекст бесполезен. */
+        const val MIN_WINDOW_MESSAGES = 2
+
+        /** Верхняя граница окна в шторке настроек. */
+        const val MAX_WINDOW_MESSAGES = 100
 
         /**
          * Значения температуры, доступные в шторке настроек:

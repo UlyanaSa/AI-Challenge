@@ -25,11 +25,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.osvin.aichallenge.data.ContextStrategy
 import com.osvin.aichallenge.data.GenerationSettings
 
 /**
- * Форма параметров агента: модель, температура, лимит токенов, стоп-слова
- * и system prompt. Заполняется при создании чата.
+ * Форма параметров агента: модель, температура, стратегия управления контекстом,
+ * лимит токенов, стоп-слова и system prompt. Заполняется при создании чата.
  *
  * @param initial Текущие настройки для предзаполнения формы.
  * @param applyLabel Подпись кнопки применения.
@@ -48,9 +49,15 @@ fun GenerationSettingsForm(
     var stopText by remember(initial) { mutableStateOf(initial.stopWords.joinToString(", ")) }
     var systemPrompt by remember(initial) { mutableStateOf(initial.systemPrompt) }
     var temperature by remember(initial) { mutableStateOf(initial.temperature) }
+    var strategy by remember(initial) { mutableStateOf(initial.strategy) }
+    var windowText by remember(initial) { mutableStateOf(initial.windowMessages.toString()) }
 
     val maxTokens = maxTokensText.toIntOrNull()
     val isMaxTokensValid = maxTokens != null && maxTokens in 1..GenerationSettings.MAX_TOKENS_LIMIT
+
+    val windowMessages = windowText.toIntOrNull()
+    val isWindowValid = windowMessages != null &&
+        windowMessages in GenerationSettings.MIN_WINDOW_MESSAGES..GenerationSettings.MAX_WINDOW_MESSAGES
 
     Column(
         modifier = modifier
@@ -132,6 +139,59 @@ fun GenerationSettingsForm(
 
         Spacer(Modifier.height(20.dp))
 
+        // Стратегия управления контекстом: что из истории уходит в модель (день 10)
+        Text(
+            text = "Стратегия контекста",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Spacer(Modifier.height(4.dp))
+
+        Text(
+            text = "Решает, что из истории диалога уходит в модель: от всей переписки " +
+                "до её сжатия или пути одной ветки.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Spacer(Modifier.height(4.dp))
+
+        ContextStrategy.entries.forEach { option ->
+            RadioOptionRow(
+                title = option.title,
+                subtitle = option.hint,
+                selected = strategy == option,
+                onSelect = { strategy = option }
+            )
+        }
+
+        // Окно нужно только стратегиям, которые берут последние сообщения
+        if (strategy.usesWindow) {
+            Spacer(Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = windowText,
+                onValueChange = { windowText = it.filter { char -> char.isDigit() } },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Окно, сообщений") },
+                supportingText = {
+                    if (isWindowValid) {
+                        Text("Сколько последних сообщений диалога уходит в модель.")
+                    } else {
+                        Text(
+                            "Целое число от ${GenerationSettings.MIN_WINDOW_MESSAGES} " +
+                                "до ${GenerationSettings.MAX_WINDOW_MESSAGES}"
+                        )
+                    }
+                },
+                isError = windowText.isNotEmpty() && !isWindowValid,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
+
         // Ограничение длины ответа = максимальное количество токенов
         OutlinedTextField(
             value = maxTokensText,
@@ -199,6 +259,8 @@ fun GenerationSettingsForm(
                     stopText = ""
                     systemPrompt = ""
                     temperature = GenerationSettings.DEFAULT_TEMPERATURE
+                    strategy = ContextStrategy.SUMMARY
+                    windowText = GenerationSettings.DEFAULT_WINDOW_MESSAGES.toString()
                 }
             ) {
                 Text("Сбросить")
@@ -214,11 +276,13 @@ fun GenerationSettingsForm(
                             maxTokens = maxTokens ?: GenerationSettings.DEFAULT_MAX_TOKENS,
                             stopWords = parseStopWords(stopText),
                             systemPrompt = systemPrompt,
-                            temperature = temperature
+                            temperature = temperature,
+                            strategy = strategy,
+                            windowMessages = windowMessages ?: GenerationSettings.DEFAULT_WINDOW_MESSAGES
                         )
                     )
                 },
-                enabled = isMaxTokensValid
+                enabled = isMaxTokensValid && (!strategy.usesWindow || isWindowValid)
             ) {
                 Text(applyLabel)
             }

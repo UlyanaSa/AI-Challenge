@@ -12,6 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.osvin.aichallenge.data.Fact
 
 /**
  * Индикатор статуса подключения к серверу.
@@ -95,6 +96,35 @@ fun ErrorMessage(message: String, modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 style = MaterialTheme.typography.labelSmall
             )
+        }
+    }
+}
+
+/**
+ * Память фактов диалога (стратегия «память фактов»): что агент вынес из переписки.
+ * Компактный список «ключ — значение» из последнего ответа: видно, чем агент
+ * помнит диалог, когда старшие сообщения в модель уже не уходят.
+ */
+@Composable
+fun FactsMemory(facts: List<Fact>, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(8.dp),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                text = "Память фактов",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            facts.forEach { fact ->
+                Text(
+                    text = "• ${fact.key}: ${fact.value}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                )
+            }
         }
     }
 }

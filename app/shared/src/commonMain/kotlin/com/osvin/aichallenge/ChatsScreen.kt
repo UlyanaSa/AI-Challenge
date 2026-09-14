@@ -197,11 +197,12 @@ private fun ChatRow(
 }
 
 /**
- * Когда в чате писали последний раз: «только что», «12 мин назад», «5 дней назад».
- * Дату считаем по времени последнего сообщения, календарь для этого не нужен.
+ * Когда это было: «только что», «12 мин назад», «5 дней назад».
+ * Дату считаем от момента [at], календарь для этого не нужен: чат показывает
+ * так время последнего сообщения.
  */
-private fun lastActivity(updatedAt: Long, now: Long = System.currentTimeMillis()): String {
-    val minutes = (now - updatedAt) / 60_000
+internal fun lastActivity(at: Long, now: Long = System.currentTimeMillis()): String {
+    val minutes = (now - at) / 60_000
     return when {
         minutes < 1 -> "только что"
         minutes < 60 -> "$minutes мин назад"

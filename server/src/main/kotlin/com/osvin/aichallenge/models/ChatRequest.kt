@@ -16,9 +16,12 @@ import kotlinx.serialization.json.JsonObject
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  *        Null или пусто — его роль играет первое сообщение диалога (см. [history]).
  * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
- * @param sessionId Идентификатор сессии диалога: по нему сервер хранит сводку истории.
- * @param compressHistory Сжимать историю: последние сообщения идут как есть, старшие — сводкой.
- *        По умолчанию включено; `false` — отправить историю целиком (для сравнения).
+ * @param sessionId Идентификатор сессии диалога: по нему сервер хранит сводку истории и память фактов.
+ * @param strategy Стратегия управления контекстом: `full`, `sliding_window`, `facts`,
+ *        `branches` или `summary` (см. `ContextStrategy`). Null — `summary`, как в дне 9.
+ * @param windowMessages Сколько последних сообщений отправляют стратегии окна и фактов.
+ * @param branchId Активная ветка диалога: её путь уходит в модель; null — основная линия.
+ * @param branches Ветки диалога: точки ветвления (нужны стратегии «ветки»).
  */
 @Serializable
 data class ChatRequest(
@@ -30,5 +33,8 @@ data class ChatRequest(
     val systemPrompt: String? = null,
     val history: List<ChatMessage>? = null,
     val sessionId: String? = null,
-    val compressHistory: Boolean? = null
+    val strategy: String? = null,
+    val windowMessages: Int? = null,
+    val branchId: String? = null,
+    val branches: List<DialogBranch>? = null
 )

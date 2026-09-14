@@ -3,7 +3,7 @@ package com.osvin.aichallenge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -13,11 +13,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.ContextStrategy
+import com.osvin.aichallenge.data.DialogBranches
 import com.osvin.aichallenge.ui.components.*
 
 /**
  * Экран одного чата: история активного чата и обмен сообщениями с агентом.
  * Соединяет ViewModel с пользовательским интерфейсом.
+ *
+ * Показывается только путь активной ветки: сообщения соседних веток лежат
+ * в хранилище, но в чате не мешаются (см. [com.osvin.aichallenge.data.DialogBranches]).
  *
  * @param title Заголовок активного чата для верхней панели.
  * @param onBack Возврат к списку чатов.
@@ -32,6 +37,10 @@ fun ChatScreen(
 ) {
     // Подписка на состояния из ViewModel
     val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val branches by viewModel.branches.collectAsStateWithLifecycle()
+    val activeBranchId by viewModel.activeBranchId.collectAsStateWithLifecycle()
+    val facts by viewModel.facts.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
 
@@ -81,6 +90,11 @@ fun ChatScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Память фактов: что агент вынес из диалога (стратегия «память фактов»)
+                if (settings.strategy == ContextStrategy.FACTS && facts.isNotEmpty()) {
+                    item { FactsMemory(facts) }
+                }
+
                 // Пустой чат: подсказка вместо пустого экрана
                 if (messages.isEmpty() && uiState !is ChatUiState.Loading) {
                     item {
@@ -97,9 +111,14 @@ fun ChatScreen(
                     }
                 }
 
-                // Список сообщений
-                items(messages) { message ->
-                    ChatBubble(message = message)
+                // Список сообщений активного пути: на каждом видно варианты продолжения
+                itemsIndexed(messages) { index, message ->
+                    ChatBubble(
+                        message = message,
+                        choice = DialogBranches.choiceAfter(messages, index, branches, activeBranchId),
+                        onSelectOption = { viewModel.switchBranch(it) },
+                        onBranchFrom = { viewModel.createBranchFrom(message) }
+                    )
                 }
                 
                 // Отображение индикаторов загрузки или ошибок

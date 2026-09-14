@@ -128,7 +128,7 @@ class HistoryCompressorTest {
         val client = ScriptedClient(listOf("бюджет 5 000 рублей", "ответ модели"))
         val result = LlmAgent(client).run(
             "Какой бюджет я называл?",
-            AgentOptions(history = dialog(25), sessionId = "session-1", compressHistory = true)
+            AgentOptions(history = dialog(25), sessionId = "session-1", strategy = ContextStrategy.SUMMARY)
         )
 
         val sent = client.requests.last().messages
@@ -152,7 +152,7 @@ class HistoryCompressorTest {
         val client = FailingSummaryClient()
         val result = LlmAgent(client).run(
             "Какой бюджет я называл?",
-            AgentOptions(history = dialog(25), sessionId = "session-1", compressHistory = true)
+            AgentOptions(history = dialog(25), sessionId = "session-1", strategy = ContextStrategy.SUMMARY)
         )
 
         val sent = client.requests.last().messages
@@ -168,7 +168,7 @@ class HistoryCompressorTest {
         val client = ScriptedClient(listOf("ответ модели"))
         val result = LlmAgent(client).run(
             "Какой бюджет я называл?",
-            AgentOptions(history = dialog(25), compressHistory = true)
+            AgentOptions(history = dialog(25), strategy = ContextStrategy.SUMMARY)
         )
 
         assertEquals(1, client.requests.size)

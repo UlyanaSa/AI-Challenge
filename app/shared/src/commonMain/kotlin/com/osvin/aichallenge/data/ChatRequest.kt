@@ -16,6 +16,13 @@ import kotlinx.serialization.Serializable
  * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
  * @param sessionId Идентификатор сессии диалога: по нему сервер держит сводку
  *        истории отдельно от самих сообщений. Null — сервер обойдётся без сводки.
+ * @param strategy Стратегия управления контекстом ([ContextStrategy.wire]): что из
+ *        истории уходит в модель. Null — сервер считает поведение дня 9 («сжатие в сводку»).
+ * @param windowMessages Сколько последних сообщений отправляют стратегии со скользящим
+ *        окном и памятью фактов ([ContextStrategy.usesWindow]).
+ * @param branchId Активная ветка диалога: её путь уходит в модель; null — основная линия.
+ *        Уезжает только со стратегией «ветки диалога».
+ * @param branches Ветки диалога: структура и точки ветвления; нужны той же стратегии.
  */
 @Serializable
 data class ChatRequest(
@@ -26,5 +33,9 @@ data class ChatRequest(
     val temperature: Double? = null,
     val systemPrompt: String? = null,
     val history: List<ChatMessage>? = null,
-    val sessionId: String? = null
+    val sessionId: String? = null,
+    val strategy: String? = null,
+    val windowMessages: Int? = null,
+    val branchId: String? = null,
+    val branches: List<DialogBranch>? = null
 )

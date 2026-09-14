@@ -23,12 +23,15 @@ data class ChatEntity(
     @PrimaryKey val id: String,
     val title: String,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    /** Активная ветка диалога; null — основная линия. */
+    val activeBranchId: String? = null
 )
 
 /**
  * Сообщение чата в таблице SQLite.
  * @param chatId Чат, которому принадлежит сообщение.
+ * @param branchId Ветка диалога, к которой относится сообщение; null — основная линия.
  */
 @Entity(tableName = "chat_messages", indices = [Index("chatId")])
 data class ChatMessageEntity(
@@ -36,13 +39,30 @@ data class ChatMessageEntity(
     val role: String,
     val content: String,
     val timestamp: Long,
-    val chatId: String
+    val chatId: String,
+    val branchId: String? = null
+)
+
+/**
+ * Ветка диалога в таблице SQLite: точка ветвления и её место в дереве.
+ * @param chatId Чат, которому принадлежит ветка.
+ * @param parentId Ветка-родитель; null — ветка идёт от основной линии.
+ * @param forkedAfter Сколько сообщений родительского пути общих с этой веткой.
+ * @param createdAt Когда ветку создали, в миллисекундах.
+ */
+@Entity(tableName = "branches", indices = [Index("chatId")])
+data class DialogBranchEntity(
+    @PrimaryKey val id: String,
+    val chatId: String,
+    val parentId: String? = null,
+    val forkedAfter: Int = 0,
+    val createdAt: Long
 )
 
 /**
  * Доступ к таблице чатов.
  *
- * Композитная операция [deleteWithMessages] затрагивает ещё и таблицу сообщений,
+ * Композитная операция [deleteWithData] затрагивает ещё таблицы сообщений и веток,
  * поэтому в конструктор передаётся сама база.
  */
 @Dao
@@ -59,15 +79,34 @@ abstract class ChatDao(private val db: ChatDatabase) {
     @Query("UPDATE chats SET title = :title WHERE id = :chatId")
     abstract suspend fun retitle(chatId: String, title: String)
 
+    @Query("UPDATE chats SET activeBranchId = :branchId WHERE id = :chatId")
+    abstract suspend fun setActiveBranch(chatId: String, branchId: String?)
+
     @Query("DELETE FROM chats WHERE id = :chatId")
     abstract suspend fun delete(chatId: String)
 
-    /** Удаляет чат и все его сообщения одной транзакцией. */
+    /** Удаляет чат, все его сообщения и ветки одной транзакцией. */
     @Transaction
-    open suspend fun deleteWithMessages(chatId: String) {
+    open suspend fun deleteWithData(chatId: String) {
         db.messages().deleteOfChat(chatId)
+        db.branches().deleteOfChat(chatId)
         delete(chatId)
     }
+}
+
+/**
+ * Доступ к таблице веток диалога.
+ */
+@Dao
+abstract class DialogBranchDao {
+    @Query("SELECT * FROM branches WHERE chatId = :chatId ORDER BY createdAt ASC, id ASC")
+    abstract suspend fun ofChat(chatId: String): List<DialogBranchEntity>
+
+    @Insert
+    abstract suspend fun insert(branch: DialogBranchEntity)
+
+    @Query("DELETE FROM branches WHERE chatId = :chatId")
+    abstract suspend fun deleteOfChat(chatId: String)
 }
 
 /**
@@ -96,13 +135,19 @@ abstract class ChatMessageDao {
 }
 
 /**
- * База чатов и их сообщений.
+ * База чатов, их сообщений и веток диалога.
  */
-@Database(entities = [ChatEntity::class, ChatMessageEntity::class], version = 2, exportSchema = false)
+@Database(
+    entities = [ChatEntity::class, ChatMessageEntity::class, DialogBranchEntity::class],
+    version = 3,
+    exportSchema = false
+)
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun chats(): ChatDao
 
     abstract fun messages(): ChatMessageDao
+
+    abstract fun branches(): DialogBranchDao
 
     companion object {
         /**
@@ -150,6 +195,29 @@ abstract class ChatDatabase : RoomDatabase() {
                 db.execSQL("DROP TABLE chat_messages")
                 db.execSQL("ALTER TABLE chat_messages_new RENAME TO chat_messages")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_chatId ON chat_messages (chatId)")
+            }
+        }
+
+        /**
+         * Переход со схемы 2 на схему 3: появились ветки диалога.
+         *
+         * Данные не теряются: чаты и сообщения остаются на месте, новые колонки
+         * пусты (null — основная линия), а таблица веток создаётся с нуля.
+         */
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chats ADD COLUMN activeBranchId TEXT")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN branchId TEXT")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `branches` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`chatId` TEXT NOT NULL, " +
+                        "`parentId` TEXT, " +
+                        "`forkedAfter` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_branches_chatId ON branches (chatId)")
             }
         }
 

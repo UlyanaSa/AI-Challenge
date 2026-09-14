@@ -173,7 +173,7 @@ class LlmAgentTest {
             "Что дальше?",
             AgentOptions(
                 sessionId = "session",
-                compressHistory = true,
+                strategy = ContextStrategy.SUMMARY,
                 history = listOf(
                     ChatMessage("user", "Ты строгий редактор"),
                     ChatMessage("assistant", "Хорошо"),

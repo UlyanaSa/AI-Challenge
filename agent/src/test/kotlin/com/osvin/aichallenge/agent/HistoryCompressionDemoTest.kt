@@ -204,7 +204,7 @@ class HistoryCompressionDemoTest {
         )
         val result = agent.run(
             BUDGET_QUESTION,
-            options(BUDGET_DIALOG, sessionId = SESSION, compressHistory = true)
+            options(BUDGET_DIALOG, sessionId = SESSION, strategy = ContextStrategy.SUMMARY)
         )
         val tokens = result.tokens
 
@@ -257,7 +257,7 @@ class HistoryCompressionDemoTest {
             val without = plain.run(BUDGET_QUESTION, options(history)).tokens
             val with = compressed.run(
                 BUDGET_QUESTION,
-                options(history, sessionId = SESSION, compressHistory = true)
+                options(history, sessionId = SESSION, strategy = ContextStrategy.SUMMARY)
             ).tokens
 
             plainTotal += totalCallCost(without)

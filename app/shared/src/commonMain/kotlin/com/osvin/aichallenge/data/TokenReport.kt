@@ -27,6 +27,16 @@ import kotlin.math.roundToLong
  * @param foldedMessages Сколько сообщений свёрнуто в сводку.
  * @param compressionTokens Токены вызова, которым строилась сводка (запрос + ответ).
  * @param compressionCostUsd Цена этого вызова в USD; null, если тариф не опубликован.
+ * @param strategy Стратегия управления контекстом этого ответа (см. [ContextStrategy]).
+ * @param windowMessages Размер окна стратегий «скользящее окно» и «память фактов»;
+ *        0 — стратегия окно не использует.
+ * @param droppedMessages Сколько сообщений отброшено окном (стратегия «скользящее окно»).
+ * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
+ * @param branchId Активная ветка диалога; null — основная линия.
+ * @param facts Память фактов, которая ушла в запрос: ключ — значение.
+ * @param factsTokens Токены блока фактов в запросе.
+ * @param factsUpdateTokens Токены служебного вызова обновления памяти (запрос + ответ).
+ * @param factsUpdateCostUsd Цена этого вызова в USD; null, если тариф не опубликован.
  */
 @Serializable
 data class TokenReport(
@@ -45,16 +55,27 @@ data class TokenReport(
     @SerialName("summary_tokens") val summaryTokens: Int = 0,
     @SerialName("folded_messages") val foldedMessages: Int = 0,
     @SerialName("compression_tokens") val compressionTokens: Int = 0,
-    @SerialName("compression_cost_usd") val compressionCostUsd: Double? = null
+    @SerialName("compression_cost_usd") val compressionCostUsd: Double? = null,
+    @SerialName("strategy") val strategy: String = ContextStrategy.DEFAULT.wire,
+    @SerialName("window_messages") val windowMessages: Int = 0,
+    @SerialName("dropped_messages") val droppedMessages: Int = 0,
+    @SerialName("excluded_messages") val excludedMessages: Int = 0,
+    @SerialName("branch_id") val branchId: String? = null,
+    @SerialName("facts") val facts: List<Fact> = emptyList(),
+    @SerialName("facts_tokens") val factsTokens: Int = 0,
+    @SerialName("facts_update_tokens") val factsUpdateTokens: Int = 0,
+    @SerialName("facts_update_cost_usd") val factsUpdateCostUsd: Double? = null
 ) {
     /**
      * Одна запись лога на весь отчёт: характеристики идут отдельными строками,
      * но запись одна — так блок читается целиком, а не рассыпается по logcat.
      * Строки о сжатии истории появляются только когда сервер действительно
-     * свернул сообщения: без сжатия запись остаётся прежней.
+     * свернул сообщения, строки об окне, ветке и фактах — когда их применила
+     * выбранная стратегия: без этого запись остаётся прежней.
      */
     fun logEntry(model: String): String = buildList {
         add("[agent] Запрос → $model")
+        add("[agent] стратегия: ${ContextStrategy.fromWire(strategy).title}")
         add("[agent] system prompt: $systemPrompt ток.")
         add("[agent] история: $history ток.")
         if (foldedMessages > 0) {
@@ -65,6 +86,12 @@ data class TokenReport(
                     "${fixed(100.0 * (historyRawTokens - history) / historyRawTokens, 1)}%)"
             )
         }
+        if (windowMessages > 0) {
+            add("[agent] окно: последние $windowMessages сообщ., отброшено $droppedMessages")
+        }
+        if (branchId != null) {
+            add("[agent] активная ветка: $branchId (вне её пути: $excludedMessages сообщ.)")
+        }
         add("[agent] текущий вопрос: $request ток.")
         add("[agent] всего (оценка): $promptEstimate ток.")
         add("[agent] окно модели: $contextWindow ток.")
@@ -74,6 +101,16 @@ data class TokenReport(
         add("[agent] finish: ${replyFinishReason ?: "неизвестно"}")
         add("[agent] окно занято: ${fixed(promptWindowShare * 100, 4)}%")
         add("[agent] цена: ${costUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}")
+        if (facts.isNotEmpty()) {
+            add("[agent] память фактов: ${facts.size} шт., $factsTokens ток.")
+            facts.forEach { fact -> add("[agent] - ${fact.key}: ${fact.value}") }
+            if (factsUpdateTokens > 0) {
+                add(
+                    "[agent] обновление памяти: $factsUpdateTokens ток., " +
+                        "цена ${factsUpdateCostUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
+                )
+            }
+        }
     }.joinToString("\n")
 }
 

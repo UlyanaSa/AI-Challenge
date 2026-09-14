@@ -2,6 +2,7 @@ package com.osvin.aichallenge.agent
 
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
+import com.osvin.aichallenge.models.DialogBranch
 import com.osvin.aichallenge.models.config.AppConfig
 import kotlinx.coroutines.CancellationException
 import java.util.Locale
@@ -14,8 +15,12 @@ import java.util.Locale
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  *        Не задан — его роль играет первое сообщение диалога (см. [LlmAgent]).
  * @param history Предыдущие сообщения диалога (роли user/assistant), без текущего запроса.
- * @param sessionId Идентификатор сессии диалога: по нему находится сводка истории.
- * @param compressHistory Сжимать историю: последние сообщения идут как есть, старшие — сводкой.
+ * @param sessionId Идентификатор сессии диалога: по нему живут сводка истории и память фактов.
+ * @param strategy Стратегия управления контекстом: что из истории уходит в модель.
+ * @param windowMessages Сколько последних сообщений отправляют стратегии
+ *        «скользящее окно» и «память фактов»; null — значение по умолчанию.
+ * @param branches Ветки диалога: структура и точки ветвления (стратегия «ветки диалога»).
+ * @param activeBranchId Активная ветка, чей путь уходит в модель; null — основная линия.
  */
 data class AgentOptions(
     val model: String? = null,
@@ -25,7 +30,10 @@ data class AgentOptions(
     val systemPrompt: String? = null,
     val history: List<ChatMessage> = emptyList(),
     val sessionId: String? = null,
-    val compressHistory: Boolean = false
+    val strategy: ContextStrategy = ContextStrategy.FULL,
+    val windowMessages: Int? = null,
+    val branches: List<DialogBranch> = emptyList(),
+    val activeBranchId: String? = null
 )
 
 /**
@@ -60,29 +68,38 @@ data class AgentResult(
  * `usage` ответа API. Если запрос вместе с бюджетом ответа не влезает в окно
  * модели, агент не обращается к API, а падает с [ContextOverflowException].
  *
- * Управление контекстом: если клиент просит сжатие ([AgentOptions.compressHistory])
- * и назвал сессию, агент держит последние сообщения как есть, а старшие сворачивает
- * в сводку ([HistoryCompressor]) и хранит её отдельно от сообщений в [SummaryStore].
- * Сводка уходит в запрос вместо свёрнутых сообщений, поэтому история не растёт.
+ * Управление контекстом: стратегию выбирает клиент ([AgentOptions.strategy]).
  *
- * System prompt берётся из настроек ([AgentOptions.systemPrompt]), а если он не задан —
- * его роль играет первое сообщение диалога ([AgentOptions.history]); на первом ходу
- * диалога это текущий запрос. Так инструкция из первого сообщения остаётся в силе
- * и после того, как старшие сообщения свёрнуты в сводку.
+ * - [ContextStrategy.FULL] — вся история как есть;
+ * - [ContextStrategy.SLIDING_WINDOW] — последние [AgentOptions.windowMessages] сообщений,
+ *   старшие отбрасываются: дешевле всего, но детали из начала диалога теряются;
+ * - [ContextStrategy.FACTS] — память «ключ — значение» ([FactsExtractor], [FactsStore])
+ *   обновляется после каждого сообщения пользователя, в запрос уходят факты и окно;
+ * - [ContextStrategy.BRANCHES] — только путь активной ветки от точки ветвления
+ *   ([DialogBranches]), поэтому продолжения веток не смешиваются;
+ * - [ContextStrategy.SUMMARY] — последние сообщения как есть, старшие свёрнуты
+ *   в сводку ([HistoryCompressor], [SummaryStore]).
+ *
+ * Стратегии с состоянием (факты, сводка) держат его по сессии: сообщения присылает
+ * клиент, а память и сводки живут на сервере.
  *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
- * @param logger Лог агента: запрос, история диалога, ответ модели и ответ API при ошибке.
+ * @param logger Лог агента: запрос, стратегия, история диалога, ответ модели и ответ API при ошибке.
  * @param compressor Правило сжатия истории: сколько сообщений не трогать и когда строить сводку.
  * @param summaryStore Хранилище сводок. Сервер передаёт общее на все запросы, иначе
  *        сводка живёт только внутри одного запуска агента.
+ * @param factsExtractor Правило памяти фактов: как обновлять список «ключ — значение».
+ * @param factsStore Хранилище фактов по сессиям.
  */
 class LlmAgent(
     private val llm: LlmClient,
     private val tokenCounter: TokenCounter = EstimatingTokenCounter,
     private val logger: AgentLogger = AgentLogger.Console,
     private val compressor: HistoryCompressor = HistoryCompressor(),
-    private val summaryStore: SummaryStore = InMemorySummaryStore()
+    private val summaryStore: SummaryStore = InMemorySummaryStore(),
+    private val factsExtractor: FactsExtractor = FactsExtractor(),
+    private val factsStore: FactsStore = InMemoryFactsStore()
 ) {
 
     /**
@@ -106,77 +123,55 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: system prompt, сводка истории, последние
-        // сообщения диалога и текущий запрос пользователя — в этом порядке.
-        // Свой system prompt из настроек важнее: если он задан, берём его.
-        // Если нет — его роль играет первое сообщение диалога: инструкция из него
-        // остаётся в силе и тогда, когда старшие сообщения свёрнуты в сводку.
+        // Сообщения модели: system prompt, сводка, факты, история диалога и текущий
+        // запрос — в этом порядке. Свой system prompt из настроек важнее: если он задан,
+        // берём его. Если нет — его роль играет первое сообщение диалога: инструкция
+        // из него остаётся в силе и тогда, когда старшие сообщения отброшены.
         val history = options.history.filter { it.content.isNotBlank() }
-        val systemPrompt = options.systemPrompt?.takeIf { it.isNotBlank() }
+        // Свой system prompt важнее: если он задан, берём его. Если нет — его роль
+        // играет первое сообщение диалога, а на первом ходу — текущий запрос,
+        // поэтому system prompt есть всегда.
+        val systemPrompt: String = options.systemPrompt?.takeIf { it.isNotBlank() }
             ?: history.firstOrNull { it.role == USER_ROLE }?.content
             ?: userMessage
 
-        // Сжатие истории: последние сообщения уходят как есть, старшие заменяются
-        // сводкой. Сводка живёт в хранилище отдельно от сообщений — по сессии.
-        val sessionId = options.sessionId?.takeIf { options.compressHistory && it.isNotBlank() }
-        val plan = if (sessionId == null) {
-            HistoryPlan(history, emptyList(), null, 0)
-        } else {
-            compressor.plan(history, summaryStore.get(sessionId))
-        }
-        val compression = if (sessionId == null) {
-            null
-        } else {
-            plan.toFold.takeIf { it.isNotEmpty() }?.let { folded ->
-                compress(model, plan.summary, folded).also { attempt ->
-                    attempt.summary?.let { summaryStore.put(sessionId, it) }
-                }
-            }
-        }
-        // Сводку не удалось построить — отправляем историю целиком: диалог не теряем.
-        val summary = when {
-            compression != null && compression.summary == null -> null
-            else -> compression?.summary ?: plan.summary
-        }
-        val historyForRequest = if (summary != null) plan.recent else history
+        // Что из истории уходит в модель, решает выбранная стратегия: окно, память
+        // фактов, путь активной ветки или сводка вместо свёрнутых сообщений.
+        val strategy = options.strategy
+        val window = (options.windowMessages ?: DEFAULT_WINDOW_MESSAGES)
+            .coerceIn(MIN_WINDOW_MESSAGES, MAX_WINDOW_MESSAGES)
+        val context = planContext(model, strategy, history, window, options, userMessage)
+        val historyForRequest = context.history
+        val summary = context.summary
+        val factsMessage = factsExtractor.factsMessage(context.facts)
 
         val messages = buildList {
-            systemPrompt?.let { add(ChatMessage(SYSTEM_ROLE, it)) }
+            add(ChatMessage(SYSTEM_ROLE, systemPrompt))
             summary?.let { add(compressor.summaryMessage(it)) }
-            addAll(historyForRequest)
+            factsMessage?.let { add(it) }
+            // Метка ветки — служебная: в API сообщения уходят без неё.
+            addAll(withoutBranchTags(historyForRequest))
             add(ChatMessage(USER_ROLE, userMessage))
         }
 
         // Разбивка по частям: API отдаёт только общий prompt_tokens, поэтому
-        // вклад system prompt, истории и текущего запроса считаем локально.
-        val systemTokens = systemPrompt?.let(tokenCounter::count) ?: 0
+        // вклад system prompt, памяти и истории считаем локально.
+        val systemTokens = tokenCounter.count(systemPrompt)
         val summaryTokens = summary?.tokens ?: 0
+        val factsTokens = factsMessage?.let { tokenCounter.count(it.content) } ?: 0
         val recentTokens = historyForRequest.sumOf { tokenCounter.count(it.content) }
-        val historyTokens = summaryTokens + recentTokens
+        val historyTokens = summaryTokens + factsTokens + recentTokens
         val historyRawTokens = history.sumOf { tokenCounter.count(it.content) }
         val requestTokens = tokenCounter.count(userMessage)
         val promptEstimate = tokenCounter.countPrompt(messages)
 
-        if (summary != null) {
-            logger.log(
-                listOf(
-                    "Сжатие истории",
-                    "свёрнуто сообщений: ${summary.foldedMessages} (сводка $summaryTokens ток.)",
-                    "последних сообщений как есть: ${historyForRequest.size} ($recentTokens ток.)",
-                    "история без сжатия: $historyRawTokens ток.",
-                    "история к отправке: $historyTokens ток.",
-                    "экономия: ${historyRawTokens - historyTokens} ток. (${percent1(share(historyRawTokens - historyTokens, historyRawTokens))}%)",
-                    compression?.let {
-                        "служебный вызов сводки: ${it.totalTokens} ток. " +
-                            "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
-                    }
-                ).filterNotNull().joinToString("\n")
-            )
-        }
+        // Лог стратегии: что именно ушло в модель и чего это стоило.
+        context.log(strategy, window, historyRawTokens, historyTokens, factsTokens)?.let(logger::log)
 
         logger.log(
             listOf(
                 "Запрос → $model",
+                "стратегия контекста: ${strategy.title}",
                 "system prompt: $systemTokens ток.",
                 "история: $historyTokens ток. (${historyForRequest.size} сообщ.)",
                 "текущий вопрос: $requestTokens ток.",
@@ -269,86 +264,294 @@ class LlmAgent(
                 replyFinishReason = choice.finishReason,
                 costUsd = cost,
                 historyRawTokens = historyRawTokens,
+                strategy = strategy.wire,
+                windowMessages = if (strategy.usesWindow) window else 0,
+                droppedMessages = context.droppedMessages,
+                excludedMessages = context.excludedMessages,
+                branchId = context.branchId,
                 summaryTokens = summaryTokens,
                 foldedMessages = summary?.foldedMessages ?: 0,
-                compressionTokens = compression?.totalTokens ?: 0,
-                compressionCostUsd = compression?.costUsd
+                compressionTokens = if (strategy == ContextStrategy.SUMMARY) context.service?.totalTokens ?: 0 else 0,
+                compressionCostUsd = if (strategy == ContextStrategy.SUMMARY) context.service?.costUsd else null,
+                facts = context.facts.items,
+                factsTokens = factsTokens,
+                factsUpdateTokens = if (strategy == ContextStrategy.FACTS) context.service?.totalTokens ?: 0 else 0,
+                factsUpdateCostUsd = if (strategy == ContextStrategy.FACTS) context.service?.costUsd else null
             )
         )
     }
 
-    /** Сводка строится отдельным вызовом и стоит токенов: они тоже попадают в отчёт. */
-    private data class SummaryAttempt(
-        val summary: StoredSummary?,
+    /**
+     * Что уходит в модель по выбранной стратегии и чего это стоило.
+     *
+     * @param history Сообщения диалога, которые уходят в запрос.
+     * @param facts Память фактов: только для стратегии фактов.
+     * @param summary Сводка, заменившая свёрнутые сообщения: только для сжатия.
+     * @param service Служебный вызов стратегии: построение сводки или обновление фактов.
+     * @param droppedMessages Сколько сообщений отброшено окном.
+     * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
+     * @param branchId Активная ветка: null — основная линия диалога.
+     * @param sharedMessages Сколько сообщений в пути до точки ветвления.
+     */
+    private data class ContextPlan(
+        val history: List<ChatMessage>,
+        val facts: Facts = Facts(),
+        val summary: StoredSummary? = null,
+        val service: ServiceCall? = null,
+        val droppedMessages: Int = 0,
+        val excludedMessages: Int = 0,
+        val branchId: String? = null,
+        val sharedMessages: Int = 0
+    ) {
+
+        /**
+         * Лог стратегии: одна запись со всеми числами — что ушло в модель и что
+         * не ушло. null — стратегии «вся история» собственный блок не нужен.
+         */
+        fun log(
+            strategy: ContextStrategy,
+            window: Int,
+            rawTokens: Int,
+            sentTokens: Int,
+            factsTokens: Int
+        ): String? {
+            val memoryTokens = sentTokens - factsTokens
+            val lines = when (strategy) {
+                ContextStrategy.FULL -> return null
+                ContextStrategy.SLIDING_WINDOW -> listOf(
+                    "Скользящее окно истории",
+                    "окно: $window сообщ.",
+                    "в запросе: ${history.size} ($sentTokens ток.)",
+                    "отброшено сообщений: $droppedMessages (${rawTokens - sentTokens} ток.)",
+                    "история без окна: $rawTokens ток."
+                )
+                ContextStrategy.FACTS -> buildList {
+                    add("Память фактов")
+                    add("фактов: ${facts.items.size} ($factsTokens ток.)")
+                    facts.items.forEach { add("- ${it.key}: ${it.value}") }
+                    add("окно: $window сообщ. — в запросе ${history.size} ($memoryTokens ток.)")
+                    add("отброшено сообщений: $droppedMessages (${rawTokens - memoryTokens} ток.)")
+                    add("история без памяти: $rawTokens ток.")
+                    service?.let {
+                        add(
+                            "обновление памяти: ${it.totalTokens} ток. " +
+                                "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                        )
+                    }
+                }
+                ContextStrategy.BRANCHES -> listOf(
+                    "Ветки диалога",
+                    "активная ветка: ${branchId ?: "основная линия"}",
+                    "общий путь до точки ветвления: $sharedMessages сообщ.",
+                    "в запросе: ${history.size} ($sentTokens ток.)",
+                    "вне пути активной ветки: $excludedMessages сообщ. (${rawTokens - sentTokens} ток.)"
+                )
+                ContextStrategy.SUMMARY -> listOf(
+                    "Сжатие истории",
+                    "свёрнуто сообщений: ${summary?.foldedMessages ?: 0} (сводка ${summary?.tokens ?: 0} ток.)",
+                    "последних сообщений как есть: ${history.size} (${sentTokens - (summary?.tokens ?: 0)} ток.)",
+                    "история без сжатия: $rawTokens ток.",
+                    "история к отправке: $sentTokens ток.",
+                    "экономия: ${rawTokens - sentTokens} ток. (${percent1(share(rawTokens - sentTokens, rawTokens))}%)",
+                    service?.let {
+                        "служебный вызов сводки: ${it.totalTokens} ток. " +
+                            "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                    }
+                )
+            }
+            return lines.filterNotNull().joinToString("\n")
+        }
+    }
+
+    /** Служебный вызов стратегии стоит токенов: они тоже попадают в отчёт. */
+    private data class ServiceCall(
         val promptTokens: Int,
         val replyTokens: Int,
         val costUsd: Double?
     ) {
-        /** Полная цена служебного вызова: запрос сводки и её текст. */
+        /** Полная цена служебного вызова: запрос и ответ. */
         val totalTokens: Int get() = promptTokens + replyTokens
     }
 
+    /** Ответ служебного вызова: текст для разбора и его цена. */
+    private data class ServiceReply(val text: String, val call: ServiceCall)
+
+    /** Сжатие истории: история к отправке, актуальная сводка и цена служебного вызова. */
+    private data class SummaryPlan(val history: List<ChatMessage>, val summary: StoredSummary?, val call: ServiceCall?)
+
     /**
-     * Сворачивает сообщения в сводку отдельным вызовом модели.
+     * Что из истории уходит в модель по выбранной стратегии.
+     *
+     * Стратегии с состоянием обновляют его отдельным служебным вызовом модели, поэтому
+     * метод `suspend`. Сбой вызова диалог не ломает: стратегия откатывается к тому,
+     * что уже знает, — прежней сводке или прежним фактам.
+     */
+    private suspend fun planContext(
+        model: String,
+        strategy: ContextStrategy,
+        history: List<ChatMessage>,
+        window: Int,
+        options: AgentOptions,
+        userMessage: String
+    ): ContextPlan {
+        // Ветки: в модель уходит путь активной ветки, а не весь диалог целиком.
+        val branchId = options.activeBranchId?.takeIf { strategy == ContextStrategy.BRANCHES }
+        val path = if (strategy == ContextStrategy.BRANCHES) {
+            DialogBranches.activePath(history, options.branches, branchId)
+        } else {
+            history
+        }
+        // Окно и память фактов отправляют только последние сообщения диалога.
+        val windowed = if (strategy.usesWindow) path.takeLast(window) else path
+
+        val sessionId = options.sessionId?.takeIf { strategy.keepsState && it.isNotBlank() }
+        if (strategy.keepsState && sessionId == null) {
+            logger.log(
+                "Стратегия «${strategy.title}»: сессия не названа — память не ведётся, " +
+                    "в модель уходят последние $window сообщ."
+            )
+        }
+
+        val summary = if (strategy == ContextStrategy.SUMMARY && sessionId != null) {
+            planSummary(model, sessionId, history)
+        } else {
+            null
+        }
+        val facts = if (strategy == ContextStrategy.FACTS && sessionId != null) {
+            updateFacts(model, sessionId, windowed, userMessage)
+        } else {
+            // Без сессии память вести негде: фактов нет, стратегия работает как окно.
+            FactsPlan(Facts(), null)
+        }
+
+        return ContextPlan(
+            history = summary?.history ?: windowed,
+            facts = facts.facts,
+            summary = summary?.summary,
+            service = summary?.call ?: facts.call,
+            droppedMessages = if (strategy.usesWindow) path.size - windowed.size else 0,
+            excludedMessages = if (strategy == ContextStrategy.BRANCHES) history.size - path.size else 0,
+            branchId = branchId,
+            sharedMessages = if (strategy == ContextStrategy.BRANCHES) {
+                path.size - history.count { it.branchId == branchId }
+            } else {
+                0
+            }
+        )
+    }
+
+    /**
+     * Сжатие истории (день 9): последние сообщения уходят как есть, старшие — сводкой.
      *
      * Сбой служебного вызова не должен ломать диалог: в этом случае сводка не
-     * обновляется (вернётся null), а запрос уходит с полной историей.
+     * обновляется, а запрос уходит с полной историей.
      */
-    private suspend fun compress(
+    private suspend fun planSummary(model: String, sessionId: String, history: List<ChatMessage>): SummaryPlan {
+        val plan = compressor.plan(history, summaryStore.get(sessionId))
+        if (plan.toFold.isEmpty()) {
+            return SummaryPlan(if (plan.summary != null) plan.recent else history, plan.summary, null)
+        }
+
+        val reply = callService("сводка", compressor.summaryRequest(model, plan.summary, plan.toFold))
+            ?: return SummaryPlan(history, null, null)
+        if (reply.text.isEmpty()) {
+            logger.log("Сжатие истории не удалось (модель вернула пустую сводку) — контекст отправлен как есть")
+            return SummaryPlan(history, null, reply.call)
+        }
+
+        val summary = StoredSummary(
+            text = reply.text,
+            foldedMessages = (plan.summary?.foldedMessages ?: 0) + plan.toFold.size,
+            tokens = tokenCounter.count(reply.text)
+        )
+        summaryStore.put(sessionId, summary)
+        return SummaryPlan(plan.recent, summary, reply.call)
+    }
+
+    /** Память фактов: обновляем её после каждого сообщения пользователя. */
+    private suspend fun updateFacts(
         model: String,
-        previous: StoredSummary?,
-        messages: List<ChatMessage>
-    ): SummaryAttempt {
-        val request = compressor.summaryRequest(model, previous, messages)
+        sessionId: String,
+        history: List<ChatMessage>,
+        userMessage: String
+    ): FactsPlan {
+        val previous = factsStore.get(sessionId)
+        val fresh = history.takeLast(FACTS_CONTEXT_MESSAGES) + ChatMessage(USER_ROLE, userMessage)
+        val reply = callService("память фактов", factsExtractor.request(model, previous, fresh))
+            ?: return FactsPlan(previous, null)
+        val updated = factsExtractor.parse(reply.text)
+        if (updated == null) {
+            logger.log("Память фактов не обновилась (модель вернула не JSON) — оставлены прежние факты")
+            return FactsPlan(previous, reply.call)
+        }
+        factsStore.put(sessionId, updated)
+        return FactsPlan(updated, reply.call)
+    }
+
+    /**
+     * Служебный вызов модели: ответ текстом и его цена.
+     * Сбой вызова диалог не ломает — вернётся null, стратегия обойдётся без обновления.
+     */
+    private suspend fun callService(label: String, request: DeepSeekRequest): ServiceReply? {
         return try {
             val response = llm.complete(request)
             val usage = response.usage
             val promptTokens = usage?.promptTokens ?: tokenCounter.countPrompt(request.messages)
             val replyTokens = usage?.completionTokens ?: 0
-            val cost = ModelCatalog.spec(model).cost(promptTokens, replyTokens)
-            val text = response.choices.first().message.content.trim()
-
-            if (text.isEmpty()) {
-                logger.log("Сжатие истории не удалось (модель вернула пустую сводку) — контекст отправлен как есть")
-                return SummaryAttempt(null, promptTokens, replyTokens, cost)
-            }
-
-            SummaryAttempt(
-                summary = StoredSummary(
-                    text = text,
-                    foldedMessages = (previous?.foldedMessages ?: 0) + messages.size,
-                    tokens = tokenCounter.count(text)
-                ),
-                promptTokens = promptTokens,
-                replyTokens = replyTokens,
-                costUsd = cost
+            ServiceReply(
+                text = response.choices.first().message.content.trim(),
+                call = ServiceCall(
+                    promptTokens = promptTokens,
+                    replyTokens = replyTokens,
+                    costUsd = ModelCatalog.spec(request.model).cost(promptTokens, replyTokens)
+                )
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             logger.log(
-                "Сжатие истории не удалось (${error.message ?: error::class.simpleName}) — контекст отправлен как есть"
+                "Служебный вызов «$label» не удался (${error.message ?: error::class.simpleName}) — " +
+                    "контекст отправлен как есть"
             )
-            SummaryAttempt(null, 0, 0, null)
+            null
         }
     }
 
-    /** Доля части от целого: 0.0–1.0; при нулевом целом — ноль. */
-    private fun share(part: Int, total: Int): Double = if (total == 0) 0.0 else part.toDouble() / total
+    /** Память фактов после обновления и цена служебного вызова. */
+    private data class FactsPlan(val facts: Facts, val call: ServiceCall?)
 
-    /** Экономия в процентах с одним знаком: доля окна в логе и так идёт с четырьмя. */
-    private fun percent1(share: Double): String = String.format(Locale.ROOT, "%.1f", share * 100)
-
-    /** Доля окна в процентах: на окне в 1M токенов даже крупный диалог — доли процента. */
-    private fun percent(share: Double): String = String.format(Locale.ROOT, "%.4f", share * 100)
-
-    /** Стоимость запуска; у моделей без опубликованного тарифа — пометка вместо числа. */
-    private fun costUsd(cost: Double?): String =
-        cost?.let { String.format(Locale.ROOT, "\$%.6f", it) } ?: "тариф не опубликован"
+    /** В API сообщения уходят без метки ветки: она нужна только стратегии веток. */
+    private fun withoutBranchTags(messages: List<ChatMessage>): List<ChatMessage> =
+        if (messages.none { it.branchId != null }) messages else messages.map { ChatMessage(it.role, it.content) }
 
     private companion object {
         /** Роли сообщений в запросе к модели. */
         const val SYSTEM_ROLE = "system"
         const val USER_ROLE = "user"
+
+        /** Окно по умолчанию: столько последних сообщений отправляют стратегии окна и фактов. */
+        const val DEFAULT_WINDOW_MESSAGES = 10
+
+        /** Меньше двух сообщений окно теряет смысл: вопрос без ответа не контекст. */
+        const val MIN_WINDOW_MESSAGES = 2
+
+        /** Верхняя граница окна: больше — уже не управление контекстом, а вся история. */
+        const val MAX_WINDOW_MESSAGES = 100
+
+        /** Сколько последних сообщений показываем извлечению фактов вместе с новым вопросом. */
+        const val FACTS_CONTEXT_MESSAGES = 2
+
+        /** Доля части от целого: 0.0–1.0; при нулевом целом — ноль. */
+        fun share(part: Int, total: Int): Double = if (total == 0) 0.0 else part.toDouble() / total
+
+        /** Экономия в процентах с одним знаком: доля окна в логе и так идёт с четырьмя. */
+        fun percent1(share: Double): String = String.format(Locale.ROOT, "%.1f", share * 100)
+
+        /** Доля окна в процентах: на окне в 1M токенов даже крупный диалог — доли процента. */
+        fun percent(share: Double): String = String.format(Locale.ROOT, "%.4f", share * 100)
+
+        /** Стоимость запуска; у моделей без опубликованного тарифа — пометка вместо числа. */
+        fun costUsd(cost: Double?): String =
+            cost?.let { String.format(Locale.ROOT, "\$%.6f", it) } ?: "тариф не опубликован"
     }
 }
