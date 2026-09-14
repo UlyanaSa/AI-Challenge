@@ -61,10 +61,11 @@ class FactsExtractor(private val maxTokens: Int = FACTS_MAX_TOKENS) {
 
     companion object {
         /**
-         * Бюджет ответа на обновление памяти. У thinking-модели рассуждения тратят
-         * тот же бюджет, поэтому он взят с запасом: маленький бюджет даёт пустой ответ.
+         * Бюджет ответа на обновление памяти. У модели с рассуждениями они тратят тот же
+         * бюджет, что и текст, поэтому он взят с запасом: маленький бюджет даёт пустой
+         * ответ, и память молча перестаёт обновляться.
          */
-        const val FACTS_MAX_TOKENS = 2000
+        const val FACTS_MAX_TOKENS = 4000
 
         private const val SYSTEM_ROLE = "system"
         private const val USER_ROLE = "user"

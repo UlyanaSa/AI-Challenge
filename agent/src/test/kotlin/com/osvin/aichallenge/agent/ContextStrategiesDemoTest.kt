@@ -61,7 +61,12 @@ class ContextStrategiesDemoTest {
         SCENARIO.take(CHECKPOINT_AT).forEach { message ->
             val result = agent.run(
                 message,
-                options(trunk.toList(), sessionId = SESSION, strategy = ContextStrategy.BRANCHES)
+                options(
+                    trunk.toList(),
+                    maxTokens = ANSWER_BUDGET,
+                    sessionId = SESSION,
+                    strategy = ContextStrategy.BRANCHES
+                )
             )
             trunk += ChatMessage("user", message)
             trunk += ChatMessage("assistant", result.reply)
@@ -81,6 +86,7 @@ class ContextStrategiesDemoTest {
                 offer,
                 options(
                     tree.toList(),
+                    maxTokens = ANSWER_BUDGET,
                     sessionId = SESSION,
                     strategy = ContextStrategy.BRANCHES,
                     branches = branches,
@@ -97,6 +103,7 @@ class ContextStrategiesDemoTest {
                 PROBE,
                 options(
                     tree,
+                    maxTokens = ANSWER_BUDGET,
                     sessionId = SESSION,
                     strategy = ContextStrategy.BRANCHES,
                     branches = branches,
@@ -215,7 +222,13 @@ class ContextStrategiesDemoTest {
         SCENARIO.forEach { message ->
             val result = agent.run(
                 message,
-                options(history.toList(), sessionId = session, strategy = strategy, windowMessages = WINDOW)
+                options(
+                    history.toList(),
+                    maxTokens = ANSWER_BUDGET,
+                    sessionId = session,
+                    strategy = strategy,
+                    windowMessages = WINDOW
+                )
             )
             cost += sceneCost(result.tokens)
             serviceTokens += result.tokens.factsUpdateTokens + result.tokens.compressionTokens
@@ -225,7 +238,13 @@ class ContextStrategiesDemoTest {
 
         val probe = agent.run(
             PROBE,
-            options(history.toList(), sessionId = session, strategy = strategy, windowMessages = WINDOW)
+            options(
+                history.toList(),
+                maxTokens = ANSWER_BUDGET,
+                sessionId = session,
+                strategy = strategy,
+                windowMessages = WINDOW
+            )
         )
         cost += sceneCost(probe.tokens)
         serviceTokens += probe.tokens.factsUpdateTokens + probe.tokens.compressionTokens
@@ -366,6 +385,14 @@ private const val PROBE =
 
 /** Размер окна для стратегий, которые его используют. */
 private const val WINDOW = 6
+
+/**
+ * Бюджет ответа в демонстрации. У модели с рассуждениями они тратят тот же бюджет,
+ * что и текст: на 8192 токенах весь бюджет уходил на рассуждения, текста не оставалось
+ * и прогон падал с `EmptyReplyException`. Здесь бюджет взят с запасом, чтобы стратегии
+ * сравнивались по контексту, а не по удаче.
+ */
+private const val ANSWER_BUDGET = 32_768
 
 /** Сессия демонстрации: по ней живут сводка и память фактов. */
 private const val SESSION = "demo-strategies"
