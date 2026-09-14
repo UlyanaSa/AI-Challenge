@@ -60,7 +60,7 @@ val demoLogs by tasks.registering(Test::class) {
     description = "Прогон демонстрации расхода токенов с печатью логов агента"
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
-    filter { includeTestsMatching("com.osvin.aichallenge.agent.TokenBudgetDemoTest") }
+    filter { includeTestsMatching("*DemoTest") }
     // Только печать демонстрации: предупреждения транспорта в консоль не мешают.
     testLogging { events("standardOut") }
     outputs.upToDateWhen { false }

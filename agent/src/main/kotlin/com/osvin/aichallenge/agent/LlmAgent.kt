@@ -3,6 +3,7 @@ package com.osvin.aichallenge.agent
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.config.AppConfig
+import kotlinx.coroutines.CancellationException
 import java.util.Locale
 
 /**
@@ -12,6 +13,8 @@ import java.util.Locale
  *
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  * @param history Предыдущие сообщения диалога (роли user/assistant), без текущего запроса.
+ * @param sessionId Идентификатор сессии диалога: по нему находится сводка истории.
+ * @param compressHistory Сжимать историю: последние сообщения идут как есть, старшие — сводкой.
  */
 data class AgentOptions(
     val model: String? = null,
@@ -19,7 +22,9 @@ data class AgentOptions(
     val stop: List<String>? = null,
     val temperature: Double? = null,
     val systemPrompt: String? = null,
-    val history: List<ChatMessage> = emptyList()
+    val history: List<ChatMessage> = emptyList(),
+    val sessionId: String? = null,
+    val compressHistory: Boolean = false
 )
 
 /**
@@ -54,14 +59,24 @@ data class AgentResult(
  * `usage` ответа API. Если запрос вместе с бюджетом ответа не влезает в окно
  * модели, агент не обращается к API, а падает с [ContextOverflowException].
  *
+ * Управление контекстом: если клиент просит сжатие ([AgentOptions.compressHistory])
+ * и назвал сессию, агент держит последние сообщения как есть, а старшие сворачивает
+ * в сводку ([HistoryCompressor]) и хранит её отдельно от сообщений в [SummaryStore].
+ * Сводка уходит в запрос вместо свёрнутых сообщений, поэтому история не растёт.
+ *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
  * @param logger Лог агента: запрос, история диалога, ответ модели и ответ API при ошибке.
+ * @param compressor Правило сжатия истории: сколько сообщений не трогать и когда строить сводку.
+ * @param summaryStore Хранилище сводок. Сервер передаёт общее на все запросы, иначе
+ *        сводка живёт только внутри одного запуска агента.
  */
 class LlmAgent(
     private val llm: LlmClient,
     private val tokenCounter: TokenCounter = EstimatingTokenCounter,
-    private val logger: AgentLogger = AgentLogger.Console
+    private val logger: AgentLogger = AgentLogger.Console,
+    private val compressor: HistoryCompressor = HistoryCompressor(),
+    private val summaryStore: SummaryStore = InMemorySummaryStore()
 ) {
 
     /**
@@ -85,28 +100,74 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: свой system prompt, история диалога и текущий
-        // запрос пользователя — в этом порядке.
+        // Сообщения модели: свой system prompt, сводка истории, последние
+        // сообщения диалога и текущий запрос пользователя — в этом порядке.
         val systemPrompt = options.systemPrompt?.takeIf { it.isNotBlank() }
         val history = options.history.filter { it.content.isNotBlank() }
+
+        // Сжатие истории: последние сообщения уходят как есть, старшие заменяются
+        // сводкой. Сводка живёт в хранилище отдельно от сообщений — по сессии.
+        val sessionId = options.sessionId?.takeIf { options.compressHistory && it.isNotBlank() }
+        val plan = if (sessionId == null) {
+            HistoryPlan(history, emptyList(), null, 0)
+        } else {
+            compressor.plan(history, summaryStore.get(sessionId))
+        }
+        val compression = if (sessionId == null) {
+            null
+        } else {
+            plan.toFold.takeIf { it.isNotEmpty() }?.let { folded ->
+                compress(model, plan.summary, folded).also { attempt ->
+                    attempt.summary?.let { summaryStore.put(sessionId, it) }
+                }
+            }
+        }
+        // Сводку не удалось построить — отправляем историю целиком: диалог не теряем.
+        val summary = when {
+            compression != null && compression.summary == null -> null
+            else -> compression?.summary ?: plan.summary
+        }
+        val historyForRequest = if (summary != null) plan.recent else history
+
         val messages = buildList {
             systemPrompt?.let { add(ChatMessage("system", it)) }
-            addAll(history)
+            summary?.let { add(compressor.summaryMessage(it)) }
+            addAll(historyForRequest)
             add(ChatMessage("user", userMessage))
         }
 
         // Разбивка по частям: API отдаёт только общий prompt_tokens, поэтому
         // вклад system prompt, истории и текущего запроса считаем локально.
         val systemTokens = systemPrompt?.let(tokenCounter::count) ?: 0
-        val historyTokens = history.sumOf { tokenCounter.count(it.content) }
+        val summaryTokens = summary?.tokens ?: 0
+        val recentTokens = historyForRequest.sumOf { tokenCounter.count(it.content) }
+        val historyTokens = summaryTokens + recentTokens
+        val historyRawTokens = history.sumOf { tokenCounter.count(it.content) }
         val requestTokens = tokenCounter.count(userMessage)
         val promptEstimate = tokenCounter.countPrompt(messages)
+
+        if (summary != null) {
+            logger.log(
+                listOf(
+                    "Сжатие истории",
+                    "свёрнуто сообщений: ${summary.foldedMessages} (сводка $summaryTokens ток.)",
+                    "последних сообщений как есть: ${historyForRequest.size} ($recentTokens ток.)",
+                    "история без сжатия: $historyRawTokens ток.",
+                    "история к отправке: $historyTokens ток.",
+                    "экономия: ${historyRawTokens - historyTokens} ток. (${percent1(share(historyRawTokens - historyTokens, historyRawTokens))}%)",
+                    compression?.let {
+                        "служебный вызов сводки: ${it.totalTokens} ток. " +
+                            "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                    }
+                ).filterNotNull().joinToString("\n")
+            )
+        }
 
         logger.log(
             listOf(
                 "Запрос → $model",
                 "system prompt: $systemTokens ток.",
-                "история: $historyTokens ток. (${history.size} сообщ.)",
+                "история: $historyTokens ток. (${historyForRequest.size} сообщ.)",
                 "текущий вопрос: $requestTokens ток.",
                 "всего (оценка): $promptEstimate ток.",
                 "бюджет ответа: $maxTokens ток.",
@@ -195,10 +256,77 @@ class LlmAgent(
                 maxOutputTokens = spec.maxOutputTokens,
                 promptWindowShare = windowShare,
                 replyFinishReason = choice.finishReason,
-                costUsd = cost
+                costUsd = cost,
+                historyRawTokens = historyRawTokens,
+                summaryTokens = summaryTokens,
+                foldedMessages = summary?.foldedMessages ?: 0,
+                compressionTokens = compression?.totalTokens ?: 0,
+                compressionCostUsd = compression?.costUsd
             )
         )
     }
+
+    /** Сводка строится отдельным вызовом и стоит токенов: они тоже попадают в отчёт. */
+    private data class SummaryAttempt(
+        val summary: StoredSummary?,
+        val promptTokens: Int,
+        val replyTokens: Int,
+        val costUsd: Double?
+    ) {
+        /** Полная цена служебного вызова: запрос сводки и её текст. */
+        val totalTokens: Int get() = promptTokens + replyTokens
+    }
+
+    /**
+     * Сворачивает сообщения в сводку отдельным вызовом модели.
+     *
+     * Сбой служебного вызова не должен ломать диалог: в этом случае сводка не
+     * обновляется (вернётся null), а запрос уходит с полной историей.
+     */
+    private suspend fun compress(
+        model: String,
+        previous: StoredSummary?,
+        messages: List<ChatMessage>
+    ): SummaryAttempt {
+        val request = compressor.summaryRequest(model, previous, messages)
+        return try {
+            val response = llm.complete(request)
+            val usage = response.usage
+            val promptTokens = usage?.promptTokens ?: tokenCounter.countPrompt(request.messages)
+            val replyTokens = usage?.completionTokens ?: 0
+            val cost = ModelCatalog.spec(model).cost(promptTokens, replyTokens)
+            val text = response.choices.first().message.content.trim()
+
+            if (text.isEmpty()) {
+                logger.log("Сжатие истории не удалось (модель вернула пустую сводку) — контекст отправлен как есть")
+                return SummaryAttempt(null, promptTokens, replyTokens, cost)
+            }
+
+            SummaryAttempt(
+                summary = StoredSummary(
+                    text = text,
+                    foldedMessages = (previous?.foldedMessages ?: 0) + messages.size,
+                    tokens = tokenCounter.count(text)
+                ),
+                promptTokens = promptTokens,
+                replyTokens = replyTokens,
+                costUsd = cost
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            logger.log(
+                "Сжатие истории не удалось (${error.message ?: error::class.simpleName}) — контекст отправлен как есть"
+            )
+            SummaryAttempt(null, 0, 0, null)
+        }
+    }
+
+    /** Доля части от целого: 0.0–1.0; при нулевом целом — ноль. */
+    private fun share(part: Int, total: Int): Double = if (total == 0) 0.0 else part.toDouble() / total
+
+    /** Экономия в процентах с одним знаком: доля окна в логе и так идёт с четырьмя. */
+    private fun percent1(share: Double): String = String.format(Locale.ROOT, "%.1f", share * 100)
 
     /** Доля окна в процентах: на окне в 1M токенов даже крупный диалог — доли процента. */
     private fun percent(share: Double): String = String.format(Locale.ROOT, "%.4f", share * 100)

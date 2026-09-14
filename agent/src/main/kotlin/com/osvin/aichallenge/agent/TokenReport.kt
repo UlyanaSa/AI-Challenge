@@ -26,6 +26,11 @@ import kotlinx.serialization.Serializable
  *        «length» — кончился бюджет `max_tokens` (у thinking-моделей его может
  *        съесть рассуждениями, и тогда текст ответа пустой).
  * @param costUsd Стоимость запуска в USD; null, если тариф не опубликован.
+ * @param historyRawTokens Токены всей истории, которую прислал клиент: без сжатия.
+ * @param summaryTokens Токены сводки, которая заменила свёрнутые сообщения.
+ * @param foldedMessages Сколько сообщений свёрнуто в сводку.
+ * @param compressionTokens Токены служебного вызова, которым строилась сводка (запрос + ответ).
+ * @param compressionCostUsd Стоимость этого вызова в USD; null — тариф не опубликован.
  */
 @Serializable
 data class TokenReport(
@@ -41,7 +46,12 @@ data class TokenReport(
     @SerialName("max_output_tokens") val maxOutputTokens: Int,
     @SerialName("prompt_window_share") val promptWindowShare: Double,
     @SerialName("reply_finish_reason") val replyFinishReason: String? = null,
-    @SerialName("cost_usd") val costUsd: Double? = null
+    @SerialName("cost_usd") val costUsd: Double? = null,
+    @SerialName("history_raw_tokens") val historyRawTokens: Int = history,
+    @SerialName("summary_tokens") val summaryTokens: Int = 0,
+    @SerialName("folded_messages") val foldedMessages: Int = 0,
+    @SerialName("compression_tokens") val compressionTokens: Int = 0,
+    @SerialName("compression_cost_usd") val compressionCostUsd: Double? = null
 )
 
 /**

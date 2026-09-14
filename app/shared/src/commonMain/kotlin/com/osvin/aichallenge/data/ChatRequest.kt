@@ -12,6 +12,8 @@ import kotlinx.serialization.Serializable
  * @param temperature Температура генерации (0.0–2.0); по умолчанию 0.7.
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
+ * @param sessionId Идентификатор сессии диалога: по нему сервер держит сводку
+ *        истории отдельно от самих сообщений. Null — сервер обойдётся без сводки.
  */
 @Serializable
 data class ChatRequest(
@@ -21,5 +23,6 @@ data class ChatRequest(
     val stop: List<String>? = null,
     val temperature: Double? = null,
     val systemPrompt: String? = null,
-    val history: List<ChatMessage>? = null
+    val history: List<ChatMessage>? = null,
+    val sessionId: String? = null
 )

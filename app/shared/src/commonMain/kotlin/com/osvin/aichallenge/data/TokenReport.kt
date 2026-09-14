@@ -22,6 +22,11 @@ import kotlin.math.roundToLong
  * @param replyFinishReason Причина остановки: «stop» — модель договорила,
  *        «length» — кончился бюджет `max_tokens`.
  * @param costUsd Стоимость в USD; null, если тариф модели не опубликован.
+ * @param historyRawTokens Токены всей истории, которую прислал клиент, без сжатия.
+ * @param summaryTokens Токены сводки, которой сжали историю.
+ * @param foldedMessages Сколько сообщений свёрнуто в сводку.
+ * @param compressionTokens Токены вызова, которым строилась сводка (запрос + ответ).
+ * @param compressionCostUsd Цена этого вызова в USD; null, если тариф не опубликован.
  */
 @Serializable
 data class TokenReport(
@@ -35,26 +40,41 @@ data class TokenReport(
     @SerialName("context_window") val contextWindow: Int = 0,
     @SerialName("prompt_window_share") val promptWindowShare: Double = 0.0,
     @SerialName("reply_finish_reason") val replyFinishReason: String? = null,
-    @SerialName("cost_usd") val costUsd: Double? = null
+    @SerialName("cost_usd") val costUsd: Double? = null,
+    @SerialName("history_raw_tokens") val historyRawTokens: Int = 0,
+    @SerialName("summary_tokens") val summaryTokens: Int = 0,
+    @SerialName("folded_messages") val foldedMessages: Int = 0,
+    @SerialName("compression_tokens") val compressionTokens: Int = 0,
+    @SerialName("compression_cost_usd") val compressionCostUsd: Double? = null
 ) {
     /**
      * Одна запись лога на весь отчёт: характеристики идут отдельными строками,
      * но запись одна — так блок читается целиком, а не рассыпается по logcat.
+     * Строки о сжатии истории появляются только когда сервер действительно
+     * свернул сообщения: без сжатия запись остаётся прежней.
      */
-    fun logEntry(model: String): String = listOf(
-        "[agent] Запрос → $model",
-        "[agent] system prompt: $systemPrompt ток.",
-        "[agent] история: $history ток.",
-        "[agent] текущий вопрос: $request ток.",
-        "[agent] всего (оценка): $promptEstimate ток.",
-        "[agent] окно модели: $contextWindow ток.",
-        "[agent] Ответ ← $model",
-        "[agent] токенов запроса: $promptTokens (факт), $promptEstimate (оценка)",
-        "[agent] токенов ответа: $replyTokens (рассуждения: $replyReasoningTokens)",
-        "[agent] finish: ${replyFinishReason ?: "неизвестно"}",
-        "[agent] окно занято: ${fixed(promptWindowShare * 100, 4)}%",
-        "[agent] цена: ${costUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
-    ).joinToString("\n")
+    fun logEntry(model: String): String = buildList {
+        add("[agent] Запрос → $model")
+        add("[agent] system prompt: $systemPrompt ток.")
+        add("[agent] история: $history ток.")
+        if (foldedMessages > 0) {
+            add("[agent] сжатие истории: свёрнуто $foldedMessages сообщ. в сводку $summaryTokens ток.")
+            add(
+                "[agent] история к отправке: $history ток. вместо $historyRawTokens ток. " +
+                    "(экономия ${historyRawTokens - history} ток., " +
+                    "${fixed(100.0 * (historyRawTokens - history) / historyRawTokens, 1)}%)"
+            )
+        }
+        add("[agent] текущий вопрос: $request ток.")
+        add("[agent] всего (оценка): $promptEstimate ток.")
+        add("[agent] окно модели: $contextWindow ток.")
+        add("[agent] Ответ ← $model")
+        add("[agent] токенов запроса: $promptTokens (факт), $promptEstimate (оценка)")
+        add("[agent] токенов ответа: $replyTokens (рассуждения: $replyReasoningTokens)")
+        add("[agent] finish: ${replyFinishReason ?: "неизвестно"}")
+        add("[agent] окно занято: ${fixed(promptWindowShare * 100, 4)}%")
+        add("[agent] цена: ${costUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}")
+    }.joinToString("\n")
 }
 
 /**

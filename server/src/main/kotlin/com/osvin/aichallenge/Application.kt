@@ -4,6 +4,7 @@ import com.osvin.aichallenge.agent.AgentOptions
 import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
+import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.models.*
@@ -29,6 +30,7 @@ import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
@@ -56,6 +58,14 @@ val client = HttpClient(CIO) {
         socketTimeoutMillis = 300_000
     }
 }
+
+/**
+ * Сводки историй диалогов: отдельно от сообщений, по сессии.
+ *
+ * Хранилище общее на все запросы сервера: агент создаётся на каждый запрос,
+ * а сводка должна пережить запрос и заменить свёрнутые сообщения в следующем.
+ */
+val summaryStore = InMemorySummaryStore()
 
 /**
  * Точка входа в приложение.
@@ -149,6 +159,7 @@ fun Application.module() {
         anyHost()
         allowMethod(HttpMethod.Post)
         allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Delete)
         allowHeader(HttpHeaders.ContentType)
         allowHeader(HttpHeaders.Authorization)
     }
@@ -216,7 +227,7 @@ fun Application.module() {
             val apiKey = deepSeekApiKey()
                 ?: error("API ключ не настроен")
 
-            val agent = LlmAgent(DeepSeekClient(apiKey, client))
+            val agent = LlmAgent(DeepSeekClient(apiKey, client), summaryStore = summaryStore)
             val result = agent.run(
                 userMessage = request.message,
                 options = AgentOptions(
@@ -225,7 +236,9 @@ fun Application.module() {
                     stop = request.stop,
                     temperature = request.temperature,
                     systemPrompt = request.systemPrompt,
-                    history = request.history ?: emptyList()
+                    history = request.history ?: emptyList(),
+                    sessionId = request.sessionId,
+                    compressHistory = request.compressHistory ?: true
                 )
             )
 
@@ -237,6 +250,17 @@ fun Application.module() {
                     tokens = result.tokens
                 )
             )
+        }
+
+        /**
+         * Удаление сессии чата.
+         * Клиент удалил чат — сводка его истории серверу больше не нужна:
+         * без этого память росла бы на каждый удалённый диалог.
+         */
+        delete("/v1/chats/{sessionId}") {
+            val sessionId = call.parameters["sessionId"].orEmpty()
+            summaryStore.clear(sessionId)
+            call.respond(HttpStatusCode.NoContent)
         }
     }
 }

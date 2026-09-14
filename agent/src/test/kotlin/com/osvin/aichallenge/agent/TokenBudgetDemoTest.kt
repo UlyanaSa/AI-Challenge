@@ -1,16 +1,7 @@
 package com.osvin.aichallenge.agent
 
 import com.osvin.aichallenge.models.ChatMessage
-import com.osvin.aichallenge.models.DeepSeekRequest
-import com.osvin.aichallenge.models.DeepSeekResponse
-import com.osvin.aichallenge.models.config.AppConfig
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
 import org.junit.Assume.assumeTrue
 import org.junit.FixMethodOrder
 import org.junit.runners.MethodSorters
@@ -19,15 +10,10 @@ import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-/** Модель демонстрации — та же, что у сервера по умолчанию. */
-private val DEMO_MODEL = AppConfig.DEFAULT_MODEL
-
 /** Бюджет ответа стресс-этапов: прибавляется к запросу при проверке окна модели. */
 private const val STRESS_MAX_TOKENS = 512
 
-/** Токены подставленного ответа: постоянные, чтобы в таблице роста виден был вклад истории. */
-private const val CANNED_REPLY_TOKENS = 150
-private const val CANNED_REASONING_TOKENS = 90
+/** Ответ подставленного транспорта: демонстрация роста входа, а не качества ответа. */
 private const val CANNED_REPLY =
     "Вы называли бюджет 5 000 рублей в месяц на дорогу: такси, метро и поезда к родителям."
 
@@ -109,91 +95,6 @@ private val DEMO_DIALOG: List<ChatMessage> = listOf(
     )
 )
 
-/** Живой режим включается явно: без него прогон не ходит в сеть и не тратит бюджет. */
-private val demoLive: Boolean =
-    System.getProperty("demo.live") == "1" || System.getenv("DEEPSEEK_DEMO_LIVE") == "1"
-
-/** Ключ: из задачи `demoLogs` (берёт `server/.env`), из окружения или из запуска в IDE. */
-private val demoApiKey: String? =
-    System.getProperty("demo.api.key")?.takeIf { it.isNotBlank() }
-        ?: System.getenv("DEEPSEEK_API_KEY")?.takeIf { it.isNotBlank() }
-
-/** Идёт ли прогон на живом API: нужен и флаг, и ключ. */
-private val demoOnLiveApi: Boolean = demoLive && demoApiKey != null
-
-/** Транспорт демонстрации: живой — только по явному запросу, иначе подставленный ответ. */
-private fun demoClient(): LlmClient = if (demoOnLiveApi) liveClient() else CannedClient()
-
-/** Живой транспорт: тот же клиент, что у сервера, — отличается только таймаутами. */
-private fun liveClient(): LlmClient = DeepSeekClient(
-    apiKey = demoApiKey!!,
-    http = HttpClient(CIO) {
-        install(ContentNegotiation) {
-            json(Json {
-                ignoreUnknownKeys = true
-                isLenient = true
-            })
-        }
-        install(HttpTimeout) {
-            requestTimeoutMillis = 300_000
-            connectTimeoutMillis = 20_000
-            socketTimeoutMillis = 300_000
-        }
-    }
-)
-
-/**
- * Подставленный транспорт: сеть не нужна. Токены запроса считает тот же счётчик,
- * что и агент, поэтому «факт» равен оценке, а ответ фиксированный — демонстрация
- * показывает рост входа, а не качество ответа.
- */
-private class CannedClient : LlmClient {
-    override suspend fun complete(request: DeepSeekRequest): DeepSeekResponse {
-        val promptTokens = EstimatingTokenCounter.countPrompt(request.messages)
-        return DeepSeekResponse(
-            choices = listOf(DeepSeekResponse.Choice(ChatMessage("assistant", CANNED_REPLY), "stop")),
-            usage = DeepSeekResponse.Usage(
-                promptTokens = promptTokens,
-                completionTokens = CANNED_REPLY_TOKENS,
-                totalTokens = promptTokens + CANNED_REPLY_TOKENS,
-                completionTokensDetails = DeepSeekResponse.Usage.CompletionTokensDetails(CANNED_REASONING_TOKENS)
-            )
-        )
-    }
-}
-
-/** Печатает строку демонстрации в том же потоке, что и лог агента. */
-private fun log(line: String) = println("[agent] $line")
-
-/** Заголовок этапа и режим прогона: сразу видно, живые числа или подставленные. */
-private fun stage(title: String) {
-    val mode = if (demoOnLiveApi) {
-        "живой API ($DEMO_MODEL)"
-    } else {
-        "подставленный ответ: сеть выключена, токены запроса считает локальный счётчик"
-    }
-    println()
-    log("===== $title =====")
-    log("режим: $mode")
-}
-
-/** Настройки демонстрации: та же модель и история диалога; бюджет ответа — по умолчанию. */
-private fun options(history: List<ChatMessage>, maxTokens: Int? = null) =
-    AgentOptions(model = DEMO_MODEL, maxTokens = maxTokens, history = history)
-
-/** Стоимость вызова по тарифу модели: вход и ответ считаются отдельно. */
-private fun callCost(tokens: TokenReport): Double {
-    val spec = ModelCatalog.spec(DEMO_MODEL)
-    return tokens.promptTokens / 1_000_000.0 * (spec.inputPer1MUsd ?: 0.0) +
-        tokens.replyTokens / 1_000_000.0 * (spec.outputPer1MUsd ?: 0.0)
-}
-
-/** Цена за 1 млн токенов; у модели без тарифа — прочерк. */
-private fun price(value: Double?): String =
-    value?.let { String.format(Locale.ROOT, "%.2f", it) } ?: "—"
-
-/** Деньги с точностью до микроцента: на 1M-окне это самые читаемые числа. */
-private fun money(value: Double): String = String.format(Locale.ROOT, "%.6f", value)
 
 /**
  * Итог вызова по формулам демонстрации:
@@ -254,7 +155,7 @@ class TokenBudgetDemoTest {
     @Test
     fun stage1_shortDialogHasSmallHistory() = runBlocking {
         stage("Этап 1. Короткий диалог: 2 сообщения, история маленькая")
-        val result = LlmAgent(demoClient(), logger = AgentLogger.Console)
+        val result = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Console)
             .run(TAXI_QUESTION, options(DEMO_DIALOG.take(2)))
         logCallTotals("итог этапа 1", result.tokens)
     }
@@ -263,7 +164,7 @@ class TokenBudgetDemoTest {
     @Test
     fun stage2_longDialogHasBiggerHistory() = runBlocking {
         stage("Этап 2. Длинный диалог: 14 сообщений, история заметно выросла")
-        val result = LlmAgent(demoClient(), logger = AgentLogger.Console)
+        val result = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Console)
             .run(TAXI_QUESTION, options(DEMO_DIALOG))
         logCallTotals("итог этапа 2", result.tokens)
     }
@@ -272,7 +173,7 @@ class TokenBudgetDemoTest {
     @Test
     fun stage3_shortQuestionStillSendsWholeHistory() = runBlocking {
         stage("Этап 3. Короткий вопрос «$BUDGET_QUESTION» при той же истории")
-        val result = LlmAgent(demoClient(), logger = AgentLogger.Console)
+        val result = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Console)
             .run(BUDGET_QUESTION, options(DEMO_DIALOG))
         logCallTotals("итог этапа 3", result.tokens)
     }
@@ -301,7 +202,7 @@ class TokenBudgetDemoTest {
         val replyNote = if (demoOnLiveApi) "ответ — из ответа API" else "ответ постоянный: $CANNED_REPLY_TOKENS ток."
         log("вопрос «$BUDGET_QUESTION» = $questionTokens ток. на любом ходу; $replyNote")
         log(String.format(Locale.ROOT, "%7s %9s %8s %9s %8s %8s %11s", "сообщ.", "история", "вопрос", "вход", "ответ", "всего", "цена"))
-        val agent = LlmAgent(demoClient(), logger = AgentLogger.Silent)
+        val agent = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Silent)
         var totalCost = 0.0
         for (messages in 2..DEMO_DIALOG.size step 2) {
             val tokens = agent.run(BUDGET_QUESTION, options(DEMO_DIALOG.take(messages))).tokens
@@ -324,7 +225,7 @@ class TokenBudgetDemoTest {
         stage("Стресс 1. История у границы окна: запрос не уходит в API")
         val history = ballast(windowShare = 1.2)
         log("оценка запроса: ${estimate(history, BUDGET_QUESTION)} ток., окно модели: ${ModelCatalog.CONTEXT_WINDOW} ток.")
-        val agent = LlmAgent(demoClient(), logger = AgentLogger.Console)
+        val agent = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Console)
         val failure = assertFailsWith<ContextOverflowException> {
             agent.run(BUDGET_QUESTION, options(history, maxTokens = STRESS_MAX_TOKENS))
         }
@@ -347,7 +248,7 @@ class TokenBudgetDemoTest {
             promptEstimate + STRESS_MAX_TOKENS <= spec.contextWindow,
             "балласт должен проходить проверку агента, иначе провайдер не получит запрос"
         )
-        val agent = LlmAgent(demoClient(), logger = AgentLogger.Console)
+        val agent = LlmAgent(demoClient(CANNED_REPLY), logger = AgentLogger.Console)
         val failure = assertFailsWith<LlmApiException> {
             agent.run(BUDGET_QUESTION, options(history, maxTokens = STRESS_MAX_TOKENS))
         }
