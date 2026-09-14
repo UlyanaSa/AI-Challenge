@@ -34,7 +34,10 @@ class DeepSeekClient(
         }
 
         if (!response.status.isSuccess()) {
-            error("DeepSeek API error: ${response.status} - ${response.bodyAsText()}")
+            throw LlmApiException(
+                status = response.status.value,
+                message = "DeepSeek API error: ${response.status} - ${response.bodyAsText()}"
+            )
         }
 
         val body = response.body<DeepSeekResponse>()

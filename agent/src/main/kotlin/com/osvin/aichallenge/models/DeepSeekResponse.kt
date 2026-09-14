@@ -21,6 +21,13 @@ data class DeepSeekResponse(
     data class Usage(
         @SerialName("prompt_tokens") val promptTokens: Int,
         @SerialName("completion_tokens") val completionTokens: Int,
-        @SerialName("total_tokens") val totalTokens: Int
-    )
+        @SerialName("total_tokens") val totalTokens: Int,
+        @SerialName("completion_tokens_details") val completionTokensDetails: CompletionTokensDetails? = null
+    ) {
+        /** Разбивка токенов ответа: у thinking-моделей часть бюджета уходит в рассуждения. */
+        @Serializable
+        data class CompletionTokensDetails(
+            @SerialName("reasoning_tokens") val reasoningTokens: Int = 0
+        )
+    }
 }

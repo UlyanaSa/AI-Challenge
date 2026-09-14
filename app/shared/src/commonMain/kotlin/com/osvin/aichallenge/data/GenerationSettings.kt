@@ -63,8 +63,12 @@ data class GenerationSettings(
             )
         )
 
-        /** Значение по умолчанию повторяет серверное (AppConfig), чтобы поведение чата не изменилось. */
-        const val DEFAULT_MAX_TOKENS = 2000
+        /**
+         * Значение по умолчанию повторяет серверное (AppConfig) и равно верхней
+         * границе для клиента: у thinking-модели рассуждения идут из того же бюджета,
+         * и на 2000 токенов обычный вопрос возвращался пустым ответом.
+         */
+        const val DEFAULT_MAX_TOKENS = 8192
 
         /** Верхняя граница max_tokens, которую принимает DeepSeek API. */
         const val MAX_TOKENS_LIMIT = 8192

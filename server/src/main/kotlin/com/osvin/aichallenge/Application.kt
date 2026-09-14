@@ -1,8 +1,11 @@
 package com.osvin.aichallenge
 
 import com.osvin.aichallenge.agent.AgentOptions
+import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DeepSeekClient
+import com.osvin.aichallenge.agent.EmptyReplyException
 import com.osvin.aichallenge.agent.LlmAgent
+import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.models.*
 import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
@@ -29,6 +32,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import java.io.File
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
@@ -67,6 +71,25 @@ fun main() {
 }
 
 /**
+ * Ключ DeepSeek: сначала переменная окружения, затем `server/.env`.
+ *
+ * `.env` читает сам сервер, а не только Gradle-задача `runDev`: сервер запускают
+ * и из IDE, и через `:server:run`, и из собранного jar — без этого ключа маршрут
+ * падал до того, как агент успевал напечатать свои логи.
+ */
+private fun deepSeekApiKey(): String? =
+    System.getenv("DEEPSEEK_API_KEY") ?: envFile()["DEEPSEEK_API_KEY"]
+
+/** Содержимое `.env` рядом с проектом или в текущем каталоге; пусто, если файла нет. */
+private fun envFile(): Map<String, String> {
+    val file = listOf(File("server/.env"), File(".env")).firstOrNull { it.isFile } ?: return emptyMap()
+    return file.readLines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains('=') }
+        .associate { it.substringBefore('=').trim() to it.substringAfter('=').trim() }
+}
+
+/**
  * Основной модуль сервера Ktor.
  * Настраивает плагины и маршрутизацию.
  */
@@ -81,6 +104,37 @@ fun Application.module() {
 
     // Глобальная обработка исключений
     install(StatusPages) {
+        // Переполнение контекста — ошибка запроса, а не сбой сервера
+        exception<ContextOverflowException> { call, cause ->
+            call.respond(
+                HttpStatusCode.BadRequest,
+                ErrorResponse(success = false, error = cause.message ?: "Контекст переполнен")
+            )
+        }
+
+        // Пустой ответ модели: бюджета ответа не хватило на текст (thinking-модель
+        // спустила его на рассуждения) — клиенту нужна причина, а не пустая строка
+        exception<EmptyReplyException> { call, cause ->
+            call.respond(
+                HttpStatusCode.BadRequest,
+                ErrorResponse(success = false, error = cause.message ?: "Модель не вернула текст ответа")
+            )
+        }
+
+        // Ошибка запроса у провайдера: переполнение контекста, неверный max_tokens —
+        // это вина запроса, а не сбой сервера. Сбой API провайдера — 502.
+        exception<LlmApiException> { call, cause ->
+            val status = if (cause.status in 400..499) {
+                HttpStatusCode.BadRequest
+            } else {
+                HttpStatusCode.BadGateway
+            }
+            call.respond(
+                status,
+                ErrorResponse(success = false, error = cause.message ?: "Ошибка LLM API")
+            )
+        }
+
         exception<Throwable> { call, cause ->
             call.application.environment.log.error("Internal Server Error", cause)
             call.respond(
@@ -111,7 +165,7 @@ fun Application.module() {
          * Проверка состояния сервера и API ключа.
          */
         get("/v1/health") {
-            val apiKey = System.getenv("DEEPSEEK_API_KEY")
+            val apiKey = deepSeekApiKey()
 
             if (apiKey.isNullOrBlank()) {
                 call.respond(
@@ -159,7 +213,7 @@ fun Application.module() {
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
-            val apiKey = System.getenv("DEEPSEEK_API_KEY")
+            val apiKey = deepSeekApiKey()
                 ?: error("API ключ не настроен")
 
             val agent = LlmAgent(DeepSeekClient(apiKey, client))
@@ -179,7 +233,8 @@ fun Application.module() {
                 ChatResponse(
                     success = true,
                     reply = result.reply,
-                    usage = result.usage
+                    usage = result.usage,
+                    tokens = result.tokens
                 )
             )
         }

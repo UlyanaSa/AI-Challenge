@@ -1,6 +1,7 @@
 package com.osvin.aichallenge.repository
 
 import com.osvin.aichallenge.data.*
+import com.osvin.aichallenge.platformLog
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -86,25 +87,40 @@ class ChatRepository(
                     )
                 )
             }
-            
+
+            // Вопрос пользователя попадает в диалог в любом случае: и при ответе,
+            // и при ошибке — иначе при пустом ответе модели он пропадает с экрана.
+            val userMessage = ChatMessage(MessageRole.USER, message)
+            _messages.value += userMessage
+            historyStore.append(userMessage)
+
             if (response.status.isSuccess()) {
                 val chatResponse = response.body<ChatResponse>()
-                
-                // Добавляем сообщение пользователя и ответ ассистента в историю
-                // и сохраняем их, чтобы диалог пережил перезапуск приложения
-                val userMessage = ChatMessage(MessageRole.USER, message)
+
+                // Отчёт агента печатаем в лог платформы (на Android — в logcat):
+                // строки те же, что агент пишет на сервере, но видны рядом с приложением.
+                chatResponse.tokens?.let { report ->
+                    platformLog("agent", report.logEntry(settings.model))
+                }
+
                 val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply)
-                _messages.value = _messages.value + userMessage + assistantMessage
-                historyStore.append(userMessage)
+                _messages.value = _messages.value + assistantMessage
                 historyStore.append(assistantMessage)
 
                 _state.value = ChatUiState.Success(chatResponse.reply)
                 _isServerOnline.value = true
             } else {
-                _state.value = ChatUiState.Error("Ошибка сервера: ${response.status.value}")
+                // Сервер объясняет отказ в теле ответа (переполнение контекста,
+                // пустой ответ модели, сбой провайдера) — в чате показываем его
+                // текст, а не только код статуса.
+                val reason = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                val error = reason ?: "Ошибка сервера: ${response.status.value}"
+                platformLog("agent", "[agent] Ошибка: $error")
+                _state.value = ChatUiState.Error(error)
             }
         } catch (e: Exception) {
             _isServerOnline.value = false
+            platformLog("agent", "[agent] Сервер недоступен: ${e.message ?: "нет соединения"}")
             _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
         }
     }

@@ -14,7 +14,16 @@ import com.osvin.aichallenge.models.DeepSeekResponse
 interface LlmClient {
     /**
      * Отправляет запрос к LLM API и возвращает разобранный ответ.
-     * @throws IllegalStateException если API вернул неуспешный статус.
+     * @throws LlmApiException если API вернул неуспешный статус.
      */
     suspend fun complete(request: DeepSeekRequest): DeepSeekResponse
 }
+
+/**
+ * Провайдер ответил неуспешным статусом.
+ * Ошибки 4xx — вина запроса (например, переполнение контекста), 5xx — сбой API.
+ *
+ * @param status HTTP-статус ответа провайдера.
+ * @param message Сообщение провайдера как есть, с его числами токенов.
+ */
+class LlmApiException(val status: Int, message: String) : IllegalStateException(message)
