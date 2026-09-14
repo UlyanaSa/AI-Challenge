@@ -7,3 +7,6 @@ class AndroidPlatform : Platform {
 }
 
 actual fun getPlatform(): Platform = AndroidPlatform()
+
+/** На эмуляторе хост-машина доступна по адресу 10.0.2.2. */
+actual fun serverBaseUrl(): String = "http://10.0.2.2:8080"

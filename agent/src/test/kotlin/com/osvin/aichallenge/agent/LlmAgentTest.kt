@@ -68,10 +68,18 @@ class LlmAgentTest {
         assertEquals(512, request.maxTokens)
         assertEquals(0.2, request.temperature)
         assertEquals(listOf("СТОП"), request.stop)
-        assertEquals(listOf(ChatMessage("user", "Опиши породу")), request.messages)
+        // Первый запрос диалога: история пуста, поэтому system prompt — само
+        // первое сообщение пользователя (свой system prompt не задан)
+        assertEquals(
+            listOf(
+                ChatMessage("system", "Опиши породу"),
+                ChatMessage("user", "Опиши породу")
+            ),
+            request.messages
+        )
     }
 
-    /** Свой system prompt и история диалога идут перед текущим запросом. */
+    /** Заданный system prompt и история диалога идут перед текущим запросом. */
     @Test
     fun agentSendsSystemPromptAndHistoryBeforeUserMessage() = runBlocking {
         val llm = FakeLlmClient(response("ок"))
@@ -96,6 +104,94 @@ class LlmAgentTest {
                 ChatMessage("user", "А сколько лет?")
             ),
             llm.requests.single().messages
+        )
+    }
+
+    /** System prompt не задан — его роль играет первое сообщение диалога. */
+    @Test
+    fun firstUserMessageBecomesSystemPromptWhenPromptIsNotSet() = runBlocking {
+        val llm = FakeLlmClient(response("ок"))
+
+        testAgent(llm).run(
+            "А теперь переведи это",
+            AgentOptions(
+                history = listOf(
+                    ChatMessage("user", "Ты переводчик, отвечай только переводом"),
+                    ChatMessage("assistant", "Понял, жду текст")
+                )
+            )
+        )
+
+        assertEquals(
+            listOf(
+                ChatMessage("system", "Ты переводчик, отвечай только переводом"),
+                ChatMessage("user", "Ты переводчик, отвечай только переводом"),
+                ChatMessage("assistant", "Понял, жду текст"),
+                ChatMessage("user", "А теперь переведи это")
+            ),
+            llm.requests.single().messages
+        )
+    }
+
+    /** Заданный system prompt важнее первого сообщения диалога. */
+    @Test
+    fun settingsSystemPromptWinsOverFirstMessage() = runBlocking {
+        val llm = FakeLlmClient(response("ок"))
+
+        testAgent(llm).run(
+            "Вопрос",
+            AgentOptions(
+                systemPrompt = "Отвечай кратко",
+                history = listOf(ChatMessage("user", "Ты переводчик"))
+            )
+        )
+
+        assertEquals(
+            listOf(
+                ChatMessage("system", "Отвечай кратко"),
+                ChatMessage("user", "Ты переводчик"),
+                ChatMessage("user", "Вопрос")
+            ),
+            llm.requests.single().messages
+        )
+    }
+
+    /**
+     * Первое сообщение остаётся system prompt и когда история сжата: свёрнутые
+     * сообщения уезжают в сводку, а инструкция из первого сообщения — нет.
+     */
+    @Test
+    fun firstMessageStaysSystemPromptWhenHistoryIsCompressed() = runBlocking {
+        val llm = FakeLlmClient(response("сводка"))
+        val agent = LlmAgent(
+            llm,
+            logger = AgentLogger { },
+            compressor = HistoryCompressor(keepLastMessages = 1, compressStep = 2)
+        )
+
+        agent.run(
+            "Что дальше?",
+            AgentOptions(
+                sessionId = "session",
+                compressHistory = true,
+                history = listOf(
+                    ChatMessage("user", "Ты строгий редактор"),
+                    ChatMessage("assistant", "Хорошо"),
+                    ChatMessage("user", "Проверь текст"),
+                    ChatMessage("assistant", "Нашёл две ошибки")
+                )
+            )
+        )
+
+        val messages = llm.requests.last().messages
+        assertEquals(ChatMessage("system", "Ты строгий редактор"), messages.first())
+        assertEquals(
+            1, messages.count { it.content == "Ты строгий редактор" },
+            "первое сообщение несёт system prompt, в истории оно не повторяется"
+        )
+        assertTrue(
+            messages.none { it.content == "Проверь текст" },
+            "свёрнутые сообщения уходят в сводку, а не в запрос: $messages"
         )
     }
 

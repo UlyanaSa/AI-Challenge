@@ -12,6 +12,7 @@ import java.util.Locale
  * и приводит их к допустимым границам ([AppConfig]).
  *
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
+ *        Не задан — его роль играет первое сообщение диалога (см. [LlmAgent]).
  * @param history Предыдущие сообщения диалога (роли user/assistant), без текущего запроса.
  * @param sessionId Идентификатор сессии диалога: по нему находится сводка истории.
  * @param compressHistory Сжимать историю: последние сообщения идут как есть, старшие — сводкой.
@@ -64,6 +65,11 @@ data class AgentResult(
  * в сводку ([HistoryCompressor]) и хранит её отдельно от сообщений в [SummaryStore].
  * Сводка уходит в запрос вместо свёрнутых сообщений, поэтому история не растёт.
  *
+ * System prompt берётся из настроек ([AgentOptions.systemPrompt]), а если он не задан —
+ * его роль играет первое сообщение диалога ([AgentOptions.history]); на первом ходу
+ * диалога это текущий запрос. Так инструкция из первого сообщения остаётся в силе
+ * и после того, как старшие сообщения свёрнуты в сводку.
+ *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
  * @param logger Лог агента: запрос, история диалога, ответ модели и ответ API при ошибке.
@@ -100,10 +106,15 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: свой system prompt, сводка истории, последние
+        // Сообщения модели: system prompt, сводка истории, последние
         // сообщения диалога и текущий запрос пользователя — в этом порядке.
-        val systemPrompt = options.systemPrompt?.takeIf { it.isNotBlank() }
+        // Свой system prompt из настроек важнее: если он задан, берём его.
+        // Если нет — его роль играет первое сообщение диалога: инструкция из него
+        // остаётся в силе и тогда, когда старшие сообщения свёрнуты в сводку.
         val history = options.history.filter { it.content.isNotBlank() }
+        val systemPrompt = options.systemPrompt?.takeIf { it.isNotBlank() }
+            ?: history.firstOrNull { it.role == USER_ROLE }?.content
+            ?: userMessage
 
         // Сжатие истории: последние сообщения уходят как есть, старшие заменяются
         // сводкой. Сводка живёт в хранилище отдельно от сообщений — по сессии.
@@ -130,10 +141,10 @@ class LlmAgent(
         val historyForRequest = if (summary != null) plan.recent else history
 
         val messages = buildList {
-            systemPrompt?.let { add(ChatMessage("system", it)) }
+            systemPrompt?.let { add(ChatMessage(SYSTEM_ROLE, it)) }
             summary?.let { add(compressor.summaryMessage(it)) }
             addAll(historyForRequest)
-            add(ChatMessage("user", userMessage))
+            add(ChatMessage(USER_ROLE, userMessage))
         }
 
         // Разбивка по частям: API отдаёт только общий prompt_tokens, поэтому
@@ -334,4 +345,10 @@ class LlmAgent(
     /** Стоимость запуска; у моделей без опубликованного тарифа — пометка вместо числа. */
     private fun costUsd(cost: Double?): String =
         cost?.let { String.format(Locale.ROOT, "\$%.6f", it) } ?: "тариф не опубликован"
+
+    private companion object {
+        /** Роли сообщений в запросе к модели. */
+        const val SYSTEM_ROLE = "system"
+        const val USER_ROLE = "user"
+    }
 }

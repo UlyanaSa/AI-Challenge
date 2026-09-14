@@ -5,3 +5,6 @@ class JVMPlatform: Platform {
 }
 
 actual fun getPlatform(): Platform = JVMPlatform()
+
+/** Десктопный запуск ходит в сервер на том же компьютере. */
+actual fun serverBaseUrl(): String = "http://localhost:8080"

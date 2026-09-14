@@ -42,6 +42,9 @@ kotlin {
        }
        withHostTest {
            isIncludeAndroidResources = true
+           // android.util.Log в host-тестах не реализован: без заглушки падает
+           // платформенный лог агента, который пишется и в ветке ошибок
+           isReturnDefaultValues = true
        }
        withDeviceTestBuilder {
            sourceSetTreeName = "test"
@@ -75,6 +78,13 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+        }
+        // Тесты чатов поднимают репозиторий над подставным HTTP-транспортом
+        // и проверяют, что уходит на сервер.
+        val androidHostTest by getting {
+            dependencies {
+                implementation(libs.ktor.client.mock)
+            }
         }
         jsMain.dependencies {
             implementation(libs.wrappers.browser)

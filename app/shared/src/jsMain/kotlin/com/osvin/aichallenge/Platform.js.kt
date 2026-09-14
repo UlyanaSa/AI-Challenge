@@ -12,3 +12,5 @@ class JsPlatform: Platform {
 }
 
 actual fun getPlatform(): Platform = JsPlatform()
+/** Сервер запущен на том же компьютере, что и браузер. */
+actual fun serverBaseUrl(): String = "http://localhost:8080"

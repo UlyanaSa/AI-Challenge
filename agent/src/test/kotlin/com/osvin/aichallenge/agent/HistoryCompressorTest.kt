@@ -132,9 +132,15 @@ class HistoryCompressorTest {
         )
 
         val sent = client.requests.last().messages
-        assertEquals(12, sent.size, "сводка + последние 10 сообщений + вопрос")
-        assertTrue(sent.first().content.startsWith("Сводка предыдущего диалога"))
-        assertTrue(sent.none { it.content == "сообщение 1" }, "свёрнутые сообщения в запрос не уходят")
+        assertEquals(13, sent.size, "system prompt + сводка + последние 10 сообщений + вопрос")
+        assertEquals(
+            ChatMessage("system", "сообщение 1"), sent.first(),
+            "свой system prompt не задан, поэтому его роль играет первое сообщение диалога"
+        )
+        assertTrue(sent[1].content.startsWith("Сводка предыдущего диалога"))
+        // Свёрнутые сообщения в запрос не уходят — кроме первого: оно несёт system prompt
+        val folded = (2..15).map { "сообщение $it" }
+        assertTrue(sent.none { it.content in folded }, "свёрнутые сообщения не должны уходить в модель: $sent")
         assertEquals(15, result.tokens.foldedMessages)
         assertTrue(result.tokens.historyRawTokens > result.tokens.history)
         assertEquals(150, result.tokens.compressionTokens)
@@ -150,7 +156,7 @@ class HistoryCompressorTest {
         )
 
         val sent = client.requests.last().messages
-        assertEquals(26, sent.size)
+        assertEquals(27, sent.size, "25 сообщений истории + system prompt из первого + вопрос")
         assertTrue(sent.any { it.content == "сообщение 1" })
         assertEquals(0, result.tokens.foldedMessages)
         assertEquals(result.tokens.historyRawTokens, result.tokens.history)
@@ -166,7 +172,7 @@ class HistoryCompressorTest {
         )
 
         assertEquals(1, client.requests.size)
-        assertEquals(26, client.requests.first().messages.size)
+        assertEquals(27, client.requests.first().messages.size)
         assertEquals(0, result.tokens.compressionTokens)
         assertEquals(result.tokens.historyRawTokens, result.tokens.history)
     }
