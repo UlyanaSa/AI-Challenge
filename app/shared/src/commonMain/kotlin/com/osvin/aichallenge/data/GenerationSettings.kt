@@ -30,10 +30,13 @@ data class ModelOption(
  * @param temperature Температура генерации (0.0–2.0): 0 — детерминированный ответ,
  *                    0.7 — баланс точности и креативности, 1.2 — креативный.
  * @param strategy Стратегия управления контекстом диалога: что из истории уходит
- *                 в модель (см. [ContextStrategy]).
+ *                 в модель (см. [ContextStrategy]). По умолчанию — память агента
+ *                 ([ContextStrategy.MEMORY]): записи памяти шторка пишет именно
+ *                 в неё, и без этой стратегии записанное не уходило бы в модель.
+ *                 Дальше стратегия живёт у чата ([Chat.strategy]).
  * @param windowMessages Сколько последних сообщений отправляют стратегии со скользящим
- *                 окном и памятью фактов: [ContextStrategy.SLIDING_WINDOW] и
- *                 [ContextStrategy.FACTS]. Остальные стратегии его не читают.
+ *                 окном и памятью: [ContextStrategy.SLIDING_WINDOW] и
+ *                 [ContextStrategy.MEMORY]. Остальные стратегии его не читают.
  */
 data class GenerationSettings(
     val model: String = DEFAULT_MODEL,
@@ -41,7 +44,7 @@ data class GenerationSettings(
     val stopWords: List<String> = emptyList(),
     val systemPrompt: String = "",
     val temperature: Double = DEFAULT_TEMPERATURE,
-    val strategy: ContextStrategy = ContextStrategy.SUMMARY,
+    val strategy: ContextStrategy = DEFAULT_STRATEGY,
     val windowMessages: Int = DEFAULT_WINDOW_MESSAGES
 ) {
     companion object {
@@ -92,7 +95,14 @@ data class GenerationSettings(
         /** Температура генерации по умолчанию. */
         const val DEFAULT_TEMPERATURE = 0.7
 
-        /** Размер окна стратегий «скользящее окно» и «память фактов» по умолчанию. */
+        /**
+         * Стратегия нового чата: память агента. Приложение хранит память (день 11),
+         * и чат по умолчанию обязан её читать — иначе записи из шторки лежали бы
+         * на сервере и не уходили в модель.
+         */
+        val DEFAULT_STRATEGY = ContextStrategy.MEMORY
+
+        /** Размер окна стратегий «скользящее окно» и «память агента» по умолчанию. */
         const val DEFAULT_WINDOW_MESSAGES = 10
 
         /** Нижняя граница окна в шторке настроек: совсем короткий контекст бесполезен. */

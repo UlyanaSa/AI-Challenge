@@ -23,30 +23,34 @@ import kotlin.test.assertTrue
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class ContextStrategiesDemoTest {
 
-    /** Стратегия 1: скользящее окно — последние сообщения, старшие отбрасываются. */
+    /** Стратегия 1: скользящее окно — последние сообщения, важное из отброшенных держит рабочая память. */
     @Test
     fun stage1_slidingWindow() = runBlocking {
-        stage("Стратегия 1: скользящее окно (последние $WINDOW сообщений)")
+        stage("Стратегия 1: скользящее окно (последние $WINDOW сообщений, важное — в рабочей памяти)")
         val scene = replay(ContextStrategy.SLIDING_WINDOW)
         printScene(scene)
         assertTrue(scene.dropped > 0, "окно должно отбросить старшие сообщения: $scene")
+        assertTrue(scene.memory.working.isNotEmpty(), "окно ведёт рабочую память: $scene")
+        assertTrue(scene.memory.longTerm.isEmpty(), "долговременную память окно не ведёт")
         assertTrue(
-            scene.requestMessages <= WINDOW + 2,
-            "в запросе не больше окна плюс system prompt и вопрос: ${scene.requestMessages}"
+            scene.requestMessages <= WINDOW + 3,
+            "в запросе не больше окна, system prompt, блока памяти и вопроса: ${scene.requestMessages}"
         )
     }
 
-    /** Стратегия 2: память фактов — блок «ключ — значение» плюс последние сообщения. */
+    /** Стратегия 2: память агента — рабочая память задачи и долговременная память о пользователе. */
     @Test
-    fun stage2_facts() = runBlocking {
-        stage("Стратегия 2: память фактов (окно $WINDOW сообщений)")
-        val scene = replay(ContextStrategy.FACTS)
+    fun stage2_memory() = runBlocking {
+        stage("Стратегия 2: память агента (окно $WINDOW сообщений)")
+        val scene = replay(ContextStrategy.MEMORY)
         printScene(scene)
-        assertTrue(scene.facts.isNotEmpty(), "память фактов должна наполниться: $scene")
+        assertTrue(scene.memory.working.isNotEmpty(), "рабочая память должна наполниться: $scene")
+        assertTrue(scene.memory.longTerm.isNotEmpty(), "долговременная память должна наполниться: $scene")
         assertTrue(scene.dropped > 0, "окно всё равно отбрасывает старшие сообщения")
         assertTrue(
-            scene.requestContents.any { it.startsWith("Память диалога (факты):") },
-            "в запрос уходит блок фактов: ${scene.requestContents}"
+            scene.requestContents.any { it.startsWith("Долговременная память") } &&
+                scene.requestContents.any { it.startsWith("Рабочая память задачи") },
+            "в запрос уходят оба слоя памяти: ${scene.requestContents}"
         )
     }
 
@@ -148,7 +152,7 @@ class ContextStrategiesDemoTest {
                 cost = branch.cost,
                 serviceTokens = 0,
                 dropped = 0,
-                facts = emptyList(),
+                memory = MemoryReport(),
                 logs = emptyList(),
                 calls = branch.runs
             )
@@ -175,7 +179,7 @@ class ContextStrategiesDemoTest {
         // Сцены предыдущих этапов переиспользуются: повторять их незачем, а на живом
         // прогоне каждый повтор — это ещё пятнадцать платных сообщений.
         val window = sceneOf(ContextStrategy.SLIDING_WINDOW)
-        val facts = sceneOf(ContextStrategy.FACTS)
+        val memory = sceneOf(ContextStrategy.MEMORY)
         val branches = sceneOf(ContextStrategy.BRANCHES)
         // Полная история и сжатие — точка отсчёта в таблице, в постановку дня они не входят,
         // поэтому на живом прогоне берём их только из уже посчитанного.
@@ -184,7 +188,8 @@ class ContextStrategiesDemoTest {
         val summary = scenes[ContextStrategy.SUMMARY.wire]
             ?: if (demoOnLiveApi) null else replay(ContextStrategy.SUMMARY)
 
-        listOfNotNull(baseline, window, facts, branches, summary).forEach(::printRow)
+        printRowHeader()
+        listOfNotNull(baseline, window, memory, branches, summary).forEach(::printRow)
         if (baseline == null) {
             log("")
             log("полная история и сжатие в таблицу не попали: в постановке дня три стратегии, и живой прогон их не считает")
@@ -231,7 +236,7 @@ class ContextStrategiesDemoTest {
                 )
             )
             cost += sceneCost(result.tokens)
-            serviceTokens += result.tokens.factsUpdateTokens + result.tokens.compressionTokens
+            serviceTokens += result.tokens.memory.updateTokens + result.tokens.compressionTokens
             history += ChatMessage("user", message)
             history += ChatMessage("assistant", result.reply)
         }
@@ -247,7 +252,7 @@ class ContextStrategiesDemoTest {
             )
         )
         cost += sceneCost(probe.tokens)
-        serviceTokens += probe.tokens.factsUpdateTokens + probe.tokens.compressionTokens
+        serviceTokens += probe.tokens.memory.updateTokens + probe.tokens.compressionTokens
 
         return Scene(
             strategy = strategy,
@@ -260,7 +265,7 @@ class ContextStrategiesDemoTest {
             cost = cost,
             serviceTokens = serviceTokens,
             dropped = probe.tokens.droppedMessages,
-            facts = probe.tokens.facts,
+            memory = probe.tokens.memory,
             logs = logs,
             calls = llm.requests.size
         ).also { scenes[strategy.wire] = it }
@@ -274,8 +279,13 @@ class ContextStrategiesDemoTest {
         log("")
         log("что ушло в модель: ${scene.requestMessages} сообщ., вход ${scene.promptTokens} ток.")
         log("отброшено окном: ${scene.dropped} сообщ.")
-        log("фактов в памяти: ${scene.facts.size}")
-        scene.facts.forEach { log("- ${it.key}: ${it.value}") }
+        log(
+            "память: рабочая ${scene.memory.working.size} записей, " +
+                "долговременная ${scene.memory.longTerm.size}"
+        )
+        scene.memory.working.forEach { log("- рабочая | ${it.value}") }
+        scene.memory.longTerm.forEach { log("- долговременная | ${it.value}") }
+        if (scene.memory.rejected > 0) log("отклонено записей: ${scene.memory.rejected}")
         log("служебные вызовы: ${scene.serviceTokens} ток.")
         log("цена сцены (${scene.calls} вызовов): ${money(scene.cost)}")
         log("")
@@ -283,19 +293,31 @@ class ContextStrategiesDemoTest {
         log("важных деталей из начала диалога: ${scene.score} из ${KeyDetails.size}")
     }
 
+    /** Шапка сводной таблицы стратегий: те же колонки переносим в README. */
+    private fun printRowHeader() {
+        log(
+            String.format(
+                Locale.ROOT,
+                "%-22s %5s %5s %5s %6s %10s %5s %7s",
+                "стратегия", "сообщ", "вход", "ответ", "служ.", "цена", "детали", "память"
+            )
+        )
+    }
+
     /** Печатает строку сводной таблицы стратегий: её же переносим в README. */
     private fun printRow(scene: Scene) {
         log(
             String.format(
                 Locale.ROOT,
-                "%-22s %5d %5d %5d %6d %10s %5s",
+                "%-22s %5d %5d %5d %6d %10s %5s %7s",
                 scene.strategy.title,
                 scene.requestMessages,
                 scene.promptTokens,
                 scene.replyTokens,
                 scene.serviceTokens,
                 money(scene.cost),
-                "${scene.score}/${KeyDetails.size}"
+                "${scene.score}/${KeyDetails.size}",
+                "${scene.memory.working.size}/${scene.memory.longTerm.size}"
             )
         )
     }
@@ -312,7 +334,7 @@ class ContextStrategiesDemoTest {
         val cost: Double,
         val serviceTokens: Int,
         val dropped: Int,
-        val facts: List<Fact>,
+        val memory: MemoryReport,
         val logs: List<String>,
         val calls: Int
     ) {
@@ -349,10 +371,10 @@ class ContextStrategiesDemoTest {
 
 /** Цена всех вызовов сцены: и ответа модели, и служебного вызова стратегии. */
 private fun sceneCost(tokens: TokenReport): Double =
-    callCost(tokens) + (tokens.factsUpdateCostUsd ?: 0.0) + (tokens.compressionCostUsd ?: 0.0)
+    callCost(tokens) + (tokens.memory.updateCostUsd ?: 0.0) + (tokens.compressionCostUsd ?: 0.0)
 
 /** Заголовки блоков лога стратегий: по ним разбор сцены находит нужную запись. */
-private val STRATEGY_BLOCKS = setOf("Скользящее окно истории", "Память фактов", "Ветки диалога", "Сжатие истории")
+private val STRATEGY_BLOCKS = setOf("Скользящее окно истории", "Память агента", "Ветки диалога", "Сжатие истории")
 
 /** Начало записи лога с разбором запроса. */
 private const val REQUEST_BLOCK = "Запрос → "
@@ -394,7 +416,7 @@ private const val WINDOW = 6
  */
 private const val ANSWER_BUDGET = 32_768
 
-/** Сессия демонстрации: по ней живут сводка и память фактов. */
+/** Сессия демонстрации: по ней живут сводка и слои памяти. */
 private const val SESSION = "demo-strategies"
 
 /** Точка ветвления: после восьмого сообщения пользователя. */
@@ -436,14 +458,14 @@ private enum class KeyDetails(val title: String, val markers: List<String>) {
 
 /**
  * Подставленный транспорт демонстрации: служебные вызовы стратегий получают свои
- * ответы (память фактов — JSON, сводка — конспект), на запросы сцены отвечает
- * подставной ответ. Токены считает тот же счётчик, что и агент.
+ * ответы (память — JSON с записями слоёв, сводка — конспект), на запросы сцены
+ * отвечает подставной ответ. Токены считает тот же счётчик, что и агент.
  */
 private class CannedStrategyClient : LlmClient {
     override suspend fun complete(request: DeepSeekRequest): DeepSeekResponse {
         val instruction = request.messages.first().content
         val answer = when {
-            instruction.contains("память диалога") -> CANNED_FACTS
+            instruction.contains("память агента") -> CANNED_MEMORY
             instruction.contains("конспект") -> CANNED_SUMMARY
             else -> CANNED_REPLY
         }
@@ -475,11 +497,14 @@ private class RecordingClient(private val delegate: LlmClient) : LlmClient {
 private fun strategyClient(): RecordingClient =
     RecordingClient(if (demoOnLiveApi) liveClient() else CannedStrategyClient())
 
-private const val CANNED_FACTS =
-    """{"facts":[{"key":"цель","value":"учёт личных расходов"},{"key":"бюджет","value":"300 000 рублей"},""" +
-        """{"key":"срок","value":"6 недель"},{"key":"платформа","value":"Android, веб вторым экраном"},""" +
-        """{"key":"ограничение","value":"без регистрации, данные только на устройстве"},""" +
-        """{"key":"решение","value":"графики на Compose"},{"key":"договорённость","value":"сводка раз в неделю по пятницам"}]}"""
+private const val CANNED_MEMORY =
+    """{"memory":[{"layer":"working","value":"цель — учёт личных расходов"},""" +
+        """{"layer":"working","value":"бюджет — 300 000 рублей"},""" +
+        """{"layer":"working","value":"срок — 6 недель"},""" +
+        """{"layer":"working","value":"платформа — Android, веб вторым экраном"},""" +
+        """{"layer":"working","value":"ограничение — без регистрации, данные только на устройстве"},""" +
+        """{"layer":"working","value":"сводка — раз в неделю по пятницам"},""" +
+        """{"layer":"long_term","value":"графики — на Compose"}]}"""
 
 private const val CANNED_SUMMARY =
     "Сводка: цель — учёт личных расходов; бюджет 300 000 рублей; срок 6 недель; платформа Android; " +

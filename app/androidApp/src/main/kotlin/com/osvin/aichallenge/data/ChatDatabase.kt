@@ -25,7 +25,9 @@ data class ChatEntity(
     val createdAt: Long,
     val updatedAt: Long,
     /** Активная ветка диалога; null — основная линия. */
-    val activeBranchId: String? = null
+    val activeBranchId: String? = null,
+    /** Стратегия управления контекстом чата ([Chat.strategy]): wire-значение [ContextStrategy.wire]. */
+    val strategy: String
 )
 
 /**
@@ -81,6 +83,9 @@ abstract class ChatDao(private val db: ChatDatabase) {
 
     @Query("UPDATE chats SET activeBranchId = :branchId WHERE id = :chatId")
     abstract suspend fun setActiveBranch(chatId: String, branchId: String?)
+
+    @Query("UPDATE chats SET strategy = :strategy WHERE id = :chatId")
+    abstract suspend fun setStrategy(chatId: String, strategy: String)
 
     @Query("DELETE FROM chats WHERE id = :chatId")
     abstract suspend fun delete(chatId: String)
@@ -139,7 +144,7 @@ abstract class ChatMessageDao {
  */
 @Database(
     entities = [ChatEntity::class, ChatMessageEntity::class, DialogBranchEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -218,6 +223,19 @@ abstract class ChatDatabase : RoomDatabase() {
                         "PRIMARY KEY(`id`))"
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_branches_chatId ON branches (chatId)")
+            }
+        }
+
+        /**
+         * Переход со схемы 3 на схему 4: у чата появилась своя стратегия контекста.
+         *
+         * Данные не теряются: колонка добавляется аддитивно. У старых чатов она
+         * равна «памяти агента» — умолчанию приложения: иначе чат, в котором память
+         * записывали, не читал бы её после обновления.
+         */
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chats ADD COLUMN strategy TEXT NOT NULL DEFAULT 'memory'")
             }
         }
 

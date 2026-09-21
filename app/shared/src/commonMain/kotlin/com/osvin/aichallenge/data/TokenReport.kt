@@ -28,15 +28,12 @@ import kotlin.math.roundToLong
  * @param compressionTokens Токены вызова, которым строилась сводка (запрос + ответ).
  * @param compressionCostUsd Цена этого вызова в USD; null, если тариф не опубликован.
  * @param strategy Стратегия управления контекстом этого ответа (см. [ContextStrategy]).
- * @param windowMessages Размер окна стратегий «скользящее окно» и «память фактов»;
+ * @param windowMessages Размер окна стратегий «скользящее окно» и «память агента»;
  *        0 — стратегия окно не использует.
  * @param droppedMessages Сколько сообщений отброшено окном (стратегия «скользящее окно»).
  * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
  * @param branchId Активная ветка диалога; null — основная линия.
- * @param facts Память фактов, которая ушла в запрос: ключ — значение.
- * @param factsTokens Токены блока фактов в запросе.
- * @param factsUpdateTokens Токены служебного вызова обновления памяти (запрос + ответ).
- * @param factsUpdateCostUsd Цена этого вызова в USD; null, если тариф не опубликован.
+ * @param memory Память агента: записи по слоям, токены слоёв, цена обновления.
  */
 @Serializable
 data class TokenReport(
@@ -61,16 +58,13 @@ data class TokenReport(
     @SerialName("dropped_messages") val droppedMessages: Int = 0,
     @SerialName("excluded_messages") val excludedMessages: Int = 0,
     @SerialName("branch_id") val branchId: String? = null,
-    @SerialName("facts") val facts: List<Fact> = emptyList(),
-    @SerialName("facts_tokens") val factsTokens: Int = 0,
-    @SerialName("facts_update_tokens") val factsUpdateTokens: Int = 0,
-    @SerialName("facts_update_cost_usd") val factsUpdateCostUsd: Double? = null
+    @SerialName("memory") val memory: MemoryReport = MemoryReport()
 ) {
     /**
      * Одна запись лога на весь отчёт: характеристики идут отдельными строками,
      * но запись одна — так блок читается целиком, а не рассыпается по logcat.
      * Строки о сжатии истории появляются только когда сервер действительно
-     * свернул сообщения, строки об окне, ветке и фактах — когда их применила
+     * свернул сообщения, строки об окне, ветке и памяти — когда их применила
      * выбранная стратегия: без этого запись остаётся прежней.
      */
     fun logEntry(model: String): String = buildList {
@@ -101,13 +95,33 @@ data class TokenReport(
         add("[agent] finish: ${replyFinishReason ?: "неизвестно"}")
         add("[agent] окно занято: ${fixed(promptWindowShare * 100, 4)}%")
         add("[agent] цена: ${costUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}")
-        if (facts.isNotEmpty()) {
-            add("[agent] память фактов: ${facts.size} шт., $factsTokens ток.")
-            facts.forEach { fact -> add("[agent] - ${fact.key}: ${fact.value}") }
-            if (factsUpdateTokens > 0) {
+        if (memory.working.isNotEmpty() || memory.longTerm.isNotEmpty()) {
+            add(
+                "[agent] память: рабочая ${memory.working.size} шт. (${memory.workingTokens} ток.), " +
+                    "долговременная ${memory.longTerm.size} шт. (${memory.longTermTokens} ток.)"
+            )
+            // Подписи и пояснения типов живут только в каталоге снимка, отчёт его
+            // не несёт: в логе тип печатается как есть, без клиентской таблицы названий
+            memory.working.forEach { record ->
+                add("[agent] - ${record.layer} | ${record.value}")
+            }
+            memory.longTerm.forEach { record ->
+                add("[agent] - ${record.layer} | ${record.value}")
+            }
+            add(
+                "[agent] краткосрочная: ${memory.shortTermMessages} сообщ. в запросе, " +
+                    "не ушло ${memory.shortTermDropped}"
+            )
+            if (memory.rejected > 0) {
+                add("[agent] отклонено записей: ${memory.rejected}")
+            }
+            if (memory.evicted > 0) {
+                add("[agent] вытеснено записей: ${memory.evicted}")
+            }
+            if (memory.updateTokens > 0) {
                 add(
-                    "[agent] обновление памяти: $factsUpdateTokens ток., " +
-                        "цена ${factsUpdateCostUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
+                    "[agent] обновление памяти: ${memory.updateTokens} ток., " +
+                        "цена ${memory.updateCostUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
                 )
             }
         }

@@ -7,7 +7,9 @@ package com.osvin.aichallenge.data
  * одновременно служит идентификатором сессии, поэтому сообщения и сессия живут
  * ровно до удаления чата. Ветки диалога ([DialogBranch]) тоже принадлежат чату:
  * сообщение помечается веткой ([ChatMessage.branchId]), а активная ветка хранится
- * в самом чате ([Chat.activeBranchId]).
+ * в самом чате ([Chat.activeBranchId]). Стратегия управления контекстом
+ * ([Chat.strategy]) — там же: от неё зависит, читает ли модель память, записанную
+ * в этом чате, а не в соседнем.
  *
  * Платформенные реализации: на Android — Room ([RoomChatStore]),
  * на остальных таргетах — [InMemoryChatStore].
@@ -45,6 +47,9 @@ interface ChatStore {
 
     /** Делает ветку активной; null — возвращает диалог на основную линию. */
     suspend fun setActiveBranch(chatId: String, branchId: String?)
+
+    /** Меняет стратегию управления контекстом чата. */
+    suspend fun setStrategy(chatId: String, strategy: String)
 }
 
 /**
@@ -91,5 +96,9 @@ class InMemoryChatStore : ChatStore {
 
     override suspend fun setActiveBranch(chatId: String, branchId: String?) {
         chats[chatId]?.let { chats[chatId] = it.copy(activeBranchId = branchId) }
+    }
+
+    override suspend fun setStrategy(chatId: String, strategy: String) {
+        chats[chatId]?.let { chats[chatId] = it.copy(strategy = strategy) }
     }
 }

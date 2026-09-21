@@ -20,22 +20,26 @@ enum class ContextStrategy(val wire: String, val title: String, val hint: String
 
     /**
      * Скользящее окно: в модель уходят последние [GenerationSettings.windowMessages]
-     * сообщений, всё старшее отбрасывается.
+     * сообщений, всё старшее отбрасывается; рабочая память задачи сохраняет
+     * важное из отброшенного.
      */
     SLIDING_WINDOW(
         wire = "sliding_window",
         title = "Скользящее окно",
-        hint = "В модель уходят только последние сообщения: дешевле всего, но старое забывается"
+        hint = "В модель уходят только последние сообщения (рабочая память сохраняет важное): " +
+            "дешевле всего, но старое забывается"
     ),
 
     /**
-     * Память фактов: важное из диалога копится списком «ключ — значение»
-     * и переживает отброшенные сообщения.
+     * Память агента: важное из диалога копится записями по слоям — рабочая память
+     * задачи и долговременная память о пользователе — и переживает отброшенные
+     * сообщения.
      */
-    FACTS(
-        wire = "facts",
-        title = "Память фактов",
-        hint = "Важное копится в списке «ключ — значение» и переживает отброшенные сообщения"
+    MEMORY(
+        wire = "memory",
+        title = "Память агента",
+        hint = "Рабочая память задачи и долговременная память о пользователе: " +
+            "важное переживает отброшенные сообщения"
     ),
 
     /** Ветки диалога: в модель уходит только путь активной ветки. */
@@ -53,14 +57,31 @@ enum class ContextStrategy(val wire: String, val title: String, val hint: String
     );
 
     /** Отправляет ли стратегия только последние сообщения окна. */
-    val usesWindow: Boolean get() = this == SLIDING_WINDOW || this == FACTS
+    val usesWindow: Boolean get() = this == SLIDING_WINDOW || this == MEMORY
+
+    /** Ведёт ли стратегия слои памяти: рабочую и долговременную. */
+    val usesMemory: Boolean get() = this == SLIDING_WINDOW || this == MEMORY
 
     companion object {
-        /** Стратегия по умолчанию: пока в настройках не выбрали другую — как в дне 9. */
+        /**
+         * Стратегия для отчёта агента без значения поля и для неизвестного
+         * wire-значения: поведение дня 9. Настройки шторки умолчают иначе —
+         * памятью агента ([MEMORY]).
+         */
         val DEFAULT = SUMMARY
 
+        /**
+         * Стратегия по wire-значению; null — значение неизвестно: битое или
+         * записанное версией новее текущей.
+         */
+        fun ofWire(value: String?): ContextStrategy? {
+            val wire = value?.trim()?.lowercase()
+            // «facts» — поведение дня 10: вместо памяти фактов сервер и клиент понимают память агента
+            if (wire == "facts") return MEMORY
+            return entries.firstOrNull { it.wire == wire }
+        }
+
         /** Стратегия по значению из отчёта агента; неизвестное значение — [DEFAULT]. */
-        fun fromWire(value: String?): ContextStrategy =
-            entries.firstOrNull { it.wire == value?.trim()?.lowercase() } ?: DEFAULT
+        fun fromWire(value: String?): ContextStrategy = ofWire(value) ?: DEFAULT
     }
 }

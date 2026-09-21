@@ -7,8 +7,10 @@ import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
@@ -29,6 +31,15 @@ import kotlin.random.Random
  * Диалог может ветвиться ([DialogBranch]): сообщения всех веток лежат в хранилище,
  * но в чате ([messages]) и в запросе к модели участвует только путь активной ветки
  * (см. [DialogBranches]).
+ *
+ * Стратегия управления контекстом принадлежит чату ([Chat.strategy]): от неё зависит,
+ * какой контекст уходит в модель (сжатие истории, окно, слои памяти), и в разных чатах
+ * он уместен свой. Поэтому открытие чата поднимает его стратегию в настройки
+ * ([settings]), а смена стратегии сохраняется в чате — иначе после перезапуска
+ * приложения диалог молча вернулся бы к стратегии по умолчанию.
+ *
+ * Память агента, наоборот, общая для профиля: и рабочая, и долговременная видны
+ * из любого чата, и снимок памяти ([loadMemory]) грузится один и тот же.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -58,8 +69,23 @@ class ChatRepository(
     private val _activeBranchId = MutableStateFlow<String?>(null)
     val activeBranchId: StateFlow<String?> = _activeBranchId.asStateFlow()
 
-    private val _facts = MutableStateFlow<List<Fact>>(emptyList())
-    val facts: StateFlow<List<Fact>> = _facts.asStateFlow()
+    // Память агента из последнего отчёта; null — отчёта ещё не было
+    private val _memory = MutableStateFlow<MemoryReport?>(null)
+    val memory: StateFlow<MemoryReport?> = _memory.asStateFlow()
+
+    // Снимок памяти профиля, общий для всех чатов; null — снимок ещё не загружен
+    // или сервер недоступен
+    private val _layers = MutableStateFlow<MemoryLayers?>(null)
+    val layers: StateFlow<MemoryLayers?> = _layers.asStateFlow()
+
+    // Отказ сервера на явную запись в память или на смену стратегии; null — отказа не было
+    private val _memoryError = MutableStateFlow<String?>(null)
+    val memoryError: StateFlow<String?> = _memoryError.asStateFlow()
+
+    // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
+    // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
+    private val _settings = MutableStateFlow(GenerationSettings())
+    val settings: StateFlow<GenerationSettings> = _settings.asStateFlow()
 
     private val _state = MutableStateFlow<ChatUiState>(ChatUiState.Idle)
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -87,19 +113,36 @@ class ChatRepository(
     }
 
     /**
-     * Новый чат со своей историей и своей сессией агента.
-     * Диалог начинается с основной линии: веток ещё нет, активной ветки тоже.
+     * Настройки генерации из шторки: модель, бюджет, температура и стратегия.
+     * Стратегия из них становится стратегией нового чата ([createChat]); дальше
+     * её меняют уже у чата ([updateStrategy]).
+     */
+    fun updateSettings(settings: GenerationSettings) {
+        _settings.value = settings
+    }
+
+    /**
+     * Новый чат со своей историей и своей сессией агента. Стратегия контекста
+     * берётся из текущих настроек шторки и остаётся в самом чате ([Chat.strategy]):
+     * дальше её меняют у чата ([updateStrategy]), и она переживает перезапуск
+     * приложения. Диалог начинается с основной линии: веток ещё нет, активной
+     * ветки тоже.
      */
     suspend fun createChat(): Chat {
-        val chat = Chat(id = newHexId(), title = NEW_CHAT_TITLE)
+        val chat = Chat(id = newHexId(), title = NEW_CHAT_TITLE, strategy = _settings.value.strategy.wire)
         store.create(chat)
         _activeChat.value = chat
         _messages.value = emptyList()
         _branches.value = emptyList()
         _activeBranchId.value = null
-        _facts.value = emptyList()
+        _memory.value = null
+        _layers.value = null
+        _memoryError.value = null
         _state.value = ChatUiState.Idle
         _chats.value = store.chats()
+        // Память общая для профиля: шторке сразу нужен снимок слоёв и каталога типов,
+        // а не записи этого чата — своих записей у чата нет
+        loadMemory()
         return chat
     }
 
@@ -113,17 +156,44 @@ class ChatRepository(
         val chat = store.chat(id) ?: return
         val branches = store.branches(id)
         _activeChat.value = chat
+        // Стратегия чата поднимается из хранилища: с ней этот чат собирает контекст
+        // так, как выбрал пользователь, а не как настроен соседний диалог
+        _settings.value = _settings.value.copy(strategy = strategyOfWire(chat.strategy))
         _branches.value = branches
         _activeBranchId.value = chat.activeBranchId
-        _facts.value = emptyList()
+        _memory.value = null
+        _layers.value = null
+        _memoryError.value = null
         _messages.value = DialogBranches.activePath(store.messages(id), branches, chat.activeBranchId)
         _state.value = ChatUiState.Idle
+        // Память общая для профиля, но чат мог остаться без снимка (его чистит
+        // удаление чата) — читаем снова, чтобы шторка была наполнена
+        loadMemory()
+    }
+
+    /**
+     * Смена стратегии активного чата: она остаётся в самом чате ([Chat.strategy])
+     * и в настройках ([settings]), поэтому переживает перезапуск приложения и не
+     * переносится на соседние чаты. Следующий запрос к модели уходит уже с ней
+     * ([sendMessage]). Менять нечего, когда чат не выбран: причина уходит в тот же
+     * [memoryError], что и у явной записи в память, — иначе нажатие в шторке
+     * выглядело бы как сломанное.
+     */
+    suspend fun updateStrategy(strategy: ContextStrategy) {
+        val chat = _activeChat.value ?: return noActiveChat("стратегия не изменена")
+        store.setStrategy(chat.id, strategy.wire)
+        _activeChat.value = chat.copy(strategy = strategy.wire)
+        _settings.value = _settings.value.copy(strategy = strategy)
+        _chats.value = store.chats()
     }
 
     /**
      * Удаление чата вместе с историей, ветками и сессией агента.
-     * На сервере сессию тоже чистим — иначе сводки и память фактов копились бы
-     * в его памяти; если сервер недоступен, чат на устройстве всё равно удалён.
+     * На сервере чистим только сессию сводки: сводка своя у каждого чата, и после
+     * удаления она не нужна. Память чат не адресует — оба слоя живут по профилю
+     * и остаются на месте, поэтому удаление диалога не стирает рабочую память
+     * задачи, записанную из любого чата. Если сервер недоступен, чат на устройстве
+     * всё равно удалён.
      */
     suspend fun deleteChat(id: String) {
         store.delete(id)
@@ -132,7 +202,9 @@ class ChatRepository(
             _messages.value = emptyList()
             _branches.value = emptyList()
             _activeBranchId.value = null
-            _facts.value = emptyList()
+            _memory.value = null
+            _layers.value = null
+            _memoryError.value = null
             _state.value = ChatUiState.Idle
         }
         _chats.value = store.chats()
@@ -253,10 +325,10 @@ class ChatRepository(
 
                 // Отчёт агента печатаем в лог платформы (на Android — в logcat):
                 // строки те же, что агент пишет на сервере, но видны рядом с приложением.
-                // Память фактов оттуда же попадает в блок на экране чата.
+                // Память агента оттуда же попадает в шторку на экране чата.
                 chatResponse.tokens?.let { report ->
                     platformLog("agent", report.logEntry(settings.model))
-                    _facts.value = report.facts
+                    _memory.value = report.memory
                 }
 
                 val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply, branchId = activeBranchId)
@@ -266,6 +338,10 @@ class ChatRepository(
 
                 _state.value = ChatUiState.Success(chatResponse.reply)
                 _isServerOnline.value = true
+
+                // Агент мог дописать память сам: панель показывает то, что теперь
+                // лежит в слоях на сервере, а не только то, что ушло в этот ответ
+                loadMemory()
             } else {
                 // Сервер объясняет отказ в теле ответа (переполнение контекста,
                 // пустой ответ модели, сбой провайдера) — в чате показываем его
@@ -279,6 +355,91 @@ class ChatRepository(
             _isServerOnline.value = false
             platformLog("agent", "[agent] Сервер недоступен: ${e.message ?: "нет соединения"}")
             _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
+        }
+    }
+
+    /**
+     * Снимок памяти профиля: слои и каталог типов. Тот же для всех чатов, поэтому
+     * активный чат не нужен — шторка показывает память и без него. Без снимка шторке
+     * нечего показывать, поэтому null и до первого запроса, и когда сервер недоступен:
+     * чат при этом продолжает работать — память не часть диалога, а отдельный слой.
+     */
+    suspend fun loadMemory() {
+        try {
+            val response = client.get("$baseUrl/v1/memory")
+            if (response.status.isSuccess()) {
+                _layers.value = response.body()
+                _memoryError.value = null
+            } else {
+                _layers.value = null
+                // Без снимка в шторке нет каталога типов, и записать некуда: причину
+                // надо показать пользователю, иначе недоступная кнопка выглядит сломанной
+                _memoryError.value = "Память недоступна: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] Память не загружена: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _layers.value = null
+            _memoryError.value = e.message ?: "Память недоступна: нет соединения"
+            platformLog("agent", "[agent] Память не загружена: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Явная запись в память: тип и текст. Запись адресуется парой «тип + текст»,
+     * поэтому ключа в запросе нет, и чат в ней не назван: оба писаемых типа живут
+     * по профилю, поэтому записать в память можно и без активного чата, и запись
+     * будет видна из любого диалога.
+     * Отказ сервера и сбой сети не переводят чат в [ChatUiState.Error]: диалог
+     * продолжается, а причина видна строкой в шторке памяти ([memoryError]),
+     * и уже показанный снимок остаётся на месте.
+     */
+    suspend fun remember(layer: String, value: String) {
+        applyMemoryWrite {
+            client.post("$baseUrl/v1/memory") {
+                contentType(ContentType.Application.Json)
+                setBody(MemoryWriteRequest(layer = layer, value = value))
+            }
+        }
+    }
+
+    /**
+     * Удаление записи из памяти: тип и текст записи. Как и запись, чат здесь не нужен:
+     * память общая для профиля. Операция идемпотентна: сервер отвечает тем же снимком,
+     * поэтому забыть запись можно и повторно.
+     */
+    suspend fun forget(layer: String, value: String) {
+        applyMemoryWrite {
+            client.delete("$baseUrl/v1/memory") {
+                parameter("layer", layer)
+                parameter("value", value)
+            }
+        }
+    }
+
+    /**
+     * Чат не выбран — адресовать действие нечем. Молчание здесь выглядело бы как
+     * сломанная кнопка в шторке, поэтому причина уходит в тот же [memoryError].
+     * Память чат не адресует, поэтому отказ остаётся только у смены стратегии.
+     *
+     * @param reason Что именно не сделано.
+     */
+    private fun noActiveChat(reason: String) {
+        _memoryError.value = "$reason: чат не выбран"
+    }
+
+    /** Общий путь записи и удаления: снимок из ответа идёт в состояние, отказ — в текст ошибки. */
+    private suspend fun applyMemoryWrite(request: suspend () -> HttpResponse) {
+        try {
+            val response = request()
+            if (response.status.isSuccess()) {
+                _layers.value = response.body()
+                _memoryError.value = null
+            } else {
+                _memoryError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _memoryError.value = e.message ?: "Сетевая ошибка"
         }
     }
 
@@ -297,6 +458,14 @@ class ChatRepository(
                 platformLog("agent", "[agent] Сессия $id на сервере не удалена: ${e.message ?: "нет соединения"}")
             }
     }
+
+    /**
+     * Стратегия чата по значению из хранилища. Неизвестное значение — память
+     * агента: это умолчание приложения, а откат на более старую стратегию снова
+     * спрятал бы от модели записи памяти, сделанные в чате.
+     */
+    private fun strategyOfWire(strategy: String): ContextStrategy =
+        ContextStrategy.ofWire(strategy) ?: ContextStrategy.MEMORY
 
     /**
      * Заголовок чата — начало первого сообщения пользователя.

@@ -7,6 +7,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -26,6 +27,7 @@ import androidx.compose.ui.unit.sp
  * @param onBack Возврат к списку чатов.
  * @param onTitleClick Обработчик нажатия на заголовок (для ручной проверки связи).
  * @param onNewChat Создание нового чата с настройкой агента.
+ * @param onMemory Открытие шторки памяти чата.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,6 +37,7 @@ fun ChatTopBar(
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onNewChat: () -> Unit,
+    onMemory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
@@ -61,6 +64,11 @@ fun ChatTopBar(
             }
         },
         actions = {
+            // Память чата: настройки памяти открываются шторкой, поэтому лента
+            // сообщений не занята панелью
+            TextButton(onClick = onMemory) {
+                Text("Память", style = MaterialTheme.typography.labelLarge)
+            }
             // Кнопка создания нового чата: возвращает к настройке агента
             IconButton(onClick = onNewChat) {
                 Text("＋", fontSize = 20.sp)

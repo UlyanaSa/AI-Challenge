@@ -16,10 +16,12 @@ import kotlinx.serialization.json.JsonObject
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  *        Null или пусто — его роль играет первое сообщение диалога (см. [history]).
  * @param history Предыдущие сообщения диалога (user/assistant), старые — первыми.
- * @param sessionId Идентификатор сессии диалога: по нему сервер хранит сводку истории и память фактов.
- * @param strategy Стратегия управления контекстом: `full`, `sliding_window`, `facts`,
- *        `branches` или `summary` (см. `ContextStrategy`). Null — `summary`, как в дне 9.
- * @param windowMessages Сколько последних сообщений отправляют стратегии окна и фактов.
+ * @param sessionId Идентификатор сессии диалога: по нему сервер хранит сводку истории
+ *        и рабочую память задачи.
+ * @param strategy Стратегия управления контекстом: `full`, `sliding_window`, `memory`,
+ *        `branches` или `summary` (см. `ContextStrategy`). От неё же зависит, какие слои
+ *        памяти ведёт диалог. Null — `summary`, как в дне 9.
+ * @param windowMessages Сколько последних сообщений отправляют стратегии окна и памяти.
  * @param branchId Активная ветка диалога: её путь уходит в модель; null — основная линия.
  * @param branches Ветки диалога: точки ветвления (нужны стратегии «ветки»).
  */

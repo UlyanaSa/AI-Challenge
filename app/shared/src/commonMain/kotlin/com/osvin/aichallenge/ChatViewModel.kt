@@ -5,9 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.osvin.aichallenge.data.Chat
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.ContextStrategy
 import com.osvin.aichallenge.data.DialogBranch
-import com.osvin.aichallenge.data.Fact
 import com.osvin.aichallenge.data.GenerationSettings
+import com.osvin.aichallenge.data.MemoryLayers
+import com.osvin.aichallenge.data.MemoryReport
 import com.osvin.aichallenge.repository.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,13 +30,15 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val messages: StateFlow<List<ChatMessage>> = repository.messages
     val branches: StateFlow<List<DialogBranch>> = repository.branches
     val activeBranchId: StateFlow<String?> = repository.activeBranchId
-    val facts: StateFlow<List<Fact>> = repository.facts
+    val memory: StateFlow<MemoryReport?> = repository.memory
+    val layers: StateFlow<MemoryLayers?> = repository.layers
+    val memoryError: StateFlow<String?> = repository.memoryError
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
 
-    // Текущие настройки генерации из шторки настроек
-    private val _settings = MutableStateFlow(GenerationSettings())
-    val settings: StateFlow<GenerationSettings> = _settings.asStateFlow()
+    // Текущие настройки генерации из шторки настроек. Стратегия в них — стратегия
+    // активного чата, поэтому настройки живут в репозитории рядом с активным чатом
+    val settings: StateFlow<GenerationSettings> = repository.settings
 
     // Признак того, что список сохранённых чатов уже загружен из хранилища
     private val _chatsLoaded = MutableStateFlow(false)
@@ -69,9 +73,10 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
 
     /**
      * Создание нового чата с настроенным агентом и переход в него.
+     * Стратегия из настроек становится стратегией чата ([Chat.strategy]).
      */
     fun createChat(settings: GenerationSettings) {
-        _settings.value = settings
+        repository.updateSettings(settings)
         viewModelScope.launch {
             repository.createChat()
         }
@@ -105,11 +110,48 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
+     * Смена стратегии контекста активного чата: она сохраняется в самом чате
+     * и уходит с каждым следующим запросом к модели.
+     */
+    fun updateStrategy(strategy: ContextStrategy) {
+        viewModelScope.launch {
+            repository.updateStrategy(strategy)
+        }
+    }
+
+    /**
      * Отправка сообщения с текущими настройками генерации.
      */
     fun sendMessage(text: String) {
         viewModelScope.launch {
-            repository.sendMessage(text, _settings.value)
+            repository.sendMessage(text, settings.value)
+        }
+    }
+
+    /**
+     * Перечитывание снимка памяти активного чата.
+     */
+    fun loadMemory() {
+        viewModelScope.launch {
+            repository.loadMemory()
+        }
+    }
+
+    /**
+     * Явная запись в память активного чата выбранного типа.
+     */
+    fun remember(layer: String, value: String) {
+        viewModelScope.launch {
+            repository.remember(layer, value)
+        }
+    }
+
+    /**
+     * Удаление записи памяти активного чата: тип и текст записи.
+     */
+    fun forget(layer: String, value: String) {
+        viewModelScope.launch {
+            repository.forget(layer, value)
         }
     }
 }

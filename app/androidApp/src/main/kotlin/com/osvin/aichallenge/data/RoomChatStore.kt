@@ -12,7 +12,7 @@ class RoomChatStore(context: Context) : ChatStore {
 
     private val db = Room
         .databaseBuilder(context, ChatDatabase::class.java, "chat-history.db")
-        .addMigrations(ChatDatabase.MIGRATION_1_2, ChatDatabase.MIGRATION_2_3)
+        .addMigrations(ChatDatabase.MIGRATION_1_2, ChatDatabase.MIGRATION_2_3, ChatDatabase.MIGRATION_3_4)
         .build()
 
     private val chatDao = db.chats()
@@ -32,7 +32,8 @@ class RoomChatStore(context: Context) : ChatStore {
                 title = chat.title,
                 createdAt = chat.createdAt,
                 updatedAt = chat.updatedAt,
-                activeBranchId = chat.activeBranchId
+                activeBranchId = chat.activeBranchId,
+                strategy = chat.strategy
             )
         )
     }
@@ -81,6 +82,10 @@ class RoomChatStore(context: Context) : ChatStore {
     override suspend fun setActiveBranch(chatId: String, branchId: String?) {
         chatDao.setActiveBranch(chatId, branchId)
     }
+
+    override suspend fun setStrategy(chatId: String, strategy: String) {
+        chatDao.setStrategy(chatId, strategy)
+    }
 }
 
 private fun ChatEntity.toChat(): Chat = Chat(
@@ -88,7 +93,8 @@ private fun ChatEntity.toChat(): Chat = Chat(
     title = title,
     createdAt = createdAt,
     updatedAt = updatedAt,
-    activeBranchId = activeBranchId
+    activeBranchId = activeBranchId,
+    strategy = strategy
 )
 
 private fun ChatMessageEntity.toMessage(): ChatMessage = ChatMessage(

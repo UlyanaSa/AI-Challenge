@@ -32,14 +32,11 @@ import kotlinx.serialization.Serializable
  * @param compressionTokens Токены служебного вызова, которым строилась сводка (запрос + ответ).
  * @param compressionCostUsd Стоимость этого вызова в USD; null — тариф не опубликован.
  * @param strategy Стратегия управления контекстом этого запуска (см. [ContextStrategy]).
- * @param windowMessages Размер окна стратегий «скользящее окно» и «память фактов»; 0 — не применялось.
+ * @param windowMessages Размер окна стратегий «скользящее окно» и «память агента»; 0 — не применялось.
  * @param droppedMessages Сколько сообщений отброшено окном (стратегия «скользящее окно»).
  * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
  * @param branchId Активная ветка диалога; null — основная линия.
- * @param facts Память фактов, которая ушла в запрос: ключ — значение.
- * @param factsTokens Токены блока фактов в запросе.
- * @param factsUpdateTokens Токены служебного вызова обновления памяти (запрос + ответ).
- * @param factsUpdateCostUsd Стоимость этого вызова в USD; null — тариф не опубликован.
+ * @param memory Память агента: записи по слоям, токены слоёв, цена обновления.
  */
 @Serializable
 data class TokenReport(
@@ -66,10 +63,7 @@ data class TokenReport(
     @SerialName("dropped_messages") val droppedMessages: Int = 0,
     @SerialName("excluded_messages") val excludedMessages: Int = 0,
     @SerialName("branch_id") val branchId: String? = null,
-    @SerialName("facts") val facts: List<Fact> = emptyList(),
-    @SerialName("facts_tokens") val factsTokens: Int = 0,
-    @SerialName("facts_update_tokens") val factsUpdateTokens: Int = 0,
-    @SerialName("facts_update_cost_usd") val factsUpdateCostUsd: Double? = null
+    @SerialName("memory") val memory: MemoryReport = MemoryReport()
 )
 
 /**

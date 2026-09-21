@@ -15,10 +15,12 @@ import java.util.Locale
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  *        Не задан — его роль играет первое сообщение диалога (см. [LlmAgent]).
  * @param history Предыдущие сообщения диалога (роли user/assistant), без текущего запроса.
- * @param sessionId Идентификатор сессии диалога: по нему живут сводка истории и память фактов.
- * @param strategy Стратегия управления контекстом: что из истории уходит в модель.
+ * @param sessionId Идентификатор сессии диалога: по нему живёт сводка истории (стратегия
+ *        «сжатие в сводку»). Памяти он не нужен: её слои лежат по профилю.
+ * @param strategy Стратегия управления контекстом: что из истории уходит в модель
+ *        и какие слои памяти она ведёт.
  * @param windowMessages Сколько последних сообщений отправляют стратегии
- *        «скользящее окно» и «память фактов»; null — значение по умолчанию.
+ *        «скользящее окно» и «память агента»; null — значение по умолчанию.
  * @param branches Ветки диалога: структура и точки ветвления (стратегия «ветки диалога»).
  * @param activeBranchId Активная ветка, чей путь уходит в модель; null — основная линия.
  */
@@ -71,17 +73,21 @@ data class AgentResult(
  * Управление контекстом: стратегию выбирает клиент ([AgentOptions.strategy]).
  *
  * - [ContextStrategy.FULL] — вся история как есть;
- * - [ContextStrategy.SLIDING_WINDOW] — последние [AgentOptions.windowMessages] сообщений,
- *   старшие отбрасываются: дешевле всего, но детали из начала диалога теряются;
- * - [ContextStrategy.FACTS] — память «ключ — значение» ([FactsExtractor], [FactsStore])
- *   обновляется после каждого сообщения пользователя, в запрос уходят факты и окно;
+ * - [ContextStrategy.SLIDING_WINDOW] — последние [AgentOptions.windowMessages] сообщений;
+ *   важное из отброшенных держит рабочая память ([MemoryExtractor], [MemoryStore]);
+ * - [ContextStrategy.MEMORY] — три типа памяти: краткосрочная (история окна), рабочая
+ *   (данные текущей задачи) и долговременная (профиль, решения, знания). Тип записи
+ *   называет модель, а код проверяет, что тип известен и что стратегия его ведёт;
  * - [ContextStrategy.BRANCHES] — только путь активной ветки от точки ветвления
  *   ([DialogBranches]), поэтому продолжения веток не смешиваются;
  * - [ContextStrategy.SUMMARY] — последние сообщения как есть, старшие свёрнуты
  *   в сводку ([HistoryCompressor], [SummaryStore]).
  *
- * Стратегии с состоянием (факты, сводка) держат его по сессии: сообщения присылает
- * клиент, а память и сводки живут на сервере.
+ * Слои памяти хранятся отдельно: краткосрочная — сообщения у клиента, рабочая и
+ * долговременная — по профилю ([DEFAULT_PROFILE]), поэтому обе видны из любого чата.
+ * Различаются эти два слоя не областью, а сроком жизни: рабочая лежит в памяти процесса
+ * и перезапуск сервера её обнуляет, долговременная — в файле и перезапуск переживает.
+ * Сообщения присылает клиент, а слои памяти и сводки живут на сервере.
  *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
@@ -89,8 +95,10 @@ data class AgentResult(
  * @param compressor Правило сжатия истории: сколько сообщений не трогать и когда строить сводку.
  * @param summaryStore Хранилище сводок. Сервер передаёт общее на все запросы, иначе
  *        сводка живёт только внутри одного запуска агента.
- * @param factsExtractor Правило памяти фактов: как обновлять список «ключ — значение».
- * @param factsStore Хранилище фактов по сессиям.
+ * @param memoryExtractor Правило памяти: как обновлять записи слоёв.
+ * @param workingMemory Хранилище рабочей памяти по профилю: память процесса
+ *        ([InMemoryMemoryStore]), поэтому перезапуск сервера её обнуляет.
+ * @param longTermMemory Хранилище долговременной памяти по профилям.
  */
 class LlmAgent(
     private val llm: LlmClient,
@@ -98,8 +106,9 @@ class LlmAgent(
     private val logger: AgentLogger = AgentLogger.Console,
     private val compressor: HistoryCompressor = HistoryCompressor(),
     private val summaryStore: SummaryStore = InMemorySummaryStore(),
-    private val factsExtractor: FactsExtractor = FactsExtractor(),
-    private val factsStore: FactsStore = InMemoryFactsStore()
+    private val memoryExtractor: MemoryExtractor = MemoryExtractor(),
+    private val workingMemory: MemoryStore = InMemoryMemoryStore(),
+    private val longTermMemory: MemoryStore = InMemoryMemoryStore()
 ) {
 
     /**
@@ -123,8 +132,8 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: system prompt, сводка, факты, история диалога и текущий
-        // запрос — в этом порядке. Свой system prompt из настроек важнее: если он задан,
+        // Сообщения модели: system prompt, сводка, слои памяти (долговременный, затем
+        // рабочий), история диалога и текущий запрос — в этом порядке. Свой system prompt из настроек важнее: если он задан,
         // берём его. Если нет — его роль играет первое сообщение диалога: инструкция
         // из него остаётся в силе и тогда, когда старшие сообщения отброшены.
         val history = options.history.filter { it.content.isNotBlank() }
@@ -135,38 +144,44 @@ class LlmAgent(
             ?: history.firstOrNull { it.role == USER_ROLE }?.content
             ?: userMessage
 
-        // Что из истории уходит в модель, решает выбранная стратегия: окно, память
-        // фактов, путь активной ветки или сводка вместо свёрнутых сообщений.
+        // Что из истории уходит в модель, решает выбранная стратегия: окно, путь
+        // активной ветки, сводка вместо свёрнутых сообщений — и слои памяти, которые
+        // эта стратегия ведёт.
         val strategy = options.strategy
         val window = (options.windowMessages ?: DEFAULT_WINDOW_MESSAGES)
             .coerceIn(MIN_WINDOW_MESSAGES, MAX_WINDOW_MESSAGES)
         val context = planContext(model, strategy, history, window, options, userMessage)
         val historyForRequest = context.history
         val summary = context.summary
-        val factsMessage = factsExtractor.factsMessage(context.facts)
+        // Блоки памяти: слой уходит в запрос, только если его ведёт стратегия и он не пуст.
+        val longTermMessage = memoryBlock(MemoryLayer.LONG_TERM, context, strategy)
+        val workingMessage = memoryBlock(MemoryLayer.WORKING, context, strategy)
 
         val messages = buildList {
             add(ChatMessage(SYSTEM_ROLE, systemPrompt))
             summary?.let { add(compressor.summaryMessage(it)) }
-            factsMessage?.let { add(it) }
+            longTermMessage?.let { add(it) }
+            workingMessage?.let { add(it) }
             // Метка ветки — служебная: в API сообщения уходят без неё.
             addAll(withoutBranchTags(historyForRequest))
             add(ChatMessage(USER_ROLE, userMessage))
         }
 
         // Разбивка по частям: API отдаёт только общий prompt_tokens, поэтому
-        // вклад system prompt, памяти и истории считаем локально.
+        // вклад system prompt, слоёв памяти и истории считаем локально.
         val systemTokens = tokenCounter.count(systemPrompt)
         val summaryTokens = summary?.tokens ?: 0
-        val factsTokens = factsMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val longTermTokens = longTermMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val workingTokens = workingMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val memoryTokens = longTermTokens + workingTokens
         val recentTokens = historyForRequest.sumOf { tokenCounter.count(it.content) }
-        val historyTokens = summaryTokens + factsTokens + recentTokens
+        val historyTokens = summaryTokens + memoryTokens + recentTokens
         val historyRawTokens = history.sumOf { tokenCounter.count(it.content) }
         val requestTokens = tokenCounter.count(userMessage)
         val promptEstimate = tokenCounter.countPrompt(messages)
 
         // Лог стратегии: что именно ушло в модель и чего это стоило.
-        context.log(strategy, window, historyRawTokens, historyTokens, factsTokens)?.let(logger::log)
+        context.log(strategy, window, historyRawTokens, historyTokens, memoryTokens)?.let(logger::log)
 
         logger.log(
             listOf(
@@ -273,10 +288,18 @@ class LlmAgent(
                 foldedMessages = summary?.foldedMessages ?: 0,
                 compressionTokens = if (strategy == ContextStrategy.SUMMARY) context.service?.totalTokens ?: 0 else 0,
                 compressionCostUsd = if (strategy == ContextStrategy.SUMMARY) context.service?.costUsd else null,
-                facts = context.facts.items,
-                factsTokens = factsTokens,
-                factsUpdateTokens = if (strategy == ContextStrategy.FACTS) context.service?.totalTokens ?: 0 else 0,
-                factsUpdateCostUsd = if (strategy == ContextStrategy.FACTS) context.service?.costUsd else null
+                memory = MemoryReport(
+                    working = context.working,
+                    longTerm = context.longTerm,
+                    workingTokens = workingTokens,
+                    longTermTokens = longTermTokens,
+                    shortTermMessages = historyForRequest.size,
+                    shortTermDropped = context.droppedMessages + context.excludedMessages,
+                    rejected = context.rejected,
+                    evicted = context.evicted,
+                    updateTokens = if (strategy.memory.isNotEmpty()) context.service?.totalTokens ?: 0 else 0,
+                    updateCostUsd = if (strategy.memory.isNotEmpty()) context.service?.costUsd else null
+                )
             )
         )
     }
@@ -284,10 +307,13 @@ class LlmAgent(
     /**
      * Что уходит в модель по выбранной стратегии и чего это стоило.
      *
-     * @param history Сообщения диалога, которые уходят в запрос.
-     * @param facts Память фактов: только для стратегии фактов.
+     * @param history Сообщения диалога — краткосрочная память; столько, сколько их пустила стратегия.
+     * @param working Записи рабочей памяти, которые ушли в запрос.
+     * @param longTerm Записи долговременной памяти, которые ушли в запрос.
+     * @param rejected Сколько записей отклонено: неизвестный вид или слой, которого стратегия не ведёт.
+     * @param evicted Сколько записей вытеснено пределами слоя.
      * @param summary Сводка, заменившая свёрнутые сообщения: только для сжатия.
-     * @param service Служебный вызов стратегии: построение сводки или обновление фактов.
+     * @param service Служебный вызов стратегии: построение сводки или обновление памяти.
      * @param droppedMessages Сколько сообщений отброшено окном.
      * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
      * @param branchId Активная ветка: null — основная линия диалога.
@@ -295,7 +321,10 @@ class LlmAgent(
      */
     private data class ContextPlan(
         val history: List<ChatMessage>,
-        val facts: Facts = Facts(),
+        val working: List<MemoryRecord> = emptyList(),
+        val longTerm: List<MemoryRecord> = emptyList(),
+        val rejected: Int = 0,
+        val evicted: Int = 0,
         val summary: StoredSummary? = null,
         val service: ServiceCall? = null,
         val droppedMessages: Int = 0,
@@ -303,6 +332,13 @@ class LlmAgent(
         val branchId: String? = null,
         val sharedMessages: Int = 0
     ) {
+
+        /** Записи слоя, которые ушли в запрос. */
+        fun recordsOf(layer: MemoryLayer): List<MemoryRecord> = when (layer) {
+            MemoryLayer.WORKING -> working
+            MemoryLayer.LONG_TERM -> longTerm
+            MemoryLayer.SHORT_TERM -> emptyList()
+        }
 
         /**
          * Лог стратегии: одна запись со всеми числами — что ушло в модель и что
@@ -313,31 +349,25 @@ class LlmAgent(
             window: Int,
             rawTokens: Int,
             sentTokens: Int,
-            factsTokens: Int
+            memoryTokens: Int
         ): String? {
-            val memoryTokens = sentTokens - factsTokens
+            // Токены истории без памяти: по ним видно, чего стоило окно само по себе.
+            val recentTokens = sentTokens - memoryTokens
             val lines = when (strategy) {
                 ContextStrategy.FULL -> return null
-                ContextStrategy.SLIDING_WINDOW -> listOf(
-                    "Скользящее окно истории",
-                    "окно: $window сообщ.",
-                    "в запросе: ${history.size} ($sentTokens ток.)",
-                    "отброшено сообщений: $droppedMessages (${rawTokens - sentTokens} ток.)",
-                    "история без окна: $rawTokens ток."
-                )
-                ContextStrategy.FACTS -> buildList {
-                    add("Память фактов")
-                    add("фактов: ${facts.items.size} ($factsTokens ток.)")
-                    facts.items.forEach { add("- ${it.key}: ${it.value}") }
-                    add("окно: $window сообщ. — в запросе ${history.size} ($memoryTokens ток.)")
-                    add("отброшено сообщений: $droppedMessages (${rawTokens - memoryTokens} ток.)")
+                ContextStrategy.SLIDING_WINDOW -> buildList {
+                    add("Скользящее окно истории")
+                    add("окно: $window сообщ. — в запросе ${history.size} ($recentTokens ток.)")
+                    add("отброшено сообщений: $droppedMessages (${rawTokens - recentTokens} ток.)")
+                    add("история без окна: $rawTokens ток.")
+                    addAll(memoryLines(memoryTokens))
+                }
+                ContextStrategy.MEMORY -> buildList {
+                    add("Память агента")
+                    addAll(memoryLines(memoryTokens))
+                    add("окно: $window сообщ. — в запросе ${history.size} ($recentTokens ток.)")
+                    add("отброшено сообщений: $droppedMessages (${rawTokens - recentTokens} ток.)")
                     add("история без памяти: $rawTokens ток.")
-                    service?.let {
-                        add(
-                            "обновление памяти: ${it.totalTokens} ток. " +
-                                "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
-                        )
-                    }
                 }
                 ContextStrategy.BRANCHES -> listOf(
                     "Ветки диалога",
@@ -360,6 +390,23 @@ class LlmAgent(
                 )
             }
             return lines.filterNotNull().joinToString("\n")
+        }
+
+        /** Строки лога про слои памяти: что в них лежит, сколько стоит и что не сохранилось. */
+        private fun memoryLines(memoryTokens: Int): List<String> = buildList {
+            add("рабочая память: ${working.size} записей")
+            working.forEach { add("  ${MemoryExtractor.line(it)}") }
+            add("долговременная память: ${longTerm.size} записей")
+            longTerm.forEach { add("  ${MemoryExtractor.line(it)}") }
+            add("память в запросе: $memoryTokens ток.")
+            if (rejected > 0) add("отклонено записей: $rejected")
+            if (evicted > 0) add("вытеснено записей: $evicted")
+            service?.let {
+                add(
+                    "обновление памяти: ${it.totalTokens} ток. " +
+                        "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                )
+            }
         }
     }
 
@@ -384,7 +431,7 @@ class LlmAgent(
      *
      * Стратегии с состоянием обновляют его отдельным служебным вызовом модели, поэтому
      * метод `suspend`. Сбой вызова диалог не ломает: стратегия откатывается к тому,
-     * что уже знает, — прежней сводке или прежним фактам.
+     * что уже знает, — прежней сводке или прежним записям памяти.
      */
     private suspend fun planContext(
         model: String,
@@ -401,15 +448,14 @@ class LlmAgent(
         } else {
             history
         }
-        // Окно и память фактов отправляют только последние сообщения диалога.
+        // Окно и слои памяти отправляют только последние сообщения диалога.
         val windowed = if (strategy.usesWindow) path.takeLast(window) else path
 
-        val sessionId = options.sessionId?.takeIf { strategy.keepsState && it.isNotBlank() }
-        if (strategy.keepsState && sessionId == null) {
-            logger.log(
-                "Стратегия «${strategy.title}»: сессия не названа — память не ведётся, " +
-                    "в модель уходят последние $window сообщ."
-            )
+        // Сессию держит только сводка истории: рабочей памяти она не нужна — слой лежит
+        // по профилю, поэтому читается и пишется без неё.
+        val sessionId = options.sessionId?.takeIf { it.isNotBlank() }
+        if (strategy == ContextStrategy.SUMMARY && sessionId == null) {
+            logger.log("Сжатие истории: сессия не названа — сводка не ведётся, в модель уходит вся история")
         }
 
         val summary = if (strategy == ContextStrategy.SUMMARY && sessionId != null) {
@@ -417,18 +463,21 @@ class LlmAgent(
         } else {
             null
         }
-        val facts = if (strategy == ContextStrategy.FACTS && sessionId != null) {
-            updateFacts(model, sessionId, windowed, userMessage)
+        val memory = if (strategy.memory.isNotEmpty()) {
+            updateMemory(model, strategy.memory, windowed, userMessage)
         } else {
-            // Без сессии память вести негде: фактов нет, стратегия работает как окно.
-            FactsPlan(Facts(), null)
+            // Стратегия слои не ведёт: памяти нет, контекст собирается по истории.
+            MemoryPlan()
         }
 
         return ContextPlan(
             history = summary?.history ?: windowed,
-            facts = facts.facts,
+            working = memory.working,
+            longTerm = memory.longTerm,
+            rejected = memory.rejected,
+            evicted = memory.evicted,
             summary = summary?.summary,
-            service = summary?.call ?: facts.call,
+            service = summary?.call ?: memory.call,
             droppedMessages = if (strategy.usesWindow) path.size - windowed.size else 0,
             excludedMessages = if (strategy == ContextStrategy.BRANCHES) history.size - path.size else 0,
             branchId = branchId,
@@ -468,24 +517,58 @@ class LlmAgent(
         return SummaryPlan(plan.recent, summary, reply.call)
     }
 
-    /** Память фактов: обновляем её после каждого сообщения пользователя. */
-    private suspend fun updateFacts(
+    /**
+     * Типы памяти: прежние записи обоих типов уходят в служебный запрос, а в ответе
+     * модели остаются только записи известных типов, которые ведёт стратегия.
+     *
+     * Записи типа, который стратегия не ведёт, не сохраняются: спрашиваем про свои типы,
+     * а лишнее считаем отклонённым. Сбой вызова память не портит — остаются прежние записи.
+     *
+     * Сессия здесь не нужна: оба слоя живут по профилю ([DEFAULT_PROFILE]), поэтому
+     * обновление видно из любого чата.
+     */
+    private suspend fun updateMemory(
         model: String,
-        sessionId: String,
+        layers: Set<MemoryLayer>,
         history: List<ChatMessage>,
         userMessage: String
-    ): FactsPlan {
-        val previous = factsStore.get(sessionId)
-        val fresh = history.takeLast(FACTS_CONTEXT_MESSAGES) + ChatMessage(USER_ROLE, userMessage)
-        val reply = callService("память фактов", factsExtractor.request(model, previous, fresh))
-            ?: return FactsPlan(previous, null)
-        val updated = factsExtractor.parse(reply.text)
-        if (updated == null) {
-            logger.log("Память фактов не обновилась (модель вернула не JSON) — оставлены прежние факты")
-            return FactsPlan(previous, reply.call)
+    ): MemoryPlan {
+        val working = if (MemoryLayer.WORKING in layers) workingMemory.get(DEFAULT_PROFILE) else emptyList()
+        val longTerm = if (MemoryLayer.LONG_TERM in layers) longTermMemory.get(DEFAULT_PROFILE) else emptyList()
+        val fresh = history.takeLast(MEMORY_CONTEXT_MESSAGES) + ChatMessage(USER_ROLE, userMessage)
+        val reply = callService("память", memoryExtractor.request(model, layers, working, longTerm, fresh))
+            ?: return MemoryPlan(working, longTerm)
+        val parsed = memoryExtractor.parse(reply.text)
+        if (parsed == null) {
+            logger.log("Память не обновилась (модель вернула не JSON) — оставлены прежние записи")
+            return MemoryPlan(working, longTerm, call = reply.call)
         }
-        factsStore.put(sessionId, updated)
-        return FactsPlan(updated, reply.call)
+
+        val (supported, unsupported) = parsed.records.partition { record ->
+            val layer = MemoryLayer.ofWire(record.layer)
+            layer != null && layer in layers
+        }
+        val written = supported.groupBy { MemoryLayer.ofWire(it.layer)!! }
+        // Каждый слой сливается и сохраняется отдельно: слои не смешиваются даже здесь.
+        val workingMerge = if (MemoryLayer.WORKING in layers) {
+            MemoryRules.merge(working, written[MemoryLayer.WORKING].orEmpty(), MemoryLayer.WORKING)
+                .also { workingMemory.put(DEFAULT_PROFILE, it.records) }
+        } else {
+            MemoryMerge(working, 0)
+        }
+        val longTermMerge = if (MemoryLayer.LONG_TERM in layers) {
+            MemoryRules.merge(longTerm, written[MemoryLayer.LONG_TERM].orEmpty(), MemoryLayer.LONG_TERM)
+                .also { longTermMemory.put(DEFAULT_PROFILE, it.records) }
+        } else {
+            MemoryMerge(longTerm, 0)
+        }
+        return MemoryPlan(
+            working = workingMerge.records,
+            longTerm = longTermMerge.records,
+            rejected = parsed.rejected + unsupported.size,
+            evicted = workingMerge.evicted + longTermMerge.evicted,
+            call = reply.call
+        )
     }
 
     /**
@@ -517,8 +600,18 @@ class LlmAgent(
         }
     }
 
-    /** Память фактов после обновления и цена служебного вызова. */
-    private data class FactsPlan(val facts: Facts, val call: ServiceCall?)
+    /** Слои памяти после обновления и цена служебного вызова. */
+    private data class MemoryPlan(
+        val working: List<MemoryRecord> = emptyList(),
+        val longTerm: List<MemoryRecord> = emptyList(),
+        val rejected: Int = 0,
+        val evicted: Int = 0,
+        val call: ServiceCall? = null
+    )
+
+    /** Блок слоя для запроса: null — слой не ведёт стратегия или он пуст. */
+    private fun memoryBlock(layer: MemoryLayer, context: ContextPlan, strategy: ContextStrategy): ChatMessage? =
+        if (layer in strategy.memory) memoryExtractor.message(layer, context.recordsOf(layer)) else null
 
     /** В API сообщения уходят без метки ветки: она нужна только стратегии веток. */
     private fun withoutBranchTags(messages: List<ChatMessage>): List<ChatMessage> =
@@ -529,7 +622,7 @@ class LlmAgent(
         const val SYSTEM_ROLE = "system"
         const val USER_ROLE = "user"
 
-        /** Окно по умолчанию: столько последних сообщений отправляют стратегии окна и фактов. */
+        /** Окно по умолчанию: столько последних сообщений отправляют стратегии окна и памяти. */
         const val DEFAULT_WINDOW_MESSAGES = 10
 
         /** Меньше двух сообщений окно теряет смысл: вопрос без ответа не контекст. */
@@ -538,8 +631,8 @@ class LlmAgent(
         /** Верхняя граница окна: больше — уже не управление контекстом, а вся история. */
         const val MAX_WINDOW_MESSAGES = 100
 
-        /** Сколько последних сообщений показываем извлечению фактов вместе с новым вопросом. */
-        const val FACTS_CONTEXT_MESSAGES = 2
+        /** Сколько последних сообщений показываем памяти вместе с новым вопросом. */
+        const val MEMORY_CONTEXT_MESSAGES = 2
 
         /** Доля части от целого: 0.0–1.0; при нулевом целом — ноль. */
         fun share(part: Int, total: Int): Double = if (total == 0) 0.0 else part.toDouble() / total

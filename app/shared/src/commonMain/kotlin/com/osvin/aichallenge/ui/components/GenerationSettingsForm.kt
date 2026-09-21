@@ -259,7 +259,7 @@ fun GenerationSettingsForm(
                     stopText = ""
                     systemPrompt = ""
                     temperature = GenerationSettings.DEFAULT_TEMPERATURE
-                    strategy = ContextStrategy.SUMMARY
+                    strategy = GenerationSettings.DEFAULT_STRATEGY
                     windowText = GenerationSettings.DEFAULT_WINDOW_MESSAGES.toString()
                 }
             ) {

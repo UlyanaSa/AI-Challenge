@@ -5,10 +5,14 @@ import com.osvin.aichallenge.agent.ContextStrategy
 import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
-import com.osvin.aichallenge.agent.InMemoryFactsStore
+import com.osvin.aichallenge.agent.InMemoryMemoryStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
+import com.osvin.aichallenge.agent.MemoryForget
+import com.osvin.aichallenge.agent.MemoryWrite
+import com.osvin.aichallenge.agent.MemoryWriter
+import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
 import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
@@ -70,12 +74,21 @@ val client = HttpClient(CIO) {
 val summaryStore = InMemorySummaryStore()
 
 /**
- * Память фактов диалогов: отдельно от сообщений, по сессии.
+ * Память агента на сервере: два хранилища, по одному на слой с состоянием.
  *
- * Как и сводки, хранилище общее на все запросы: агент создаётся на каждый запрос,
- * а накопленные факты должны пережить запрос и обновляться в следующем.
+ * Оба слоя живут по профилю, а не по чату: и рабочая память задачи, и долговременная
+ * общие для всех диалогов, поэтому запись видна из любого чата. Разница между ними —
+ * срок жизни: рабочая лежит в памяти процесса и обнуляется перезапуском сервера, для
+ * этого и создана на каждом запуске; долговременная пишется в файл и перезапуск
+ * переживает, иначе профиль пользователя, решения и знания собирались бы заново
+ * из одного диалога, в котором их нет.
+ *
+ * Как и сводки, хранилища общие на все запросы: агент создаётся на каждый запрос,
+ * а память должна пережить запрос и наполниться в следующем.
  */
-val factsStore = InMemoryFactsStore()
+val workingMemory = InMemoryMemoryStore()
+
+val longTermMemory = JsonFileMemoryStore(JsonFileMemoryStore.defaultFile())
 
 /**
  * Точка входа в приложение.
@@ -240,7 +253,8 @@ fun Application.module() {
             val agent = LlmAgent(
                 DeepSeekClient(apiKey, client),
                 summaryStore = summaryStore,
-                factsStore = factsStore
+                workingMemory = workingMemory,
+                longTermMemory = longTermMemory
             )
             val result = agent.run(
                 userMessage = request.message,
@@ -259,14 +273,71 @@ fun Application.module() {
 
         /**
          * Удаление сессии чата.
-         * Клиент удалил чат — сводка его истории серверу больше не нужна:
-         * без этого память росла бы на каждый удалённый диалог.
+         * Клиент удалил чат — сводка его истории серверу больше не нужна: без этого
+         * сводки копились бы на каждый удалённый диалог. Память не трогается: оба
+         * слоя принадлежат профилю, а не чату, поэтому удаление чата не стирает
+         * рабочую память задачи — её убирают только забыванием в шторке, вытеснением
+         * и перезапуск сервера.
          */
         delete("/v1/chats/{sessionId}") {
             val sessionId = call.parameters["sessionId"].orEmpty()
             summaryStore.clear(sessionId)
-            factsStore.clear(sessionId)
             call.respond(HttpStatusCode.NoContent)
+        }
+
+        /**
+         * Память агента целиком: оба хранимых типа и каталог типов памяти.
+         *
+         * Снимок полный, а не только то, что ушло в последний запрос: по нему работает
+         * шторка памяти, поэтому она не зависит от выбранной стратегии. Каталог типов
+         * уезжает вместе со снимком — подписи и пояснения в интерфейсе берутся из него,
+         * и своей копии таблицы типов на клиенте нет. Сессии в запросе нет: оба слоя
+         * живут по профилю, поэтому снимок один на все чаты.
+         */
+        get("/v1/memory") {
+            call.respond(MemoryWriter(workingMemory, longTermMemory).layers())
+        }
+
+        /**
+         * Явная запись в память: сохранить фразу, которую пользователь назвал сам.
+         *
+         * Отказ (тип неизвестен, тип краткосрочный, пустой текст) — ошибка запроса:
+         * клиент покажет её текст, а память останется прежней. Сессии в теле нет:
+         * и рабочую, и долговременную память запись адресует профилю.
+         */
+        post("/v1/memory") {
+            val request = call.receive<MemoryWriteRequest>()
+            val writer = MemoryWriter(workingMemory, longTermMemory)
+            val write = writer.remember(request.layer, request.value)
+            when (write) {
+                is MemoryWrite.Rejected -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(success = false, error = write.reason)
+                )
+
+                is MemoryWrite.Written -> call.respond(writer.layers())
+            }
+        }
+
+        /**
+         * Забывает запись в названном типе памяти — тоже явный выбор пользователя.
+         *
+         * Повторное удаление не ошибка: снимок вернётся как был. Неизвестный тип или
+         * краткосрочная память — ошибка запроса: интерфейс рисует выбор по каталогу,
+         * значит пришло чужое.
+         */
+        delete("/v1/memory") {
+            val params = call.request.queryParameters
+            val writer = MemoryWriter(workingMemory, longTermMemory)
+            val forget = writer.forget(params["layer"].orEmpty(), params["value"].orEmpty())
+            when (forget) {
+                is MemoryForget.Rejected -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(success = false, error = forget.reason)
+                )
+
+                is MemoryForget.Forgotten -> call.respond(forget.layers)
+            }
         }
     }
 }

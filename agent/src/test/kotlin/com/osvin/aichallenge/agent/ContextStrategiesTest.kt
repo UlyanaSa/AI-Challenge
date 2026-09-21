@@ -38,12 +38,19 @@ private fun dialog(messages: Int, branchId: String? = null, from: Int = 1): List
         ChatMessage(if (it % 2 == 1) "user" else "assistant", "сообщение $it", branchId)
     }
 
-/** Ответ служебного вызова памяти фактов. */
-private const val FACTS_JSON =
-    """{"facts":[{"key":"цель","value":"собрать ТЗ"},{"key":"бюджет","value":"5 000 рублей"}]}"""
+/** Ответ служебного вызова памяти: записи обоих типов — тип каждая называет сама. */
+private const val MEMORY_JSON =
+    """{"memory":[{"layer":"working","value":"цель — собрать ТЗ"},""" +
+        """{"layer":"working","value":"бюджет — 5 000 рублей"},""" +
+        """{"layer":"long_term","value":"хранилище — Room"}]}"""
 
-/** Запрос к модели, в котором обновлялась память фактов: у него видно новый кусок диалога. */
-private fun DeepSeekRequest.isFactsUpdate(): Boolean =
+/** Ответ с записями, которым в память нельзя: неизвестный тип и тип вне стратегии. */
+private const val BAD_MEMORY_JSON =
+    """{"memory":[{"layer":"short_term","value":"пользователь поздоровался"},""" +
+        """{"layer":"настроение","value":"боевой"}]}"""
+
+/** Запрос к модели, в котором обновлялась память: у него видно новый кусок диалога. */
+private fun DeepSeekRequest.isMemoryUpdate(): Boolean =
     messages.last().content.contains("Новые сообщения диалога:")
 
 private val TRUNK = dialog(4)
@@ -65,6 +72,12 @@ class ContextStrategiesTest {
     fun strategyFromWireKeepsUnknownRequestsOnCompression() {
         assertEquals(ContextStrategy.SLIDING_WINDOW, ContextStrategy.fromWire("sliding_window"))
         assertEquals(ContextStrategy.BRANCHES, ContextStrategy.fromWire(" BRANCHES "))
+        assertEquals(ContextStrategy.MEMORY, ContextStrategy.fromWire("memory"))
+        assertEquals(
+            ContextStrategy.MEMORY,
+            ContextStrategy.fromWire("facts"),
+            "стратегия дня 10 читается как память агента"
+        )
         assertEquals(ContextStrategy.SUMMARY, ContextStrategy.fromWire(null))
         assertEquals(ContextStrategy.SUMMARY, ContextStrategy.fromWire("выдумка"))
     }
@@ -93,7 +106,7 @@ class ContextStrategiesTest {
         assertEquals(6, result.tokens.windowMessages)
         assertEquals("sliding_window", result.tokens.strategy)
         assertTrue(result.tokens.history < result.tokens.historyRawTokens, "окно меньше всей истории")
-        assertEquals(1, llm.requests.size, "без памяти служебных вызовов нет")
+        assertEquals(1, llm.requests.size, "сессия не названа — памяти нет, служебного вызова тоже")
         assertTrue(
             logs.any { it.startsWith("Скользящее окно истории") && it.contains("отброшено сообщений: 14") },
             "в логе видно, что отброшено: $logs"
@@ -134,17 +147,18 @@ class ContextStrategiesTest {
         assertEquals(100, result.tokens.windowMessages)
     }
 
-    /** Память фактов: служебный вызов обновляет память, в запрос уходит блок фактов. */
+    /** Скользящее окно ведёт рабочую память: важное из отброшенных сообщений не теряется. */
     @Test
-    fun factsAreExtractedAndSentWithWindow() = runBlocking {
-        val llm = StubClient { request, call -> if (request.isFactsUpdate() && call == 1) FACTS_JSON else "ответ" }
+    fun slidingWindowKeepsWorkingMemory() = runBlocking {
+        val llm = StubClient { request, call -> if (request.isMemoryUpdate() && call == 1) MEMORY_JSON else "ответ" }
+        val logs = mutableListOf<String>()
 
-        val result = engine(llm).run(
+        val result = engine(llm, logs).run(
             "Дальше — сроки",
             AgentOptions(
                 history = dialog(20),
                 sessionId = "session",
-                strategy = ContextStrategy.FACTS,
+                strategy = ContextStrategy.SLIDING_WINDOW,
                 windowMessages = 6
             )
         )
@@ -152,89 +166,167 @@ class ContextStrategiesTest {
         assertEquals(2, llm.requests.size, "обновление памяти + ответ модели")
         val messages = llm.requests.last().messages
         assertEquals(
-            "Память диалога (факты):\n- цель: собрать ТЗ\n- бюджет: 5 000 рублей",
+            "Рабочая память задачи (данные текущей задачи):\n" +
+                "- цель — собрать ТЗ\n- бюджет — 5 000 рублей",
             messages[1].content,
-            "блок фактов идёт сразу после system prompt"
+            "рабочая память идёт сразу после system prompt"
         )
         assertEquals("сообщение 15", messages[2].content, "после памяти — окно последних сообщений")
         assertEquals(
-            listOf(Fact("цель", "собрать ТЗ"), Fact("бюджет", "5 000 рублей")),
-            result.tokens.facts
+            listOf(MemoryRecord("working", "цель — собрать ТЗ"), MemoryRecord("working", "бюджет — 5 000 рублей")),
+            result.tokens.memory.working
         )
-        assertTrue(result.tokens.factsTokens > 0, "блок фактов посчитан в отчёте")
-        assertEquals(340, result.tokens.factsUpdateTokens, "цена обновления памяти в отчёте")
-        assertEquals(14, result.tokens.droppedMessages)
-        assertEquals("facts", result.tokens.strategy)
+        assertTrue(result.tokens.memory.workingTokens > 0, "блок рабочей памяти посчитан в отчёте")
+        assertEquals(340, result.tokens.memory.updateTokens, "цена обновления памяти в отчёте")
+        assertEquals(14, result.tokens.memory.shortTermDropped)
+        assertEquals("sliding_window", result.tokens.strategy)
+        assertTrue(
+            logs.any { it.contains("рабочая память: 2 записей") && it.contains("отклонено записей: 1") },
+            "в логе видны слои памяти и отклонённая запись: $logs"
+        )
     }
 
-    /** Память накапливается: прежние факты уходят в служебный запрос, а не теряются. */
+    /** Память агента: оба блока слоёв уходят в запрос перед окном, вид решает слой. */
     @Test
-    fun factsAccumulateAcrossMessages() = runBlocking {
+    fun memoryStrategySendsBothLayersWithWindow() = runBlocking {
+        val llm = StubClient { request, call -> if (request.isMemoryUpdate() && call == 1) MEMORY_JSON else "ответ" }
+
+        val result = engine(llm).run(
+            "Дальше — сроки",
+            AgentOptions(
+                history = dialog(20),
+                sessionId = "session",
+                strategy = ContextStrategy.MEMORY,
+                windowMessages = 6
+            )
+        )
+
+        assertEquals(2, llm.requests.size, "обновление памяти + ответ модели")
+        val messages = llm.requests.last().messages
+        assertEquals(
+            "Долговременная память (профиль, решения, знания):\n- хранилище — Room",
+            messages[1].content,
+            "долговременный слой идёт сразу после system prompt"
+        )
+        assertEquals(
+            "Рабочая память задачи (данные текущей задачи):\n" +
+                "- цель — собрать ТЗ\n- бюджет — 5 000 рублей",
+            messages[2].content,
+            "рабочий слой идёт после долговременного"
+        )
+        assertEquals("сообщение 15", messages[3].content, "после слоёв памяти — окно последних сообщений")
+        assertEquals(
+            listOf(MemoryRecord("working", "цель — собрать ТЗ"), MemoryRecord("working", "бюджет — 5 000 рублей")),
+            result.tokens.memory.working
+        )
+        assertEquals(listOf(MemoryRecord("long_term", "хранилище — Room")), result.tokens.memory.longTerm)
+        assertTrue(result.tokens.memory.longTermTokens > 0, "блок долговременной памяти посчитан в отчёте")
+        assertEquals(6, result.tokens.memory.shortTermMessages, "в отчёте видно, сколько сообщений ушло в запрос")
+        assertEquals(14, result.tokens.memory.shortTermDropped, "и сколько отброшено окном")
+        assertEquals(0, result.tokens.memory.rejected)
+        assertEquals(340, result.tokens.memory.updateTokens, "цена обновления памяти в отчёте")
+        assertEquals(14, result.tokens.droppedMessages)
+        assertEquals("memory", result.tokens.strategy)
+    }
+
+    /** Память накапливается: прежние записи слоёв уходят в служебный запрос, а не теряются. */
+    @Test
+    fun memoryAccumulatesAcrossMessages() = runBlocking {
         val updates = mutableListOf<String>()
         val llm = StubClient { request, _ ->
-            if (request.isFactsUpdate()) {
+            if (request.isMemoryUpdate()) {
                 updates += request.messages.last().content
-                FACTS_JSON
+                MEMORY_JSON
             } else {
                 "ответ"
             }
         }
         val agent = engine(llm)
 
-        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.FACTS))
-        agent.run("Второе", AgentOptions(history = dialog(2), sessionId = "session", strategy = ContextStrategy.FACTS))
+        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
+        agent.run("Второе", AgentOptions(history = dialog(2), sessionId = "session", strategy = ContextStrategy.MEMORY))
 
         assertEquals(4, llm.requests.size, "по два вызова на сообщение: память и ответ")
-        assertTrue(updates[0].contains("Фактов пока нет"), "первое обновление начинает память с нуля")
         assertTrue(
-            updates[1].contains("Прежние факты:\n- цель: собрать ТЗ"),
-            "второе обновление видит прежние факты: ${updates[1]}"
+            updates[0].contains("Долговременная память пока пуста"),
+            "первое обновление начинает слои с нуля: ${updates[0]}"
         )
         assertTrue(
-            llm.requests.last().messages.any { it.content.startsWith("Память диалога (факты):") },
+            updates[1].contains("Прежняя память — Рабочая память задачи:\n- цель — собрать ТЗ"),
+            "второе обновление видит прежние записи рабочего слоя: ${updates[1]}"
+        )
+        assertTrue(
+            updates[1].contains("Прежняя память — Долговременная память:\n- хранилище — Room"),
+            "второе обновление видит прежние записи долговременного слоя: ${updates[1]}"
+        )
+        assertTrue(
+            llm.requests.last().messages.any { it.content.startsWith("Долговременная память") },
             "в запрос уходит накопленная память"
         )
     }
 
-    /** Сломанное обновление память не портит: остаются прежние факты. */
+    /** Сломанное обновление память не портит: остаются прежние записи обоих слоёв. */
     @Test
-    fun factsStayWhenUpdateIsNotJson() = runBlocking {
+    fun memoryStaysWhenUpdateIsNotJson() = runBlocking {
         val llm = StubClient { request, call ->
             when {
-                request.isFactsUpdate() && call == 1 -> FACTS_JSON
-                request.isFactsUpdate() -> "извините, не могу"
+                request.isMemoryUpdate() && call == 1 -> MEMORY_JSON
+                request.isMemoryUpdate() -> "извините, не могу"
                 else -> "ответ"
             }
         }
         val logs = mutableListOf<String>()
         val agent = engine(llm, logs)
 
-        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.FACTS))
-        val second = agent.run("Второе", AgentOptions(sessionId = "session", strategy = ContextStrategy.FACTS))
+        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
+        val second = agent.run("Второе", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
 
-        assertEquals(2, second.tokens.facts.size, "прежние факты остались")
+        assertEquals(2, second.tokens.memory.working.size, "прежние записи рабочего слоя остались")
+        assertEquals(1, second.tokens.memory.longTerm.size, "прежние записи долговременного слоя остались")
         assertTrue(
-            llm.requests.last().messages.any { it.content.contains("- бюджет: 5 000 рублей") },
+            llm.requests.last().messages.any { it.content.contains("- бюджет — 5 000 рублей") },
             "память ушла в запрос несмотря на сбой обновления"
         )
-        assertTrue(logs.any { it.contains("Память фактов не обновилась") }, "сбой обновления виден в логе")
+        assertTrue(logs.any { it.contains("Память не обновилась") }, "сбой обновления виден в логе")
     }
 
-    /** Без сессии память вести негде: стратегия работает как окно и не тратит служебный вызов. */
+    /** Без сессии слои вести негде: стратегия работает как окно и не тратит служебный вызов. */
     @Test
-    fun factsWithoutSessionWorkAsWindow() = runBlocking {
+    fun memoryWithoutSessionWorksAsWindow() = runBlocking {
         val llm = StubClient { _, _ -> "ответ" }
         val logs = mutableListOf<String>()
 
         val result = engine(llm, logs).run(
             "Что дальше?",
-            AgentOptions(history = dialog(20), strategy = ContextStrategy.FACTS, windowMessages = 6)
+            AgentOptions(history = dialog(20), strategy = ContextStrategy.MEMORY, windowMessages = 6)
         )
 
         assertEquals(1, llm.requests.size, "служебного вызова нет")
-        assertEquals(0, result.tokens.facts.size)
+        assertTrue(result.tokens.memory.working.isEmpty(), "рабочая память не ведётся")
+        assertTrue(result.tokens.memory.longTerm.isEmpty(), "долговременная память не ведётся")
         assertEquals(14, result.tokens.droppedMessages, "окно всё равно применяется")
         assertTrue(logs.any { it.contains("сессия не названа") }, "причина видна в логе: $logs")
+    }
+
+    /** Запись чужого типа в память не попадает: тип называет модель, а принимает его код. */
+    @Test
+    fun recordsOfForeignTypeAreRejectedHere() = runBlocking {
+        val llm = StubClient { request, _ -> if (request.isMemoryUpdate()) BAD_MEMORY_JSON else "ответ" }
+        val logs = mutableListOf<String>()
+
+        val result = engine(llm, logs).run(
+            "Дальше — сроки",
+            AgentOptions(history = dialog(6), sessionId = "session", strategy = ContextStrategy.SLIDING_WINDOW)
+        )
+
+        assertEquals(
+            2,
+            result.tokens.memory.rejected,
+            "неизвестный тип и запись типа, которого стратегия не ведёт, отклонены"
+        )
+        assertTrue(result.tokens.memory.working.isEmpty(), "сохранять нечего: типы записей не те")
+        assertTrue(result.tokens.memory.longTerm.isEmpty(), "окно долговременную память не ведёт")
+        assertTrue(logs.any { it.contains("отклонено записей: 2") }, "отклонённые записи видны в логе: $logs")
     }
 
     /** Ветки: в модель уходит путь активной ветки, соседняя ветка не попадает. */
@@ -357,19 +449,31 @@ class ContextStrategiesTest {
     /** Разбор памяти: модель любит обрамлять JSON текстом — это не должно ломать память. */
     @Test
     fun extractorParsesFencedJsonAndRejectsGarbage() {
-        val extractor = FactsExtractor()
+        val extractor = MemoryExtractor()
 
         assertEquals(
-            listOf(Fact("цель", "собрать ТЗ")),
-            extractor.parse("Вот результат:\n```json\n{\"facts\":[{\"key\":\"цель\",\"value\":\"собрать ТЗ\"}]}\n```")?.items
+            listOf(MemoryRecord("working", "цель — собрать ТЗ")),
+            extractor.parse(
+                "Вот результат:\n```json\n" +
+                    """{"memory":[{"layer":"working","value":"цель — собрать ТЗ"}]}""" +
+                    "\n```"
+            )?.records
         )
-        assertEquals(Facts(), extractor.parse("{\"facts\":[]}"), "пустая память — это не сбой разбора")
+        assertEquals(0, extractor.parse("""{"memory":[]}""")?.records?.size, "пустая память — не сбой разбора")
         assertNull(extractor.parse("извините, не могу"))
         assertNull(extractor.parse(""))
-        assertEquals(
-            listOf(Fact("цель", "вторая")),
-            extractor.parse("{\"facts\":[{\"key\":\"Цель\",\"value\":\"первая\"},{\"key\":\"цель\",\"value\":\"вторая\"}]}")?.items,
-            "повтор ключа обновляет факт, а не плодит записи"
+
+        val twoRecords = extractor.parse(
+            """{"memory":[{"layer":"long_term","value":"хранилище — Room"},""" +
+                """{"layer":"long_term","value":"хранилище — SQLite"}]}"""
+        )?.records
+        assertEquals(2, twoRecords?.size, "разбор не теряет записи: повторы сводит слияние, а не разбор")
+
+        val rejected = extractor.parse(
+            """{"memory":[{"layer":"настроение","value":"боевой"},""" +
+                """{"layer":"working","value":"  "}]}"""
         )
+        assertEquals(2, rejected?.rejected, "неизвестный тип и пустая запись отклонены")
+        assertTrue(rejected?.records?.isEmpty() == true)
     }
 }
