@@ -629,6 +629,13 @@ class ContextStrategiesClientTest {
          */
         const val NO_TASK_SNAPSHOT = """{"task":null,"stages":[]}"""
 
+        /**
+         * Снимок инвариантов для тестов стратегий: правил нет, каталог видов пуст.
+         * Читается он там же, где память и профиль, и не должен попадать в очередь
+         * ответов агента: тесты стратегий назначают тела именно ответам агента.
+         */
+        const val EMPTY_INVARIANTS_SNAPSHOT = """{"invariants":[],"kinds":[]}"""
+
         /** Каталог типов задания: подпись и пояснение клиент берёт отсюда, а не из своей таблицы. */
         val TYPES_JSON = """
             [{"layer":"short_term","title":"краткосрочная","hint":"текущий диалог","writable":false},
@@ -685,6 +692,9 @@ class ContextStrategiesClientTest {
                         // Состояние задачи читается там же, где память и профиль,
                         // и тоже не должно тратить ответ агента из очереди
                         "/v1/task" -> NO_TASK_SNAPSHOT
+                        // Инварианты читаются там же, где задача и профиль: их чтение
+                        // тоже не должно тратить ответ агента из очереди
+                        "/v1/invariants" -> EMPTY_INVARIANTS_SNAPSHOT
                         else -> {
                             val answer = answers[minOf(index, answers.lastIndex)]
                             index++
@@ -729,6 +739,9 @@ class ContextStrategiesClientTest {
                         request.url.encodedPath == "/v1/profile" -> HttpStatusCode.OK to PROFILE_SNAPSHOT
                         // Задача читается там же — и своим ответом, а не ответом агента
                         request.url.encodedPath == "/v1/task" -> HttpStatusCode.OK to NO_TASK_SNAPSHOT
+                        // Инварианты читаются вместе с памятью, профилем и задачей
+                        request.url.encodedPath == "/v1/invariants" ->
+                            HttpStatusCode.OK to EMPTY_INVARIANTS_SNAPSHOT
                         request.url.encodedPath != "/v1/memory" -> HttpStatusCode.OK to PLAIN_REPLY
                         request.method == HttpMethod.Get -> {
                             val body = snapshots[minOf(reads, snapshots.lastIndex)]

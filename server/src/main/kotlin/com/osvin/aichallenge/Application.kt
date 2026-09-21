@@ -9,6 +9,9 @@ import com.osvin.aichallenge.agent.EmptyReplyException
 import com.osvin.aichallenge.agent.InMemoryMemoryStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.InMemoryTaskStateStore
+import com.osvin.aichallenge.agent.InvariantForget
+import com.osvin.aichallenge.agent.InvariantWrite
+import com.osvin.aichallenge.agent.InvariantWriter
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.agent.MemoryForget
@@ -18,6 +21,7 @@ import com.osvin.aichallenge.agent.ProfileStore
 import com.osvin.aichallenge.agent.TaskWrite
 import com.osvin.aichallenge.agent.TaskWriter
 import com.osvin.aichallenge.agent.UserProfile
+import com.osvin.aichallenge.invariants.JsonFileInvariantStore
 import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
 import com.osvin.aichallenge.profile.JsonFileProfileStore
@@ -129,6 +133,25 @@ val longTermMemory = JsonFileMemoryStore(JsonFileMemoryStore.defaultFile())
  * сервера, иначе ассистент терял бы настройки пользователя при каждом запуске.
  */
 val profileStore = JsonFileProfileStore(JsonFileProfileStore.defaultFile())
+
+/**
+ * Инварианты проекта на сервере: правила, которым обязан соответствовать ассистент.
+ *
+ * Отдельное хранилище, а не поле профиля или памяти: инварианты не описывают
+ * пользователя и не извлекаются из диалога — это условие задачи, которое проверяется
+ * до ответа, поэтому у них нет ни извлечения моделью, ни слияния с прежними записями.
+ * Общий у трёх хранилищ только адрес — идентификатор профиля ([DEFAULT_PROFILE]),
+ * по которому правила лежат рядом с профилем и памятью того же профиля.
+ *
+ * Лежит в файле, как профиль и долговременная память: правила задаёт человек, поэтому
+ * они должны пережить перезапуск сервера — иначе ограничения снимались бы вместе с
+ * процессом, и ассистент молча выполнял бы просьбы, от которых его уберегали.
+ *
+ * Отличие от прочих сторов: здесь значимо и само наличие записи. «Правил не задавали»
+ * (умолчания проекта) и «правил нет» (человек убрал все) — разные состояния, поэтому
+ * убрать все правила можно, и проверки конфликта после этого не будет.
+ */
+val invariantStore = JsonFileInvariantStore(JsonFileInvariantStore.defaultFile())
 
 /**
  * Профиль, который уходит в запрос к модели и показывается клиенту: пусто в сторе —
@@ -318,6 +341,10 @@ fun Application.module() {
          * его не присылает и не может забыть, и ни одна стратегия контекста не отключает
          * персонализацию. Сам [com.osvin.aichallenge.models.ChatRequest] профиля не знает:
          * это объявленные предпочтения сервера, а не поле запроса.
+         *
+         * Инварианты читаются тем же способом и по той же причине: правила проекта —
+         * объявленное состояние сервера, поэтому клиент их не присылает, и клиентская
+         * версия правил не может разойтись с той, по которой ассистент отвечает.
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
@@ -329,7 +356,8 @@ fun Application.module() {
                 summaryStore = summaryStore,
                 taskStateStore = taskStateStore,
                 workingMemory = workingMemory,
-                longTermMemory = longTermMemory
+                longTermMemory = longTermMemory,
+                invariantStore = invariantStore
             )
             val result = agent.run(
                 userMessage = request.message,
@@ -354,6 +382,9 @@ fun Application.module() {
          * ни этапа с шагом у него не остаётся. Память не трогается: оба слоя принадлежат
          * профилю, а не чату, поэтому удаление чата не стирает рабочую память задачи —
          * её убирают только забыванием в шторке, вытеснением и перезапуск сервера.
+         * Инварианты не трогаются тем более: они принадлежат проекту, а не диалогу —
+         * один и тот же человек работает по одним правилам во всех чатах, поэтому
+         * удалить правило можно только явным действием в шторке инвариантов.
          */
         delete("/v1/chats/{sessionId}") {
             val sessionId = call.parameters["sessionId"].orEmpty()
@@ -387,6 +418,62 @@ fun Application.module() {
             val profile = call.receive<UserProfile>()
             profileStore.put(DEFAULT_PROFILE, profile)
             call.respond(profile)
+        }
+
+        /**
+         * Инварианты проекта: правила, которым обязан соответствовать ассистент.
+         *
+         * Снимок полный — сами правила и каталог видов: подписи и пояснения в интерфейсе
+         * берутся из него, и своей копии таблицы видов на клиенте нет. Пусто в сторе —
+         * отдаём умолчания проекта ([com.osvin.aichallenge.agent.Invariant.DEFAULT]):
+         * ассистент ограничен с первого запуска, а не после того, как человек заполнит
+         * правила. Пустой список в сторе — не то же самое: человек убрал все правила,
+         * поэтому снимок приходит пустым, и проверки конфликта в запросах больше нет.
+         */
+        get("/v1/invariants") {
+            call.respond(InvariantWriter(invariantStore).snapshot())
+        }
+
+        /**
+         * Добавление правила: явное действие человека, как запись в память.
+         *
+         * Отказ (вид неизвестен, пустая формулировка, исчерпан предел) — ошибка запроса:
+         * клиент покажет причину, а правила останутся прежними. Повтор с тем же текстом
+         * не ошибка: формулировка заменяется, как в памяти дня 11. Возвращается снимок,
+         * а не отправленное правило: клиент видит то, что легло в стор и уедет в запрос.
+         */
+        post("/v1/invariants") {
+            val request = call.receive<InvariantWriteRequest>()
+            val writer = InvariantWriter(invariantStore)
+            when (val write = writer.remember(request.kind, request.value)) {
+                is InvariantWrite.Rejected -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(success = false, error = write.reason)
+                )
+
+                is InvariantWrite.Written -> call.respond(write.snapshot)
+            }
+        }
+
+        /**
+         * Забывание правила: вид и формулировку человек называет сам.
+         *
+         * Повторное удаление не ошибка: снимок вернётся как был — правило адресуется
+         * текстом, и забывать уже нечего. Убрали все правила — в сторе лежит пустой
+         * список, поэтому снимок приходит пустым, и агент больше не проверяет конфликты:
+         * в этом и отличие от «правил не задавали», когда работают умолчания проекта.
+         */
+        delete("/v1/invariants") {
+            val params = call.request.queryParameters
+            val writer = InvariantWriter(invariantStore)
+            when (val forget = writer.forget(params["kind"], params["value"])) {
+                is InvariantForget.Rejected -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(success = false, error = forget.reason)
+                )
+
+                is InvariantForget.Forgotten -> call.respond(forget.snapshot)
+            }
         }
 
         /**

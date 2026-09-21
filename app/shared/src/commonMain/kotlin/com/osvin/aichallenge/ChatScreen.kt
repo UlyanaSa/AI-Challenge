@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.DialogBranches
+import com.osvin.aichallenge.data.InvariantSnapshot
 import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
@@ -30,7 +31,9 @@ import com.osvin.aichallenge.ui.components.*
  *
  * Память агента открывается шторкой из верхней панели: в ленте сообщений её нет,
  * чтобы хранилище не мешало диалогу. Профиль пользователя — второй шторкой там же:
- * он общий для всех чатов и подставляется в каждый запрос к модели.
+ * он общий для всех чатов и подставляется в каждый запрос к модели. Инварианты —
+ * третьей: это правила проекта, которые ассистент нарушать не имеет права, и они
+ * тоже уходят в каждый запрос, поэтому правятся поверх чата.
  *
  * Задача чата видна полосой над полем ввода: состояние работы адресуется сессией
  * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставят на паузу
@@ -62,6 +65,10 @@ fun ChatScreen(
     // и чем закончилось последнее обращение к серверу
     val task by viewModel.task.collectAsStateWithLifecycle()
     val taskError by viewModel.taskError.collectAsStateWithLifecycle()
+    // Инварианты проекта: действующие правила вместе с каталогом видов и чем
+    // закончилось последнее обращение к серверу
+    val invariants by viewModel.invariants.collectAsStateWithLifecycle()
+    val invariantsError by viewModel.invariantsError.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
@@ -77,6 +84,13 @@ fun ChatScreen(
     var memoryValue by rememberSaveable { mutableStateOf("") }
     var memoryOpen by rememberSaveable { mutableStateOf(false) }
     val memorySheetState = rememberModalBottomSheetState()
+
+    // Форма добавления инварианта и признак открытой шторки: как и у памяти, они
+    // живут на экране, поэтому перерисовка списка сообщений не теряет набранный текст
+    var invariantKind by rememberSaveable { mutableStateOf<String?>(null) }
+    var invariantValue by rememberSaveable { mutableStateOf("") }
+    var invariantsOpen by rememberSaveable { mutableStateOf(false) }
+    val invariantsSheetState = rememberModalBottomSheetState()
 
     // Черновик профиля — один объект, а не шесть строк: так его видно целиком,
     // и его достаточно сравнить с профилем с сервера, чтобы понять, есть ли правки.
@@ -108,6 +122,15 @@ fun ChatScreen(
         }
     }
 
+    // Вид инварианта тоже выбирается только из каталога сервера: по умолчанию —
+    // первый вид каталога. Пока каталога нет, вида нет, и добавить правило некуда.
+    LaunchedEffect(invariants?.kinds) {
+        val kinds = invariants?.kinds.orEmpty()
+        if (kinds.none { it.kind == invariantKind }) {
+            invariantKind = kinds.firstOrNull()?.kind
+        }
+    }
+
     // Автопрокрутка к последнему сообщению при обновлении списка
     LaunchedEffect(messages.size, uiState) {
         if (messages.isNotEmpty()) {
@@ -124,6 +147,7 @@ fun ChatScreen(
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,
                 onMemory = { memoryOpen = true },
+                onInvariants = { invariantsOpen = true },
                 onProfile = { profileOpen = true }
             )
         },
@@ -235,6 +259,32 @@ fun ChatScreen(
         }
     }
 
+    // Шторка инвариантов: правила уходят в модель с каждым запросом, поэтому их видно
+    // и правят там же, где остальные настройки агента. Снимок читается при создании
+    // и открытии чата; без снимка видно, что каталог видов не пришёл.
+    if (invariantsOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { invariantsOpen = false },
+            sheetState = invariantsSheetState
+        ) {
+            InvariantsSheet(
+                snapshot = invariants ?: EMPTY_INVARIANTS,
+                error = invariantsError,
+                selectedKind = invariantKind,
+                valueText = invariantValue,
+                onKindSelected = { invariantKind = it },
+                onValueChange = { invariantValue = it },
+                onRemember = {
+                    invariantKind?.let { viewModel.rememberInvariant(it, invariantValue) }
+                    // Текст очищается сразу, вид остаётся выбранным:
+                    // так подряд добавляют несколько правил одного вида
+                    invariantValue = ""
+                },
+                onForget = { kind, value -> viewModel.forgetInvariant(kind, value) }
+            )
+        }
+    }
+
     // Шторка профиля: та же форма, что у памяти, — профиль правится поверх чата,
     // и правки видны строкой состояния до самого сохранения
     if (profileOpen) {
@@ -255,6 +305,9 @@ fun ChatScreen(
 
 /** Пустой снимок: шторка открывается и до ответа сервера — тогда видно, что каталог типов не пришёл. */
 private val EMPTY_MEMORY_LAYERS = MemoryLayers()
+
+/** Пустой снимок инвариантов: шторка открывается и до ответа сервера — тогда видно, что каталог видов не пришёл. */
+private val EMPTY_INVARIANTS = InvariantSnapshot()
 
 /**
  * Сохранение черновика профиля между пересозданиями экрана: [UserProfile] — обычный

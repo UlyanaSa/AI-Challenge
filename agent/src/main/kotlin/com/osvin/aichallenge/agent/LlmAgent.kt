@@ -114,6 +114,18 @@ data class AgentResult(
  * отклоняется причиной, и состояние остаётся прежним. На паузе служебного вызова нет:
  * состояние заморожено, и после снятия паузы работа идёт с того же шага.
  *
+ * Инварианты ([Invariant]) стоят вне стратегии контекста, как профиль и задача, но по другой
+ * причине: это не часть диалога и не следствие его, а правила над ним. Их не извлекает модель —
+ * их объявляет человек ([InvariantWriter]), — и лежат они своим хранилищем ([InvariantStore]),
+ * а не в истории сообщений: история ровно то, что стратегия режет, ветвит и переписывает,
+ * а правило обязано дойти до модели в каждом запросе. Пока правил нет (человек убрал их все),
+ * ни блока, ни служебного вызова нет вовсе, и поведение прежних дней не меняется. Если правила
+ * есть, они уходят системным сообщением сразу после профиля, а конфликт запроса с ними проверяет
+ * служебный вызов ([InvariantGuard]): по его вердикту в запрос добавляется системное сообщение
+ * с правилом отказа — отказ формулирует сама модель, но причина у него та, которую назвал код,
+ * и в отчёте видно, какой инвариант нарушен и чем. Сбой проверки или неразобранный ответ диалог
+ * не ломает: вердикта нет, правило отказа не добавляется, а блок инвариантов всё равно в промпте.
+ *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
  * @param logger Лог агента: запрос, стратегия, история диалога, ответ модели и ответ API при ошибке.
@@ -129,6 +141,12 @@ data class AgentResult(
  *        ([InMemoryMemoryStore]), поэтому перезапуск сервера её обнуляет.
  * @param longTermMemory Хранилище долговременной памяти по тому же профилю: файл, поэтому
  *        перезапуск сервера её не роняет.
+ * @param invariantStore Хранилище инвариантов проекта по профилю ([DEFAULT_PROFILE]): правила
+ *        объявляет человек явным действием ([InvariantWriter]), поэтому «их ещё не задавали»
+ *        (`null`) читается как умолчание проекта ([Invariant.DEFAULT]), а пустой список —
+ *        как «правил нет». Сервер передаёт общее на все запросы, иначе правила живут внутри
+ *        одного запуска агента.
+ * @param invariantGuard Правило проверки: как спросить модель о конфликте запроса с правилами.
  */
 class LlmAgent(
     private val llm: LlmClient,
@@ -140,7 +158,9 @@ class LlmAgent(
     private val memoryExtractor: MemoryExtractor = MemoryExtractor(),
     private val taskExtractor: TaskExtractor = TaskExtractor(),
     private val workingMemory: MemoryStore = InMemoryMemoryStore(),
-    private val longTermMemory: MemoryStore = InMemoryMemoryStore()
+    private val longTermMemory: MemoryStore = InMemoryMemoryStore(),
+    private val invariantStore: InvariantStore = InMemoryInvariantStore(),
+    private val invariantGuard: InvariantGuard = InvariantGuard()
 ) {
 
     /**
@@ -164,9 +184,9 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: system prompt, профиль пользователя, состояние задачи, сводка,
-        // слои памяти (долговременный, затем рабочий), история диалога и текущий запрос —
-        // в этом порядке.
+        // Сообщения модели: system prompt, профиль пользователя, инварианты проекта, состояние
+        // задачи, сообщение проверки инвариантов, сводка, слои памяти (долговременный, затем
+        // рабочий), история диалога и текущий запрос — в этом порядке.
         // Свой system prompt из настроек важнее: если он задан,
         // берём его. Если нет — его роль играет первое сообщение диалога: инструкция
         // из него остаётся в силе и тогда, когда старшие сообщения отброшены.
@@ -195,11 +215,22 @@ class LlmAgent(
         val context = planContext(model, strategy, history, window, options, userMessage)
         val historyForRequest = context.history
         val summary = context.summary
-        // Состояние задачи — системное сообщение сразу после профиля: этап, текущий шаг
+        // Состояние задачи — системное сообщение сразу после профиля и правил: этап, текущий шаг
         // и ожидаемое действие. От стратегии контекста оно не зависит: стратегия решает,
         // что уходит из истории, а задача ведётся по диалогу целиком.
         val taskState = context.task.state
         val taskMessage = taskState?.let { ChatMessage(SYSTEM_ROLE, it.render()) }
+        // Инварианты — системное сообщение сразу после профиля и до состояния задачи: правило
+        // действует над диалогом, а не обсуждается в нём, поэтому его место среди правил ответа,
+        // а не среди работы ([Invariant]). Правил нет — сообщения нет: пустой блок читался бы
+        // моделью как требование, о котором забыли.
+        val invariantMessage = context.invariants.block
+            .takeIf { it.isNotEmpty() }
+            ?.let { ChatMessage(SYSTEM_ROLE, it) }
+        // Правило отказа — отдельное системное сообщение после состояния задачи: оно появляется
+        // только тогда, когда проверка была и нашла конфликт, и объясняет отказ причиной, которую
+        // назвал код ([InvariantGuard]).
+        val invariantCheckMessage = context.invariants.check?.let { ChatMessage(SYSTEM_ROLE, it) }
         // Блоки памяти: слой уходит в запрос, только если его ведёт стратегия и он не пуст.
         val longTermMessage = memoryBlock(MemoryLayer.LONG_TERM, context, strategy)
         val workingMessage = memoryBlock(MemoryLayer.WORKING, context, strategy)
@@ -207,7 +238,9 @@ class LlmAgent(
         val messages = buildList {
             add(ChatMessage(SYSTEM_ROLE, systemPrompt))
             profileMessage?.let { add(it) }
+            invariantMessage?.let { add(it) }
             taskMessage?.let { add(it) }
+            invariantCheckMessage?.let { add(it) }
             summary?.let { add(compressor.summaryMessage(it)) }
             longTermMessage?.let { add(it) }
             workingMessage?.let { add(it) }
@@ -221,6 +254,11 @@ class LlmAgent(
         val systemTokens = tokenCounter.count(systemPrompt)
         val profileTokens = profileMessage?.let { tokenCounter.count(it.content) } ?: 0
         val taskTokens = taskMessage?.let { tokenCounter.count(it.content) } ?: 0
+        // Инварианты считаются вместе: блок правил и сообщение проверки — обе части одного
+        // правила ответа, и в отчёте они идут одним числом ([InvariantReport.tokens]).
+        val invariantTokens = invariantMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val invariantCheckTokens = invariantCheckMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val invariantsTokens = invariantTokens + invariantCheckTokens
         val summaryTokens = summary?.tokens ?: 0
         val longTermTokens = longTermMessage?.let { tokenCounter.count(it.content) } ?: 0
         val workingTokens = workingMessage?.let { tokenCounter.count(it.content) } ?: 0
@@ -235,6 +273,8 @@ class LlmAgent(
         context.log(strategy, window, historyRawTokens, historyTokens, memoryTokens)?.let(logger::log)
         // Лог задачи: где работа стоит, чем кончился переход и чего стоил служебный вызов.
         context.task.log(taskTokens)?.let(logger::log)
+        // Лог инвариантов: что ушло в запрос, чем кончилась проверка и чего она стоила.
+        context.invariants.log(invariantTokens)?.let(logger::log)
 
         logger.log(
             listOf(
@@ -242,6 +282,7 @@ class LlmAgent(
                 "стратегия контекста: ${strategy.title}",
                 "system prompt: $systemTokens ток.",
                 "профиль: $profileTokens ток.",
+                "инварианты: $invariantsTokens ток.",
                 "задача: $taskTokens ток.",
                 "история: $historyTokens ток. (${historyForRequest.size} сообщ.)",
                 "текущий вопрос: $requestTokens ток.",
@@ -367,6 +408,19 @@ class LlmAgent(
                     tokens = taskTokens,
                     updateTokens = context.task.call?.totalTokens ?: 0,
                     updateCostUsd = context.task.call?.costUsd
+                ),
+                invariants = InvariantReport(
+                    invariants = context.invariants.invariants,
+                    tokens = invariantsTokens,
+                    verdict = context.invariants.verdict?.verdict,
+                    violated = context.invariants.verdict?.violations?.map { it.kind }.orEmpty(),
+                    // Причины идут в том же порядке, что и виды нарушений, поэтому по отчёту
+                    // видно, чем именно запрос противоречит каждому правилу.
+                    reason = context.invariants.verdict?.violations
+                        ?.joinToString("; ") { it.reason }
+                        ?.takeIf { it.isNotEmpty() },
+                    updateTokens = context.invariants.call?.totalTokens ?: 0,
+                    updateCostUsd = context.invariants.call?.costUsd
                 )
             )
         )
@@ -387,6 +441,7 @@ class LlmAgent(
      * @param branchId Активная ветка: null — основная линия диалога.
      * @param sharedMessages Сколько сообщений в пути до точки ветвления.
      * @param task Состояние задачи после этого сообщения и цена его обновления.
+     * @param invariants Правила проекта этого запроса, вердикт проверки и цена вызова.
      */
     private data class ContextPlan(
         val history: List<ChatMessage>,
@@ -400,7 +455,8 @@ class LlmAgent(
         val excludedMessages: Int = 0,
         val branchId: String? = null,
         val sharedMessages: Int = 0,
-        val task: TaskPlan = TaskPlan()
+        val task: TaskPlan = TaskPlan(),
+        val invariants: InvariantPlan = InvariantPlan()
     ) {
 
         /** Записи слоя, которые ушли в запрос. */
@@ -542,6 +598,9 @@ class LlmAgent(
         // Задача ведётся независимо от стратегии: состояние — не часть контекста, а работа,
         // которую агент ведёт сам, поэтому стратегия на него не влияет.
         val task = planTask(model, sessionId, windowed, userMessage)
+        // Инварианты читаются после задачи и тоже независимо от стратегии: правило — не часть
+        // контекста, а условие над ним, поэтому в промпт оно уходит при любой стратегии.
+        val invariants = planInvariants(model, windowed, userMessage)
 
         return ContextPlan(
             history = summary?.history ?: windowed,
@@ -559,7 +618,8 @@ class LlmAgent(
             } else {
                 0
             },
-            task = task
+            task = task,
+            invariants = invariants
         )
     }
 
@@ -772,6 +832,94 @@ class LlmAgent(
 
             is TaskDecision.Rejected ->
                 TaskPlan(previous, rejected = 1, rejectReason = decision.reason, call = reply.call)
+        }
+    }
+
+    /**
+     * Инварианты этого запроса: правила проекта и вердикт проверки на конфликт с ними (день 14).
+     *
+     * Правил нет — ни блока, ни вызова: спрашивать модель не о чем, проверять нечего, и в отчёте
+     * остаётся пустой [InvariantReport], поэтому поведение прежних дней не меняется. Правила есть
+     * — блок уходит в запрос при любой стратегии, а служебный вызов проверяет, не противоречит ли
+     * им запрос. Проверка идёт на каждом ходу, даже когда правило в диалоге не упоминали: конфликт
+     * видно по самой просьбе, а не по тому, назвал ли её человек.
+     *
+     * Вызов идёт от того же списка, из которого собран блок: правила, вид которых агент не знает,
+     * в промпт не уходят, поэтому проверять их нечем ([InvariantRules.render]). Сбой вызова или
+     * неразобранный ответ вердикта не дают ([GuardVerdict]): правило отказа в запрос не добавляется,
+     * блок правил остаётся, и диалог продолжается как обычно.
+     */
+    private suspend fun planInvariants(
+        model: String,
+        history: List<ChatMessage>,
+        userMessage: String
+    ): InvariantPlan {
+        val invariants = invariantStore.invariantsOrDefault()
+        val block = InvariantRules.render(invariants)
+        if (block.isEmpty()) return InvariantPlan()
+
+        val fresh = history.takeLast(MEMORY_CONTEXT_MESSAGES) + ChatMessage(USER_ROLE, userMessage)
+        val reply = callService("инварианты", invariantGuard.request(model, invariants, fresh))
+            ?: return InvariantPlan(invariants, block)
+        val verdict = invariantGuard.parse(reply.text)
+        if (verdict == null) {
+            logger.log(
+                "Проверка инвариантов не удалась (модель вернула не JSON или вердикт не из двух " +
+                    "значений) — вердикта нет, правила ушли в запрос как есть"
+            )
+            return InvariantPlan(invariants, block, call = reply.call)
+        }
+
+        return InvariantPlan(
+            invariants = invariants,
+            block = block,
+            verdict = verdict,
+            check = invariantGuard.message(verdict, invariants),
+            call = reply.call
+        )
+    }
+
+    /**
+     * Инварианты этого запроса: правила, вердикт проверки и цена служебного вызова.
+     *
+     * @param invariants Правила, которые ушли в запрос системным сообщением.
+     * @param block Блок правил для системного сообщения; пуст — правил нет.
+     * @param verdict Вердикт проверки; null — проверки не было или её ответ не разобрался.
+     * @param check Сообщение проверки для запроса; null — проверять нечего или вердикта нет.
+     * @param call Служебный вызов проверки; null — вызова не было.
+     */
+    private data class InvariantPlan(
+        val invariants: List<Invariant> = emptyList(),
+        val block: String = "",
+        val verdict: GuardVerdict? = null,
+        val check: String? = null,
+        val call: ServiceCall? = null
+    ) {
+
+        /**
+         * Блок лога «Инварианты»: что ушло в запрос, вердикт проверки, нарушенные правила
+         * с причиной и цена служебного вызова. null — правил нет, и рассказывать нечего.
+         */
+        fun log(blockTokens: Int): String? {
+            if (block.isEmpty()) return null
+            val lines = invariants.mapNotNull { InvariantRules.line(it) }
+            return buildList {
+                add("Инварианты")
+                add("блок в запросе: ${lines.size} — $blockTokens ток.")
+                lines.forEach { add("  $it") }
+                if (verdict == null) {
+                    add("проверка инвариантов: вердикта нет — вызов не удался или ответ не разобрался")
+                } else {
+                    add("вердикт проверки: ${verdict.verdict}")
+                    verdict.violations.forEach { add("нарушен инвариант: ${InvariantGuard.violation(it, invariants)}") }
+                }
+                call?.let {
+                    add(
+                        "проверка инвариантов: ${it.totalTokens} ток. " +
+                            "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                    )
+                }
+            }.joinToString("\n")
         }
     }
 

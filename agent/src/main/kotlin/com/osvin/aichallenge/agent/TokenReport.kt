@@ -42,6 +42,9 @@ import kotlinx.serialization.Serializable
  * @param task Состояние задачи: этап, шаг и ожидаемое действие на конец ответа, токены
  *        блока состояния в запросе и цена служебного вызова. Пустой отчёт — задачи
  *        в этом диалоге нет, и тогда агент её не ведёт.
+ * @param invariants Инварианты проекта: правила, которые ушли в запрос системным сообщением,
+ *        вердикт проверки на конфликт с ними и цена этой проверки. Пустой отчёт — правил нет
+ *        (человек убрал их все), и тогда ни блока в запросе, ни служебного вызова не было.
  */
 @Serializable
 data class TokenReport(
@@ -70,7 +73,8 @@ data class TokenReport(
     @SerialName("excluded_messages") val excludedMessages: Int = 0,
     @SerialName("branch_id") val branchId: String? = null,
     @SerialName("memory") val memory: MemoryReport = MemoryReport(),
-    @SerialName("task") val task: TaskReport = TaskReport()
+    @SerialName("task") val task: TaskReport = TaskReport(),
+    @SerialName("invariants") val invariants: InvariantReport = InvariantReport()
 )
 
 /**

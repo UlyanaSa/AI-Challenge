@@ -36,6 +36,8 @@ import kotlin.math.roundToLong
  * @param memory Память агента: записи по слоям, токены слоёв, цена обновления.
  * @param task Отчёт задачи: этап и шаг после этого ответа. null — агент о задаче
  *        не отчитывался, и состояние полосы задачи остаётся прежним.
+ * @param invariants Отчёт по инвариантам: правила в запросе и вердикт проверки
+ *        на конфликт с ними. Вердикт `violated` объясняет отказ ассистента.
  */
 @Serializable
 data class TokenReport(
@@ -61,14 +63,18 @@ data class TokenReport(
     @SerialName("excluded_messages") val excludedMessages: Int = 0,
     @SerialName("branch_id") val branchId: String? = null,
     @SerialName("memory") val memory: MemoryReport = MemoryReport(),
-    @SerialName("task") val task: TaskReport? = null
+    @SerialName("task") val task: TaskReport? = null,
+    @SerialName("invariants") val invariants: InvariantReport = InvariantReport()
 ) {
     /**
      * Одна запись лога на весь отчёт: характеристики идут отдельными строками,
      * но запись одна — так блок читается целиком, а не рассыпается по logcat.
      * Строки о сжатии истории появляются только когда сервер действительно
      * свернул сообщения, строки об окне, ветке и памяти — когда их применила
-     * выбранная стратегия: без этого запись остаётся прежней.
+     * выбранная стратегия: без этого запись остаётся прежней. Строки об инвариантах
+     * появляются, когда правила ушли в запрос, а о вердикте — когда проверка
+     * на конфликт с ними состоялась: отказ ассистента виден здесь по причине,
+     * которую назвал служебный вызов, а не по тексту ответа.
      */
     fun logEntry(model: String): String = buildList {
         add("[agent] Запрос → $model")
@@ -127,6 +133,41 @@ data class TokenReport(
                         "цена ${memory.updateCostUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
                 )
             }
+        }
+        // Инварианты печатаем только когда правила действительно ушли в запрос:
+        // у чата без правил в записи не появляется лишних строк
+        if (invariants.invariants.isNotEmpty()) {
+            add("[agent] инварианты: ${invariants.invariants.size} шт. (${invariants.tokens} ток.)")
+            // Вид печатается как есть, без клиентской таблицы названий: подписи
+            // живут только в каталоге снимка, а отчёт его не несёт
+            invariants.invariants.forEach { invariant ->
+                add("[agent] - ${invariant.kind} | ${invariant.value}")
+            }
+        }
+        // Вердикт проверки: отказ ассистента виден здесь по причине служебного вызова,
+        // а не только по тексту ответа. null — проверки не было: правило отказа
+        // в запрос не добавлялось, поэтому и строки нет
+        if (invariants.verdict == "violated") {
+            add(
+                "[agent] проверка инвариантов: запрос нарушает " +
+                    invariants.violated.joinToString(", ") +
+                    " — ${invariants.reason ?: "причина не названа"}"
+            )
+            // Формулировки нарушенных правил берём из блока: отчёт несёт одни виды.
+            // Правило, которого в блоке нет, пропускаем — назвать его нечем
+            invariants.violated.forEach { kind ->
+                invariants.invariants.firstOrNull { it.kind == kind }?.let { invariant ->
+                    add("[agent] - ${invariant.kind} | ${invariant.value}")
+                }
+            }
+        } else if (invariants.verdict != null) {
+            add("[agent] проверка инвариантов: запрос им не противоречит")
+        }
+        if (invariants.updateTokens > 0) {
+            add(
+                "[agent] проверка инвариантов стоила: ${invariants.updateTokens} ток., " +
+                    "цена ${invariants.updateCostUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}"
+            )
         }
     }.joinToString("\n")
 }

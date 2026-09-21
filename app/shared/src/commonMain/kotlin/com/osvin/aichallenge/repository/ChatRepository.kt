@@ -52,6 +52,14 @@ import kotlin.random.Random
  * ([startTask]), поставил на паузу ([setTaskPaused]), забыл ([forgetTask]). Как и
  * память, задачу он не выводит сам — состояние и каталог этапов приходят с сервера,
  * а после каждого ответа модели обновляются из отчёта ([TaskReport]) без перезапроса.
+ *
+ * Инварианты ([loadInvariants]) тоже общие и живут отдельно от диалога: правила
+ * проекта лежат на сервере в своём хранилище, а не в истории сообщений, и сервер
+ * подставляет их в каждый запрос системным сообщением при любой стратегии. Клиент
+ * их только показывает и правит явными действиями человека ([rememberInvariant],
+ * [forgetInvariant]), а проверку запроса на конфликт делает сервер. Своей копии
+ * умолчаний у клиента нет: пока человек не задал правил, снимок с сервера приходит
+ * с ними же.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -120,6 +128,20 @@ class ChatRepository(
     private val _taskError = MutableStateFlow<String?>(null)
     val taskError: StateFlow<String?> = _taskError.asStateFlow()
 
+    // Инварианты профиля: правила, которые ассистент нарушать не имеет права. Живут
+    // отдельно и от памяти, и от задачи: правила не извлекаются из диалога и не
+    // описывают работу — их объявляет человек, они лежат на сервере в своём хранилище
+    // и уходят в каждый запрос системным сообщением. Снимок несёт и каталог видов,
+    // поэтому подписи шторки берутся из ответа сервера. null — снимка ещё не было.
+    private val _invariants = MutableStateFlow<InvariantSnapshot?>(null)
+    val invariants: StateFlow<InvariantSnapshot?> = _invariants.asStateFlow()
+
+    // Отказ сервера на чтение инвариантов и на правку правил; null — отказа не было.
+    // Это своя ошибка: сбой правил не должен выглядеть как сбой памяти или задачи —
+    // правку инварианта человек делает отдельным действием и ждёт отдельного ответа.
+    private val _invariantsError = MutableStateFlow<String?>(null)
+    val invariantsError: StateFlow<String?> = _invariantsError.asStateFlow()
+
     // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
     // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
     private val _settings = MutableStateFlow(GenerationSettings())
@@ -180,6 +202,9 @@ class ChatRepository(
         // снимок читается ниже, а прежний относился к прошлому диалогу
         _task.value = null
         _taskError.value = null
+        // Правила общие для профиля и от чата не зависят, поэтому снимок остаётся
+        // тем же; читаем его ниже, чтобы шторка открывалась с тем, что лежит на сервере
+        _invariantsError.value = null
         _state.value = ChatUiState.Idle
         _chats.value = store.chats()
         // Память общая для профиля: шторке сразу нужен снимок слоёв и каталога типов,
@@ -191,6 +216,9 @@ class ChatRepository(
         // Задача своя у каждого чата: полоса показывает работу этого диалога сразу,
         // а не после первого сообщения — состояние живёт на сервере, не в переписке
         loadTask()
+        // Инварианты общие для профиля и читаются там же, где профиль: шторка должна
+        // открываться с действующими правилами этого проекта, а не с пустым списком
+        loadInvariants()
         return chat
     }
 
@@ -216,6 +244,9 @@ class ChatRepository(
         // диалога своя, поэтому до ответа сервера о ней лучше молчать, чем показать чужую
         _task.value = null
         _taskError.value = null
+        // Чужого снимка инвариантов не бывает: правила живут по профилю, а не по чату,
+        // поэтому прежний остаётся на месте и ниже только подтверждается сервером
+        _invariantsError.value = null
         _messages.value = DialogBranches.activePath(store.messages(id), branches, chat.activeBranchId)
         _state.value = ChatUiState.Idle
         // Память общая для профиля, но чат мог остаться без снимка (его чистит
@@ -227,6 +258,9 @@ class ChatRepository(
         // Задача у каждого чата своя, и состояние её живёт на сервере, а не в истории
         // сообщений: без чтения открытый чат показал бы пустую полосу при живой задаче
         loadTask()
+        // Инварианты читаем на каждом открытии чата: их могли поправить с другого
+        // устройства, а шторка должна открываться с тем, что лежит на сервере
+        loadInvariants()
     }
 
     /**
@@ -269,6 +303,10 @@ class ChatRepository(
             // этого диалога, и после удаления показывать его нечему
             _task.value = null
             _taskError.value = null
+            // Шторка инвариантов чистится вместе с чатом, как и память: активного
+            // диалога больше нет, и следующий открытый чат прочитает правила заново
+            _invariants.value = null
+            _invariantsError.value = null
             _state.value = ChatUiState.Idle
         }
         _chats.value = store.chats()
@@ -701,6 +739,84 @@ class ChatRepository(
             }
         } catch (e: Exception) {
             _memoryError.value = e.message ?: "Сетевая ошибка"
+        }
+    }
+
+    /**
+     * Инварианты профиля: правила, которые ассистент нарушать не имеет права, и каталог
+     * видов. Общие для всех чатов, поэтому активный чат здесь не нужен — как память
+     * и профиль. Это отдельное хранилище, а не часть диалога: правила не лежат в истории
+     * сообщений, их держит сервер и подставляет в каждый запрос системным сообщением при
+     * любой стратегии. Без снимка шторке нечего показывать, поэтому null и до первого
+     * запроса, и когда сервер недоступен: чат при этом продолжает работать.
+     */
+    suspend fun loadInvariants() {
+        try {
+            val response = client.get("$baseUrl/v1/invariants")
+            if (response.status.isSuccess()) {
+                _invariants.value = response.body()
+                _invariantsError.value = null
+            } else {
+                _invariants.value = null
+                // Без снимка в шторке нет каталога видов, и добавить правило некуда:
+                // причину надо показать пользователю, иначе кнопка выглядит сломанной
+                _invariantsError.value = "Инварианты недоступны: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] Инварианты не загружены: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _invariants.value = null
+            _invariantsError.value = e.message ?: "Инварианты недоступны: нет соединения"
+            platformLog("agent", "[agent] Инварианты не загружены: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Явное добавление инварианта: вид и формулировку человек выбирает сам — правило
+     * объявляет он, а не выводит модель. Чат здесь не нужен: правила живут по профилю,
+     * поэтому добавленное из любого диалога видно из остальных.
+     * Отказ сервера и сбой сети не переводят чат в [ChatUiState.Error]: диалог
+     * продолжается, а причина видна строкой в шторке инвариантов ([invariantsError]).
+     */
+    suspend fun rememberInvariant(kind: String, value: String) {
+        applyInvariantWrite {
+            client.post("$baseUrl/v1/invariants") {
+                contentType(ContentType.Application.Json)
+                setBody(InvariantWriteRequest(kind = kind, value = value))
+            }
+        }
+    }
+
+    /**
+     * Удаление инварианта: вид и формулировка правила. Как и добавление, чат здесь
+     * не нужен — правила общие для профиля. Операция идемпотентна: сервер отвечает
+     * тем же снимком, поэтому убрать правило можно и повторно. Убрали все правила —
+     * в снимке приходит пустой список, и проверки запроса на конфликт больше нет:
+     * это не «снимок не пришёл», а явное «правил нет».
+     */
+    suspend fun forgetInvariant(kind: String, value: String) {
+        applyInvariantWrite {
+            client.delete("$baseUrl/v1/invariants") {
+                parameter("kind", kind)
+                parameter("value", value)
+            }
+        }
+    }
+
+    /** Общий путь добавления и удаления правила: снимок из ответа идёт в состояние, отказ — в текст ошибки. */
+    private suspend fun applyInvariantWrite(request: suspend () -> HttpResponse) {
+        try {
+            val response = request()
+            if (response.status.isSuccess()) {
+                _invariants.value = response.body()
+                _invariantsError.value = null
+            } else {
+                // Сервер объясняет отказ в теле (например, правило не понравилось
+                // проверкам) — показываем его текст, а не только код статуса
+                _invariantsError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _invariantsError.value = e.message ?: "Сетевая ошибка"
         }
     }
 

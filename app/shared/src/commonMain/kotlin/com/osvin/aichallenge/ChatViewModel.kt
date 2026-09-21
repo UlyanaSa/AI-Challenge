@@ -8,6 +8,7 @@ import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.ContextStrategy
 import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
+import com.osvin.aichallenge.data.InvariantSnapshot
 import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.MemoryReport
 import com.osvin.aichallenge.data.TaskSnapshot
@@ -47,6 +48,14 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     // она принадлежит диалогу, и её состояние не выводится на клиенте
     val task: StateFlow<TaskSnapshot?> = repository.task
     val taskError: StateFlow<String?> = repository.taskError
+
+    // Инварианты профиля: правила проекта, которые ассистент нарушать не имеет права.
+    // Это ни память, ни задача: память агент извлекает из диалога, а задача описывает
+    // работу в чате — правила же человек объявляет на весь проект. Живут они на сервере
+    // отдельно от диалога и уходят в каждый запрос системным сообщением, поэтому клиент
+    // их только показывает и правит явными действиями человека
+    val invariants: StateFlow<InvariantSnapshot?> = repository.invariants
+    val invariantsError: StateFlow<String?> = repository.invariantsError
 
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
@@ -228,6 +237,37 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun forgetTask() {
         viewModelScope.launch {
             repository.forgetTask()
+        }
+    }
+
+    /**
+     * Перечитывание инвариантов профиля: они общие для всех чатов, поэтому читаются
+     * без активного чата. Чат читает их сам при создании и открытии, а это повторное
+     * чтение — например, после сбоя сети.
+     */
+    fun loadInvariants() {
+        viewModelScope.launch {
+            repository.loadInvariants()
+        }
+    }
+
+    /**
+     * Добавление инварианта: вид из каталога и формулировку правила выбирает человек.
+     * Состояние шторки берётся из ответа сервера, поэтому видно то, что сохранено.
+     */
+    fun rememberInvariant(kind: String, value: String) {
+        viewModelScope.launch {
+            repository.rememberInvariant(kind, value)
+        }
+    }
+
+    /**
+     * Удаление правила: вид и формулировка инварианта. Убрали все правила — снимок
+     * приходит с пустым списком, и проверки запроса на конфликт больше нет.
+     */
+    fun forgetInvariant(kind: String, value: String) {
+        viewModelScope.launch {
+            repository.forgetInvariant(kind, value)
         }
     }
 }
