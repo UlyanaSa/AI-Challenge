@@ -172,7 +172,7 @@ class MemoryLayersTest {
         assertEquals(
             listOf(MemoryRecord("working", "цель — учёт расходов")),
             second.tokens.memory.working,
-            "новый чат видит рабочую память прошлой задачи: она лежит по профилю, а не по сессии"
+            "новый чат видит рабочую память прошлой задачи: она лежит по профилю, как долговременная"
         )
         assertEquals(
             listOf(MemoryRecord("long_term", "имя — Иван"), MemoryRecord("long_term", "хранилище — Room")),

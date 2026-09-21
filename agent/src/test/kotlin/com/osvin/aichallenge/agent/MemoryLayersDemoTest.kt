@@ -286,11 +286,12 @@ class MemoryLayersDemoTest {
 
         val working = InMemoryMemoryStore()
         val longTerm = InMemoryMemoryStore()
+        // Сессии у писателя больше нет: оба хранимых типа живут по профилю, поэтому
+        // запись видна из любого чата, а не только из того, где её сделали.
         val writer = MemoryWriter(working, longTerm)
-        val session = "demo-explicit"
 
         log("типы памяти (по этому каталогу рисуется выбор в интерфейсе):")
-        writer.layers(session).types.forEach { type ->
+        writer.layers().types.forEach { type ->
             val write = if (type.writable) "→ можно писать" else "→ пишется сам сообщениями"
             log("- ${type.title} (${type.hint}), ${type.layer} $write")
         }
@@ -302,7 +303,7 @@ class MemoryLayersDemoTest {
             MemoryLayer.SHORT_TERM.wire to "пользователь поздоровался",
             "настроение" to "боевой"
         ).forEach { (layer, value) ->
-            val write = writer.remember(session, layer, value)
+            val write = writer.remember(layer, value)
             val place = when (write) {
                 is MemoryWrite.Written -> "→ ${layerName(write.layer)}"
                 is MemoryWrite.Rejected -> "→ отклонено: ${write.reason}"
@@ -311,40 +312,40 @@ class MemoryLayersDemoTest {
         }
         log("")
         log("после записи:")
-        writer.layers(session).working.forEach { log("- рабочая: ${describe(it)}") }
-        writer.layers(session).longTerm.forEach { log("- долговременная: ${describe(it)}") }
+        writer.layers().working.forEach { log("- рабочая: ${describe(it)}") }
+        writer.layers().longTerm.forEach { log("- долговременная: ${describe(it)}") }
         log("")
         val goal = "цель — собрать ТЗ"
-        log("забываем «$goal»: ${forgetLine(writer.forget(session, MemoryLayer.WORKING.wire, goal))}")
-        log("забываем «боевой»: ${forgetLine(writer.forget(session, "настроение", "боевой"))}")
+        log("забываем «$goal»: ${forgetLine(writer.forget(MemoryLayer.WORKING.wire, goal))}")
+        log("забываем «боевой»: ${forgetLine(writer.forget("настроение", "боевой"))}")
 
         assertEquals(
             listOf(MemoryRecord("long_term", "стиль — отвечать кратко")),
-            writer.layers(session).longTerm,
+            writer.layers().longTerm,
             "фраза ушла в названный тип памяти"
         )
-        assertTrue(writer.layers(session).working.isEmpty(), "забытая запись рабочую память очистила")
+        assertTrue(writer.layers().working.isEmpty(), "забытая запись рабочую память очистила")
         assertEquals(
             MemoryWriter.NOT_WRITABLE,
             assertIs<MemoryWrite.Rejected>(
-                writer.remember(session, MemoryLayer.SHORT_TERM.wire, "пользователь поздоровался")
+                writer.remember(MemoryLayer.SHORT_TERM.wire, "пользователь поздоровался")
             ).reason,
             "краткосрочную память пишет сам чат"
         )
         assertEquals(
             MemoryWriter.UNKNOWN_LAYER,
-            assertIs<MemoryWrite.Rejected>(writer.remember(session, "настроение", "боевой")).reason,
+            assertIs<MemoryWrite.Rejected>(writer.remember("настроение", "боевой")).reason,
             "типа нет в задании — память не меняется"
         )
         assertEquals(
             MemoryWriter.UNKNOWN_LAYER,
-            assertIs<MemoryForget.Rejected>(writer.forget(session, "настроение", "боевой")).reason,
+            assertIs<MemoryForget.Rejected>(writer.forget("настроение", "боевой")).reason,
             "и забыть такую запись нельзя"
         )
     }
 }
 
-/** Общее для этапов: слои памяти и диалог первого этапа — этапы делят один прогон. */
+/** Общее для этапов: слои памяти профиля и диалог первого этапа — этапы делят один прогон. */
 private object LayerStores {
     val working = InMemoryMemoryStore()
     val longTerm = InMemoryMemoryStore()

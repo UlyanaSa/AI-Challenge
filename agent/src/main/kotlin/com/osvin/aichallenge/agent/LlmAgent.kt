@@ -98,7 +98,8 @@ data class AgentResult(
  * @param memoryExtractor Правило памяти: как обновлять записи слоёв.
  * @param workingMemory Хранилище рабочей памяти по профилю: память процесса
  *        ([InMemoryMemoryStore]), поэтому перезапуск сервера её обнуляет.
- * @param longTermMemory Хранилище долговременной памяти по профилям.
+ * @param longTermMemory Хранилище долговременной памяти по тому же профилю: файл, поэтому
+ *        перезапуск сервера её не роняет.
  */
 class LlmAgent(
     private val llm: LlmClient,

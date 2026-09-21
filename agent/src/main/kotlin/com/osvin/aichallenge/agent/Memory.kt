@@ -28,7 +28,8 @@ import kotlinx.serialization.Serializable
  *
  * @param wire Значение типа в отчёте агента, в теле запроса и в интерфейсе.
  * @param title Название типа для интерфейса и логов.
- * @param hint Пояснение к названию — то, что стоит в скобках: «рабочая (данные текущей задачи)».
+ * @param hint Пояснение к названию — то, что стоит в скобках: «рабочая (данные текущей задачи
+ *        — общие для всех чатов)».
  */
 enum class MemoryLayer(val wire: String, val title: String, val hint: String) {
     SHORT_TERM("short_term", "краткосрочная", "текущий диалог"),

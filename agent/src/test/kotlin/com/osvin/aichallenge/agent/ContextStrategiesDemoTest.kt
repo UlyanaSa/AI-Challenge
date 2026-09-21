@@ -19,6 +19,9 @@ import kotlin.test.assertTrue
  * В конце задаётся один и тот же вопрос «собери ТЗ», и по ответу видно, что стратегия
  * сохранила, а что потеряла. Отдельный этап — ветки: точка ветвления после восьмого
  * сообщения и два независимых продолжения от неё.
+ *
+ * Слои памяти — рабочая и долговременная — живут по профилю, поэтому их записи видит
+ * и другой чат; краткосрочная — это история текущего диалога, и в новом чате её нет.
  */
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 class ContextStrategiesDemoTest {
@@ -219,6 +222,8 @@ class ContextStrategiesDemoTest {
         val llm = strategyClient()
         val logs = mutableListOf<String>()
         val agent = LlmAgent(llm, logger = AgentLogger { logs += it })
+        // Сессия нужна состоянию стратегии — сводке истории; слои памяти живут по профилю,
+        // поэтому у каждой стратегии своя сессия, чтобы сводки не смешивались.
         val session = "$SESSION-${strategy.name.lowercase()}"
         val history = mutableListOf<ChatMessage>()
         var cost = 0.0
@@ -280,7 +285,7 @@ class ContextStrategiesDemoTest {
         log("что ушло в модель: ${scene.requestMessages} сообщ., вход ${scene.promptTokens} ток.")
         log("отброшено окном: ${scene.dropped} сообщ.")
         log(
-            "память: рабочая ${scene.memory.working.size} записей, " +
+            "память по профилю (одна на все чаты): рабочая ${scene.memory.working.size} записей, " +
                 "долговременная ${scene.memory.longTerm.size}"
         )
         scene.memory.working.forEach { log("- рабочая | ${it.value}") }
@@ -416,7 +421,7 @@ private const val WINDOW = 6
  */
 private const val ANSWER_BUDGET = 32_768
 
-/** Сессия демонстрации: по ней живут сводка и слои памяти. */
+/** Сессия демонстрации: по ней живёт сводка истории; слои памяти живут по профилю и общие для чатов. */
 private const val SESSION = "demo-strategies"
 
 /** Точка ветвления: после восьмого сообщения пользователя. */

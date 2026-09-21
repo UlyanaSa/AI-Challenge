@@ -289,11 +289,12 @@ class ContextStrategiesClientTest {
 
     /**
      * Снимок памяти приезжает при открытии чата и уходит в состояние целиком:
-     * оба слоя и каталог типов с подписями, а запрос несёт сессию именно этого
-     * чата — память у каждого чата своя.
+     * оба слоя и каталог типов с подписями. Запрос снимка не несёт ни сессии, ни
+     * других параметров: память общая для профиля, поэтому и открытие любого чата
+     * показывает одни и те же слои.
      */
     @Test
-    fun memorySnapshotOfTheChatLandsInState() = runBlocking {
+    fun memorySnapshotLandsInState() = runBlocking {
         val requests = mutableListOf<HttpRequestData>()
         val repository = newMemoryRepository(requests, listOf(MEMORY_SNAPSHOT))
 
@@ -302,7 +303,7 @@ class ContextStrategiesClientTest {
 
         val read = memoryRequests(requests).last()
         assertEquals(HttpMethod.Get, read.method)
-        assertEquals(chat.id, read.url.parameters["sessionId"], "снимок читается по сессии открытого чата")
+        assertTrue(read.url.parameters.isEmpty(), "снимок читается без параметров: ${read.url}")
         assertEquals(
             listOf(MemoryRecord("working", "цель — учёт расходов")),
             repository.layers.value?.working
@@ -315,9 +316,45 @@ class ContextStrategiesClientTest {
     }
 
     /**
-     * «Запомнить» уходит телом {sessionId, layer, value} — без ключа, которого
-     * у записи больше нет, — а состояние берётся из ответа: в шторке оказывается
-     * снимок сервера, а не то, что клиент набрал сам.
+     * Память работает и без активного чата: снимок читается, запись и удаление уходят
+     * на сервер — она общая для профиля и чату не адресована. Отказа «чат не выбран»
+     * у памяти поэтому не бывает: он остался только у смены стратегии.
+     */
+    @Test
+    fun memoryWorksWithoutActiveChat() = runBlocking {
+        val requests = mutableListOf<HttpRequestData>()
+        val repository = newMemoryRepository(
+            requests,
+            listOf(MEMORY_SNAPSHOT),
+            listOf(HttpStatusCode.OK to MEMORY_SNAPSHOT_AFTER_WRITE)
+        )
+
+        repository.loadMemory()
+        assertNotNull(repository.layers.value, "снимок читается без активного чата")
+
+        repository.remember("long_term", "часовой пояс — MSK")
+        assertEquals(
+            listOf(
+                MemoryRecord("long_term", "хранилище — Room"),
+                MemoryRecord("long_term", "часовой пояс — MSK")
+            ),
+            repository.layers.value?.longTerm,
+            "запись без чата уходит и возвращает снимок сервера"
+        )
+
+        repository.forget("long_term", "часовой пояс — MSK")
+        assertNull(repository.memoryError.value, "без чата отказа нет: память чату не адресована")
+        assertEquals(
+            listOf(HttpMethod.Get, HttpMethod.Post, HttpMethod.Delete),
+            memoryRequests(requests).map { it.method },
+            "все три обращения к памяти уходят и без чата"
+        )
+    }
+
+    /**
+     * «Запомнить» уходит телом {layer, value} — без ключа, которого у записи нет,
+     * и без сессии: чат память не адресует, — а состояние берётся из ответа:
+     * в шторке оказывается снимок сервера, а не то, что клиент набрал сам.
      */
     @Test
     fun rememberSendsWriteBodyAndTakesSnapshotFromAnswer() = runBlocking {
@@ -328,17 +365,18 @@ class ContextStrategiesClientTest {
             listOf(HttpStatusCode.OK to MEMORY_SNAPSHOT_AFTER_WRITE)
         )
 
-        val chat = repository.createChat()
+        repository.createChat()
         repository.remember("long_term", "часовой пояс — MSK")
 
         val write = memoryRequests(requests).last()
         assertEquals(HttpMethod.Post, write.method)
         val body = (write.body as TextContent).text
         assertEquals(
-            MemoryWriteRequest(sessionId = chat.id, layer = "long_term", value = "часовой пояс — MSK"),
+            MemoryWriteRequest(layer = "long_term", value = "часовой пояс — MSK"),
             JSON.decodeFromString<MemoryWriteRequest>(body)
         )
         assertFalse("\"key\"" in body, "ключа у записи нет — в теле его быть не может: $body")
+        assertFalse("\"sessionId\"" in body, "сессии в записи памяти нет: чат её не адресует: $body")
         assertEquals(
             listOf(
                 MemoryRecord("long_term", "хранилище — Room"),
@@ -350,8 +388,9 @@ class ContextStrategiesClientTest {
     }
 
     /**
-     * «Забыть» уходит методом DELETE с типом и текстом записи в параметрах,
-     * а кириллица кодируется в процентах — текст доезжает до сервера как набран.
+     * «Забыть» уходит методом DELETE с типом и текстом записи в параметрах — сессии
+     * среди них нет, — а кириллица кодируется в процентах: текст доезжает до сервера
+     * как набран.
      */
     @Test
     fun forgetSendsLayerAndEncodedValue() = runBlocking {
@@ -362,12 +401,12 @@ class ContextStrategiesClientTest {
             listOf(HttpStatusCode.OK to MEMORY_SNAPSHOT_AFTER_FORGET)
         )
 
-        val chat = repository.createChat()
+        repository.createChat()
         repository.forget("working", "цель — учёт расходов")
 
         val delete = memoryRequests(requests).last()
         assertEquals(HttpMethod.Delete, delete.method)
-        assertEquals(chat.id, delete.url.parameters["sessionId"])
+        assertNull(delete.url.parameters["sessionId"], "память чату не адресована: сессии в запросе нет")
         assertEquals("working", delete.url.parameters["layer"])
         assertEquals("цель — учёт расходов", delete.url.parameters["value"], "текст уезжает без искажений")
         assertTrue(
@@ -414,14 +453,14 @@ class ContextStrategiesClientTest {
             listOf(MEMORY_SNAPSHOT, MEMORY_SNAPSHOT_AFTER_WRITE)
         )
 
-        val chat = repository.createChat()
+        repository.createChat()
         assertEquals(1, memoryRequests(requests).size, "снимок читается уже при создании чата")
 
         repository.sendMessage("Куда едем")
 
         val reads = memoryRequests(requests)
         assertEquals(2, reads.size, "после ответа агента снимок перечитывается")
-        assertEquals(chat.id, reads.last().url.parameters["sessionId"])
+        assertTrue(reads.last().url.parameters.isEmpty(), "перечитывается тот же снимок профиля: ${reads.last().url}")
         assertEquals(
             listOf(
                 MemoryRecord("long_term", "хранилище — Room"),
@@ -460,7 +499,9 @@ class ContextStrategiesClientTest {
     }
 
     /**
-     * Удаление активного чата чистит шторку: снимок чужой сессии в ней не остаётся.
+     * Удаление активного чата чистит шторку: снимок, показанный для удалённого диалога,
+     * в ней не остаётся — следующее открытие чата прочитает снимок профиля заново.
+     * Сама память на сервере при этом не трогается: она общая для чатов.
      */
     @Test
     fun deletingChatClearsSnapshot() = runBlocking {
@@ -471,8 +512,17 @@ class ContextStrategiesClientTest {
         assertNotNull(repository.layers.value, "у созданного чата снимок уже загружен")
 
         repository.deleteChat(chat.id)
-        assertNull(repository.layers.value, "снимок удалённого чата не показывается")
+        assertNull(repository.layers.value, "в шторке не остаётся снимок удалённого чата")
         assertNull(repository.memoryError.value)
+        assertEquals(
+            listOf(HttpMethod.Delete),
+            requests.filter { it.url.encodedPath.startsWith("/v1/chats/") }.map { it.method },
+            "на сервере чат удаляется одним запросом — сессия сводки"
+        )
+        assertTrue(
+            memoryRequests(requests).none { it.method == HttpMethod.Delete },
+            "удаление чата не стирает память: она общая для профиля, а не для чата"
+        )
     }
 
     /**
@@ -568,14 +618,14 @@ class ContextStrategiesClientTest {
         /** Каталог типов задания: подпись и пояснение клиент берёт отсюда, а не из своей таблицы. */
         val TYPES_JSON = """
             [{"layer":"short_term","title":"краткосрочная","hint":"текущий диалог","writable":false},
-             {"layer":"working","title":"рабочая","hint":"данные текущей задачи","writable":true},
+             {"layer":"working","title":"рабочая","hint":"данные текущей задачи — общие для всех чатов","writable":true},
              {"layer":"long_term","title":"долговременная","hint":"профиль, решения, знания","writable":true}]
         """.trimIndent()
 
         /** Каталог типов из [TYPES_JSON] так, как его разбирает клиент. */
         val MEMORY_TYPES = listOf(
             MemoryType("short_term", "краткосрочная", "текущий диалог", writable = false),
-            MemoryType("working", "рабочая", "данные текущей задачи", writable = true),
+            MemoryType("working", "рабочая", "данные текущей задачи — общие для всех чатов", writable = true),
             MemoryType("long_term", "долговременная", "профиль, решения, знания", writable = true)
         )
 

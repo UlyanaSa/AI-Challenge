@@ -256,7 +256,7 @@ private fun MemoryLayers.recordsOf(layer: String): List<MemoryRecord> = when (la
 /** Краткосрочная память: сообщения текущего диалога. */
 private const val SHORT_TERM_LAYER = "short_term"
 
-/** Рабочая память: данные текущей задачи, привязанные к сессии чата. */
+/** Рабочая память: данные текущей задачи, общие для всех чатов. */
 private const val WORKING_LAYER = "working"
 
 /** Долговременная память: профиль, решения, знания. */

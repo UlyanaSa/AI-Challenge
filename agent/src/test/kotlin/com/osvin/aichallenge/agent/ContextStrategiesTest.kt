@@ -97,7 +97,7 @@ class ContextStrategiesTest {
             )
         )
 
-        val messages = llm.requests.single().messages
+        val messages = llm.requests.last().messages
         assertEquals(8, messages.size, "system prompt + окно из 6 сообщений + текущий вопрос")
         assertEquals("сообщение 15", messages[1].content, "окно начинается с последних сообщений")
         assertEquals("Что дальше?", messages.last().content)
@@ -106,7 +106,7 @@ class ContextStrategiesTest {
         assertEquals(6, result.tokens.windowMessages)
         assertEquals("sliding_window", result.tokens.strategy)
         assertTrue(result.tokens.history < result.tokens.historyRawTokens, "окно меньше всей истории")
-        assertEquals(1, llm.requests.size, "сессия не названа — памяти нет, служебного вызова тоже")
+        assertEquals(2, llm.requests.size, "обновление рабочей памяти окном и ответ модели")
         assertTrue(
             logs.any { it.startsWith("Скользящее окно истории") && it.contains("отброшено сообщений: 14") },
             "в логе видно, что отброшено: $logs"
@@ -124,7 +124,7 @@ class ContextStrategiesTest {
             AgentOptions(history = dialog(4), strategy = ContextStrategy.SLIDING_WINDOW, windowMessages = 10)
         )
 
-        assertEquals(6, llm.requests.single().messages.size, "system prompt + 4 сообщения + вопрос")
+        assertEquals(6, llm.requests.last().messages.size, "system prompt + 4 сообщения + вопрос")
         assertEquals(0, result.tokens.droppedMessages)
     }
 
@@ -136,14 +136,14 @@ class ContextStrategiesTest {
             "Что дальше?",
             AgentOptions(history = dialog(6), strategy = ContextStrategy.SLIDING_WINDOW, windowMessages = 0)
         )
-        assertEquals(4, zero.requests.single().messages.size, "нулевое окно зажато до двух сообщений")
+        assertEquals(4, zero.requests.last().messages.size, "нулевое окно зажато до двух сообщений")
 
         val huge = StubClient { _, _ -> "ответ" }
         val result = engine(huge).run(
             "Что дальше?",
             AgentOptions(history = dialog(300), strategy = ContextStrategy.SLIDING_WINDOW, windowMessages = 500)
         )
-        assertEquals(102, huge.requests.single().messages.size, "окно зажато до сотни сообщений")
+        assertEquals(102, huge.requests.last().messages.size, "окно зажато до сотни сообщений")
         assertEquals(100, result.tokens.windowMessages)
     }
 
@@ -157,7 +157,6 @@ class ContextStrategiesTest {
             "Дальше — сроки",
             AgentOptions(
                 history = dialog(20),
-                sessionId = "session",
                 strategy = ContextStrategy.SLIDING_WINDOW,
                 windowMessages = 6
             )
@@ -195,7 +194,6 @@ class ContextStrategiesTest {
             "Дальше — сроки",
             AgentOptions(
                 history = dialog(20),
-                sessionId = "session",
                 strategy = ContextStrategy.MEMORY,
                 windowMessages = 6
             )
@@ -243,8 +241,8 @@ class ContextStrategiesTest {
         }
         val agent = engine(llm)
 
-        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
-        agent.run("Второе", AgentOptions(history = dialog(2), sessionId = "session", strategy = ContextStrategy.MEMORY))
+        agent.run("Первое", AgentOptions(strategy = ContextStrategy.MEMORY))
+        agent.run("Второе", AgentOptions(history = dialog(2), strategy = ContextStrategy.MEMORY))
 
         assertEquals(4, llm.requests.size, "по два вызова на сообщение: память и ответ")
         assertTrue(
@@ -278,8 +276,8 @@ class ContextStrategiesTest {
         val logs = mutableListOf<String>()
         val agent = engine(llm, logs)
 
-        agent.run("Первое", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
-        val second = agent.run("Второе", AgentOptions(sessionId = "session", strategy = ContextStrategy.MEMORY))
+        agent.run("Первое", AgentOptions(strategy = ContextStrategy.MEMORY))
+        val second = agent.run("Второе", AgentOptions(strategy = ContextStrategy.MEMORY))
 
         assertEquals(2, second.tokens.memory.working.size, "прежние записи рабочего слоя остались")
         assertEquals(1, second.tokens.memory.longTerm.size, "прежние записи долговременного слоя остались")
@@ -290,10 +288,10 @@ class ContextStrategiesTest {
         assertTrue(logs.any { it.contains("Память не обновилась") }, "сбой обновления виден в логе")
     }
 
-    /** Без сессии слои вести негде: стратегия работает как окно и не тратит служебный вызов. */
+    /** Без сессии память всё равно ведётся: слои лежат по профилю, сессию требует только сводка. */
     @Test
-    fun memoryWithoutSessionWorksAsWindow() = runBlocking {
-        val llm = StubClient { _, _ -> "ответ" }
+    fun memoryWorksWithoutSession() = runBlocking {
+        val llm = StubClient { request, call -> if (request.isMemoryUpdate() && call == 1) MEMORY_JSON else "ответ" }
         val logs = mutableListOf<String>()
 
         val result = engine(llm, logs).run(
@@ -301,11 +299,15 @@ class ContextStrategiesTest {
             AgentOptions(history = dialog(20), strategy = ContextStrategy.MEMORY, windowMessages = 6)
         )
 
-        assertEquals(1, llm.requests.size, "служебного вызова нет")
-        assertTrue(result.tokens.memory.working.isEmpty(), "рабочая память не ведётся")
-        assertTrue(result.tokens.memory.longTerm.isEmpty(), "долговременная память не ведётся")
+        assertEquals(2, llm.requests.size, "память обновляется и без сессии: служебный вызов + ответ модели")
+        assertEquals(2, result.tokens.memory.working.size, "рабочий слой наполнился")
+        assertEquals(1, result.tokens.memory.longTerm.size, "долговременный слой наполнился")
         assertEquals(14, result.tokens.droppedMessages, "окно всё равно применяется")
-        assertTrue(logs.any { it.contains("сессия не названа") }, "причина видна в логе: $logs")
+        assertTrue(
+            llm.requests.last().messages.any { it.content.startsWith("Рабочая память задачи") },
+            "рабочая память ушла в запрос"
+        )
+        assertTrue(logs.none { it.contains("сессия не названа") }, "сессии памяти не нужно — жаловаться не на что: $logs")
     }
 
     /** Запись чужого типа в память не попадает: тип называет модель, а принимает его код. */
@@ -316,7 +318,7 @@ class ContextStrategiesTest {
 
         val result = engine(llm, logs).run(
             "Дальше — сроки",
-            AgentOptions(history = dialog(6), sessionId = "session", strategy = ContextStrategy.SLIDING_WINDOW)
+            AgentOptions(history = dialog(6), strategy = ContextStrategy.SLIDING_WINDOW)
         )
 
         assertEquals(
@@ -437,7 +439,7 @@ class ContextStrategiesTest {
         val llm = StubClient { _, _ -> "ответ" }
         val logs = mutableListOf<String>()
 
-        val result = engine(llm, logs).run("Что дальше?", AgentOptions(history = dialog(20), sessionId = "session"))
+        val result = engine(llm, logs).run("Что дальше?", AgentOptions(history = dialog(20)))
 
         assertEquals(1, llm.requests.size)
         assertEquals(22, llm.requests.single().messages.size, "system prompt + 20 сообщений + вопрос")
