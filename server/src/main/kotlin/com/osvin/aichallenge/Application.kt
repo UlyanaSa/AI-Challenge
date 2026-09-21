@@ -9,6 +9,7 @@ import com.osvin.aichallenge.agent.EmptyReplyException
 import com.osvin.aichallenge.agent.InMemoryMemoryStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.InMemoryTaskStateStore
+import com.osvin.aichallenge.agent.Invariant
 import com.osvin.aichallenge.agent.InvariantForget
 import com.osvin.aichallenge.agent.InvariantWrite
 import com.osvin.aichallenge.agent.InvariantWriter
@@ -147,9 +148,13 @@ val profileStore = JsonFileProfileStore(JsonFileProfileStore.defaultFile())
  * они должны пережить перезапуск сервера — иначе ограничения снимались бы вместе с
  * процессом, и ассистент молча выполнял бы просьбы, от которых его уберегали.
  *
- * Отличие от прочих сторов: здесь значимо и само наличие записи. «Правил не задавали»
- * (умолчания проекта) и «правил нет» (человек убрал все) — разные состояния, поэтому
- * убрать все правила можно, и проверки конфликта после этого не будет.
+ * Отличие от прочих сторов: здесь значимо и само наличие записи. «Правил не задавали» и
+ * «правил нет» (человек убрал все) — разные состояния, поэтому убрать все правила можно,
+ * и проверки конфликта после этого не будет.
+ *
+ * Набор проекта ([Invariant.DEFAULT]) в хранилище кладёт сервер при первом запуске
+ * ([seedProjectInvariants]): агент умолчаний себе не подставляет, а проект правила имеет
+ * с первого запуска.
  */
 val invariantStore = JsonFileInvariantStore(JsonFileInvariantStore.defaultFile())
 
@@ -165,10 +170,28 @@ fun ProfileStore.profileOrDefault(profileId: String = DEFAULT_PROFILE): UserProf
     get(profileId) ?: UserProfile.DEFAULT
 
 /**
+ * Кладёт в хранилище набор правил проекта, если правил ещё не задавали: один раз,
+ * при первом запуске сервера.
+ *
+ * Правила проекта действуют с первого запуска, а не после того, как человек их заполнит:
+ * иначе ассистент отвечал бы без ограничений ровно там, где они нужнее всего, — на первом
+ * же запросе. Подставляет их сервер, а не агент: правило — условие, наложенное на работу,
+ * и назначать его себе агент не может ([InvariantStore]). Заданные правила при этом не
+ * трогаются: если запись уже есть — в том числе пустой список, которым человек убрал все
+ * правила, — она остаётся как есть. Поэтому «правил нет» переживает и перезапуск.
+ */
+private fun seedProjectInvariants() {
+    if (invariantStore.get(DEFAULT_PROFILE) == null) {
+        invariantStore.put(DEFAULT_PROFILE, Invariant.DEFAULT)
+    }
+}
+
+/**
  * Точка входа в приложение.
  * Запускает встроенный сервер Netty.
  */
 fun main() {
+    seedProjectInvariants()
     embeddedServer(
         Netty,
         port = AppConfig.DEFAULT_PORT,
@@ -424,11 +447,10 @@ fun Application.module() {
          * Инварианты проекта: правила, которым обязан соответствовать ассистент.
          *
          * Снимок полный — сами правила и каталог видов: подписи и пояснения в интерфейсе
-         * берутся из него, и своей копии таблицы видов на клиенте нет. Пусто в сторе —
-         * отдаём умолчания проекта ([com.osvin.aichallenge.agent.Invariant.DEFAULT]):
-         * ассистент ограничен с первого запуска, а не после того, как человек заполнит
-         * правила. Пустой список в сторе — не то же самое: человек убрал все правила,
-         * поэтому снимок приходит пустым, и проверки конфликта в запросах больше нет.
+         * берутся из него, и своей копии таблицы видов на клиенте нет. Отдаётся то, что
+         * лежит в сторе, без подстановок: набор правил проекта сервер положил туда при
+         * первом запуске ([seedProjectInvariants]), поэтому пустой снимок означает ровно
+         * одно — человек убрал все правила, и проверки конфликта в запросах больше нет.
          */
         get("/v1/invariants") {
             call.respond(InvariantWriter(invariantStore).snapshot())
@@ -461,7 +483,7 @@ fun Application.module() {
          * Повторное удаление не ошибка: снимок вернётся как был — правило адресуется
          * текстом, и забывать уже нечего. Убрали все правила — в сторе лежит пустой
          * список, поэтому снимок приходит пустым, и агент больше не проверяет конфликты:
-         * в этом и отличие от «правил не задавали», когда работают умолчания проекта.
+         * вернуться умолчания проекта не могут, их подстановка — только первый запуск.
          */
         delete("/v1/invariants") {
             val params = call.request.queryParameters
