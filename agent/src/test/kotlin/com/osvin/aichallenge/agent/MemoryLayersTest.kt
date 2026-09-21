@@ -269,7 +269,7 @@ class MemoryLayersTest {
             assertEquals(1, llm.requests.size, "$strategy служебных вызовов не делает")
             assertTrue(result.tokens.memory.working.isEmpty(), "$strategy рабочую память не ведёт")
             assertTrue(result.tokens.memory.longTerm.isEmpty(), "$strategy долговременную память не ведёт")
-            assertTrue(working.get("chat").isEmpty(), "$strategy память не наполняет")
+            assertTrue(working.get(DEFAULT_PROFILE).isEmpty(), "$strategy память не наполняет")
         }
     }
 
@@ -282,7 +282,6 @@ class MemoryLayersTest {
             "Что дальше?",
             AgentOptions(
                 history = layerDialog(20),
-                sessionId = "chat",
                 strategy = ContextStrategy.MEMORY,
                 windowMessages = 6
             )
