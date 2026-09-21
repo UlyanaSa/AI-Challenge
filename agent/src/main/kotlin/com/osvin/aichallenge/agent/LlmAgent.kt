@@ -142,10 +142,10 @@ data class AgentResult(
  * @param longTermMemory Хранилище долговременной памяти по тому же профилю: файл, поэтому
  *        перезапуск сервера её не роняет.
  * @param invariantStore Хранилище инвариантов проекта по профилю ([DEFAULT_PROFILE]): правила
- *        объявляет человек явным действием ([InvariantWriter]), поэтому «их ещё не задавали»
- *        (`null`) читается как умолчание проекта ([Invariant.DEFAULT]), а пустой список —
- *        как «правил нет». Сервер передаёт общее на все запросы, иначе правила живут внутри
- *        одного запуска агента.
+ *        объявляет человек явным действием ([InvariantWriter]), а набор проекта кладёт туда
+ *        сервер при первом запуске, поэтому «их ещё не задавали» (`null`) означает для агента
+ *        ровно то же, что пустой список, — работы без правил. Сервер передаёт хранилище общим
+ *        на все запросы, иначе правила живут внутри одного запуска агента.
  * @param invariantGuard Правило проверки: как спросить модель о конфликте запроса с правилами.
  */
 class LlmAgent(
@@ -220,6 +220,10 @@ class LlmAgent(
         // что уходит из истории, а задача ведётся по диалогу целиком.
         val taskState = context.task.state
         val taskMessage = taskState?.let { ChatMessage(SYSTEM_ROLE, it.render()) }
+        // Отказ перехода — системное сообщение сразу после состояния задачи: этап остался
+        // прежним, и без объяснения модель приняла бы это за молчание и попробовала бы
+        // перепрыгнуть снова. Причину назвал код ([TaskRules]), а не модель.
+        val rejectionMessage = context.task.rejection?.let { ChatMessage(SYSTEM_ROLE, it) }
         // Инварианты — системное сообщение сразу после профиля и до состояния задачи: правило
         // действует над диалогом, а не обсуждается в нём, поэтому его место среди правил ответа,
         // а не среди работы ([Invariant]). Правил нет — сообщения нет: пустой блок читался бы
@@ -240,6 +244,7 @@ class LlmAgent(
             profileMessage?.let { add(it) }
             invariantMessage?.let { add(it) }
             taskMessage?.let { add(it) }
+            rejectionMessage?.let { add(it) }
             invariantCheckMessage?.let { add(it) }
             summary?.let { add(compressor.summaryMessage(it)) }
             longTermMessage?.let { add(it) }
@@ -253,7 +258,8 @@ class LlmAgent(
         // вклад system prompt, профиля, слоёв памяти и истории считаем локально.
         val systemTokens = tokenCounter.count(systemPrompt)
         val profileTokens = profileMessage?.let { tokenCounter.count(it.content) } ?: 0
-        val taskTokens = taskMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val taskTokens = listOfNotNull(taskMessage, rejectionMessage)
+            .sumOf { tokenCounter.count(it.content) }
         // Инварианты считаются вместе: блок правил и сообщение проверки — обе части одного
         // правила ответа, и в отчёте они идут одним числом ([InvariantReport.tokens]).
         val invariantTokens = invariantMessage?.let { tokenCounter.count(it.content) } ?: 0
@@ -750,6 +756,9 @@ class LlmAgent(
      * @param moved Этап сменился этим ответом.
      * @param rejected Сколько переходов отклонено: этап неизвестен или запрещён таблицей.
      * @param rejectReason Причина последнего отказа.
+     * @param rejection Сообщение ассистенту об отклонённом переходе; null — отказа не было.
+     *        Этап не сдвинулся, поэтому без него модель увидела бы только прежний блок
+     *        состояния и попробовала бы перепрыгнуть этап снова ([TaskState.renderRejection]).
      * @param call Служебный вызов обновления состояния; null — вызова не было.
      */
     private data class TaskPlan(
@@ -757,6 +766,7 @@ class LlmAgent(
         val moved: Boolean = false,
         val rejected: Int = 0,
         val rejectReason: String? = null,
+        val rejection: String? = null,
         val call: ServiceCall? = null
     ) {
 
@@ -830,8 +840,13 @@ class LlmAgent(
                 TaskPlan(decision.state, moved = decision.moved, call = reply.call)
             }
 
-            is TaskDecision.Rejected ->
-                TaskPlan(previous, rejected = 1, rejectReason = decision.reason, call = reply.call)
+            is TaskDecision.Rejected -> TaskPlan(
+                previous,
+                rejected = 1,
+                rejectReason = decision.reason,
+                rejection = previous.renderRejection(decision.reason),
+                call = reply.call
+            )
         }
     }
 
@@ -839,10 +854,12 @@ class LlmAgent(
      * Инварианты этого запроса: правила проекта и вердикт проверки на конфликт с ними (день 14).
      *
      * Правил нет — ни блока, ни вызова: спрашивать модель не о чем, проверять нечего, и в отчёте
-     * остаётся пустой [InvariantReport], поэтому поведение прежних дней не меняется. Правила есть
-     * — блок уходит в запрос при любой стратегии, а служебный вызов проверяет, не противоречит ли
-     * им запрос. Проверка идёт на каждом ходу, даже когда правило в диалоге не упоминали: конфликт
-     * видно по самой просьбе, а не по тому, назвал ли её человек.
+     * остаётся пустой [InvariantReport], поэтому поведение прежних дней не меняется. Умолчание
+     * проекта агент себе не подставляет: правила кладёт в хранилище сервер, и агент без них просто
+     * работает без правил. Правила есть — блок уходит в запрос при любой стратегии, а служебный
+     * вызов проверяет, не противоречит ли им запрос. Проверка идёт на каждом ходу, даже когда
+     * правило в диалоге не упоминали: конфликт видно по самой просьбе, а не по тому, назвал ли
+     * её человек.
      *
      * Вызов идёт от того же списка, из которого собран блок: правила, вид которых агент не знает,
      * в промпт не уходят, поэтому проверять их нечем ([InvariantRules.render]). Сбой вызова или
@@ -854,7 +871,7 @@ class LlmAgent(
         history: List<ChatMessage>,
         userMessage: String
     ): InvariantPlan {
-        val invariants = invariantStore.invariantsOrDefault()
+        val invariants = invariantStore.get(DEFAULT_PROFILE).orEmpty()
         val block = InvariantRules.render(invariants)
         if (block.isEmpty()) return InvariantPlan()
 

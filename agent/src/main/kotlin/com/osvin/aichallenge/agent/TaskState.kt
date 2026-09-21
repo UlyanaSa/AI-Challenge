@@ -19,6 +19,12 @@ private const val PAUSED_LABEL = "на паузе"
 private const val PAUSED_HINT = "задача остановлена — продолжай с этого же шага, выполненное не пересказывай"
 
 /**
+ * Начало сообщения об отклонённом переходе. Ассистент узнаёт по нему, что этап остался
+ * прежним, и по этой же строке отказ видно в демонстрации ([TASK_REJECTION_HEADER]).
+ */
+const val TASK_REJECTION_HEADER = "Переход отклонён (этап остался прежним):"
+
+/**
  * Этап задачи: на каком круге работы она стоит — план, работа, проверка результата, закрытие.
  *
  * Состояние задачи — конечный автомат ([TaskState]), а не свободный текст: этап называет
@@ -126,7 +132,44 @@ data class TaskState(
     /** Строка блока; поле без текста в блок не попадает. */
     private fun field(label: String, value: String): String? =
         value.trim().takeIf { it.isNotEmpty() }?.let { "- $label: $it" }
+
+    /**
+     * Сообщение ассистенту об отклонённом переходе: этап остался прежним, работа идёт дальше
+     * с того же шага.
+     *
+     * Без него модель увидела бы только неизменившийся блок состояния и, не поняв отказа,
+     * попробовала бы перепрыгнуть этап ещё раз — а причина отказа объясняет, чего не хватает
+     * работе и когда переход станет возможен. Поэтому причина приходит из таблицы
+     * ([TaskRules]), а не сочиняется здесь: сообщение и отказ говорят одно и то же.
+     *
+     * @param reason Причина отказа из [TaskRules.accept].
+     */
+    fun renderRejection(reason: String): String = buildString {
+        append("$TASK_REJECTION_HEADER $reason. ")
+        append("Продолжай работу на этапе «${stageOf()?.title ?: stage}»")
+        step.trim().takeIf { it.isNotEmpty() }?.let { append(", текущий шаг: $it") }
+        expectedAction.trim().takeIf { it.isNotEmpty() }?.let { append(", ожидаемое действие: $it") }
+        append(". Этапы не перескакивают: переход станет возможен, когда работа дойдёт до него.")
+    }
 }
+
+/**
+ * Разрешённый переход задачи: из какого этапа куда можно и почему именно так.
+ *
+ * Переходы уезжают клиенту вместе со снимком ([TaskSnapshot]), чтобы «куда дальше можно»
+ * было видно и человеку, а не только коду: ассистент ограничен таблицей ([TaskRules]),
+ * поэтому и человек должен видеть тот же список, а не догадываться о нём по отказам.
+ *
+ * @param from Этап, из которого переходят: значение [TaskStage.wire].
+ * @param to Этап, в который переходят: значение [TaskStage.wire].
+ * @param why Почему такой переход разрешён — то, что стоит за ним по работе.
+ */
+@Serializable
+data class TaskTransition(
+    @SerialName("from") val from: String,
+    @SerialName("to") val to: String,
+    @SerialName("why") val why: String
+)
 
 /**
  * Предложение перехода от модели: на какой этап задача переходит и что делается дальше.
@@ -190,6 +233,55 @@ object TaskRules {
         ),
         TaskStage.DONE to setOf(TaskStage.DONE, TaskStage.PLANNING)
     )
+
+    /**
+     * Почему разрешён каждый из [allowed] переходов. Здесь — смысл перехода, а не правило:
+     * правила запретов лежат в [refusals], и вместе они объясняют «можно так» и «нельзя иначе».
+     *
+     * Таблица объявлена до [transitions]: переходы собираются из неё, и причина берётся здесь,
+     * а не наоборот.
+     */
+    private val transitionWhys: Map<Pair<TaskStage, TaskStage>, String> = mapOf(
+        (TaskStage.PLANNING to TaskStage.PLANNING) to
+            "план уточняется: остаться в планировании — это уточнение, а не переход",
+        (TaskStage.PLANNING to TaskStage.EXECUTION) to
+            "план утверждён: реализацию начинают после плана, а не до него",
+        (TaskStage.PLANNING to TaskStage.DONE) to
+            "план оказался ненужным: задачу закрывают, не начиная работы",
+        (TaskStage.EXECUTION to TaskStage.EXECUTION) to
+            "следующий шаг внутри этапа: этап тот же, меняется только шаг",
+        (TaskStage.EXECUTION to TaskStage.VALIDATION) to
+            "работа сделана: результат сверяют с задачей до того, как объявить готовым",
+        (TaskStage.EXECUTION to TaskStage.PLANNING) to
+            "шаг показал, что план неверен: план пересобирают целиком, а не правят на ходу",
+        (TaskStage.VALIDATION to TaskStage.VALIDATION) to
+            "проверка идёт: результат сверяют по частям, оставаясь в этом же этапе",
+        (TaskStage.VALIDATION to TaskStage.EXECUTION) to
+            "проверка не прошла: работа возвращается на доработку",
+        (TaskStage.VALIDATION to TaskStage.DONE) to
+            "результат сошёлся с задачей: лишь после проверки задачу можно закрыть",
+        (TaskStage.VALIDATION to TaskStage.PLANNING) to
+            "проверка показала, что задача была понята неверно: работу начинают с плана заново",
+        (TaskStage.DONE to TaskStage.DONE) to
+            "задача закрыта и остаётся закрытой: новых переходов этим ответом нет",
+        (TaskStage.DONE to TaskStage.PLANNING) to
+            "закрытая задача не продолжается: следующая начинается с планирования"
+    )
+
+    /**
+     * Разрешённые переходы словами: из этапа — куда и почему. Собираются из [allowed],
+     * поэтому список переходов и сама таблица разойтись не могут.
+     *
+     * Причина берётся из [transitionWhys]; у каждого разрешённого перехода она есть —
+     * иначе переход шёл бы без объяснения, и человек видел бы «можно», не понимая «почему».
+     */
+    val transitions: List<TaskTransition> = allowed.entries.flatMap { (from, to) ->
+        to.map { target -> TaskTransition(from.wire, target.wire, transitionWhy(from, target)) }
+    }
+
+    /** Причина перехода; общая ветка остаётся на случай нового этапа — она называет своё. */
+    private fun transitionWhy(from: TaskStage, to: TaskStage): String = transitionWhys[from to to]
+        ?: "из ${from.title} задача идёт в ${to.title}: это следующий круг работы"
 
     /**
      * Проверяет предложение модели и возвращает состояние задачи после него.
@@ -310,9 +402,13 @@ data class TaskReport(
  *        намеренно: каталог равен [TaskStage.info], а значение, равное объявленному
  *        умолчанию, kotlinx.serialization на провод не пишет — клиент получил бы снимок
  *        без подписей, а своей таблицы этапов у него нет. Пишет каталог всегда [TaskWriter].
+ * @param transitions Разрешённые переходы: из какого этапа куда можно и почему. Умолчания нет
+ *        по той же причине, что у [stages]: это таблица [TaskRules.transitions], и клиент
+ *        показывает «куда дальше можно» по ней, а своей копии таблицы у него нет.
  */
 @Serializable
 data class TaskSnapshot(
     @SerialName("task") val task: TaskState? = null,
-    @SerialName("stages") val stages: List<TaskStageInfo>
+    @SerialName("stages") val stages: List<TaskStageInfo>,
+    @SerialName("transitions") val transitions: List<TaskTransition>
 )

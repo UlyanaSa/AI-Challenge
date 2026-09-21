@@ -47,27 +47,26 @@ class InvariantWriter(private val store: InvariantStore) {
     /**
      * Снимок правил: сами инварианты и каталог видов для выбора.
      *
-     * Отдаются рабочие правила — те, что уйдут в запрос ([InvariantStore.invariantsOrDefault]),
-     * а не только лежащие в хранилище: человек правит список, который действует, и умолчание
-     * проекта в нём уже подставлено.
+     * Отдаются те правила, которые лежат в хранилище и уйдут в запрос, — действием человека
+     * список не дополняется. Умолчание проекта в хранилище уже лежит: его кладёт сервер при
+     * первом запуске, поэтому пустой снимок здесь означает «правил нет», а не «ещё не задавали».
      */
     fun snapshot(profileId: String = DEFAULT_PROFILE): InvariantSnapshot =
-        InvariantSnapshot(invariants = store.invariantsOrDefault(profileId), kinds = InvariantKind.info)
+        InvariantSnapshot(invariants = store.get(profileId).orEmpty(), kinds = InvariantKind.info)
 
     /**
      * Объявляет правило: вид выбирает человек, формулировку пишет одной фразой.
      *
-     * Правило добавляется к действующим ([InvariantStore.invariantsOrDefault]), а не к пустому
-     * списку: иначе первое же объявленное правило стёрло бы умолчание проекта целиком.
-     * Итог — [InvariantWrite]: отказ приходит причиной, а не прежним списком, чтобы человек
-     * видел, почему «Запомнить» ничего не сохранило.
+     * Правило добавляется к действующим, а не к пустому списку: так объявленное не стирает
+     * правила проекта, которые уже лежат в хранилище. Итог — [InvariantWrite]: отказ приходит
+     * причиной, а не прежним списком, чтобы человек видел, почему «Запомнить» ничего не сохранило.
      */
     fun remember(kind: String?, value: String?): InvariantWrite {
         val invariant = when (val decision = InvariantRules.normalize(kind, value)) {
             is InvariantDecision.Accepted -> decision.invariant
             is InvariantDecision.Rejected -> return InvariantWrite.Rejected(decision.reason)
         }
-        val merged = InvariantRules.add(store.invariantsOrDefault(), invariant)
+        val merged = InvariantRules.add(store.get(DEFAULT_PROFILE).orEmpty(), invariant)
         // Предел проверяется по списку после слияния: замена формулировки места не занимает,
         // и правилу, объявленному вместо прежнего, предел не мешает.
         InvariantRules.limitReason(merged.size)?.let { return InvariantWrite.Rejected(it) }
@@ -79,11 +78,9 @@ class InvariantWriter(private val store: InvariantStore) {
      * Убирает правило: правило опознаётся по формулировке, как и при записи, поэтому список
      * фильтруется по тексту; вид сужает поиск, если назван.
      *
-     * Список берётся действующий ([InvariantStore.invariantsOrDefault]) и сохраняется явно:
-     * человек убрал одно правило из умолчания проекта — в хранилище ложится остаток, а не
-     * пустой ответ. Иначе «ещё не задавали» вернуло бы умолчание целиком, и убранное правило
-     * объявилось бы снова. По той же причине, убрав все правила, в хранилище остаётся пустой
-     * список: это «правил нет», а не «не задавали».
+     * Список берётся из хранилища и сохраняется явно: человек убрал одно правило из набора
+     * проекта — в хранилище ложится остаток. Убрав все правила, он оставляет там пустой список:
+     * это «правил нет», а не «ещё не задавали», поэтому убранное правило не вернётся.
      *
      * Убрать то, чего нет, — не ошибка: снимок вернётся как был, чтобы повторное нажатие «✕»
      * у строки правила не выглядело сбоем.
@@ -97,7 +94,7 @@ class InvariantWriter(private val store: InvariantStore) {
         val named = kind?.trim()?.takeIf { it.isNotEmpty() }?.let {
             InvariantKind.ofWire(it) ?: return InvariantForget.Rejected(InvariantRules.UNKNOWN_KIND)
         }
-        val left = store.invariantsOrDefault().filterNot { rule ->
+        val left = store.get(DEFAULT_PROFILE).orEmpty().filterNot { rule ->
             val sameText = rule.value.trim().equals(text, ignoreCase = true)
             val sameKind = named == null || InvariantKind.ofWire(rule.kind) == named
             sameText && sameKind
