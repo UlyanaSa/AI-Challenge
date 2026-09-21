@@ -3,6 +3,7 @@ package com.osvin.aichallenge
 import com.osvin.aichallenge.agent.AgentOptions
 import com.osvin.aichallenge.agent.ContextStrategy
 import com.osvin.aichallenge.agent.ContextOverflowException
+import com.osvin.aichallenge.agent.DEFAULT_PROFILE
 import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
 import com.osvin.aichallenge.agent.InMemoryMemoryStore
@@ -12,8 +13,11 @@ import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.agent.MemoryForget
 import com.osvin.aichallenge.agent.MemoryWrite
 import com.osvin.aichallenge.agent.MemoryWriter
+import com.osvin.aichallenge.agent.ProfileStore
+import com.osvin.aichallenge.agent.UserProfile
 import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
+import com.osvin.aichallenge.profile.JsonFileProfileStore
 import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -39,6 +43,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -89,6 +94,30 @@ val summaryStore = InMemorySummaryStore()
 val workingMemory = InMemoryMemoryStore()
 
 val longTermMemory = JsonFileMemoryStore(JsonFileMemoryStore.defaultFile())
+
+/**
+ * Профиль пользователя на сервере: объявленные предпочтения, а не извлечённые из диалога.
+ *
+ * Рядом с памятью, но не память: профиль задаёт сам пользователь и правит его шторкой
+ * профиля, поэтому здесь нет ни извлечения моделью, ни слияния с прежними записями,
+ * ни пределов объёма. Общее у них только место — идентификатор профиля
+ * ([DEFAULT_PROFILE]), по которому профиль лежит рядом с памятью того же профиля.
+ *
+ * Лежит в файле, как долговременная память: персонализация должна пережить перезапуск
+ * сервера, иначе ассистент терял бы настройки пользователя при каждом запуске.
+ */
+val profileStore = JsonFileProfileStore(JsonFileProfileStore.defaultFile())
+
+/**
+ * Профиль, который уходит в запрос к модели и показывается клиенту: пусто в сторе —
+ * профиль KMP-разработчика ([UserProfile.DEFAULT]).
+ *
+ * Одна функция на оба места — маршрут профиля и маршрут чата: иначе пользователь видел
+ * бы в шторке один профиль, а в запрос уходил другой. Умолчание к тому же делает
+ * приложение персонализированным с первого запуска, а не после ручного заполнения.
+ */
+fun ProfileStore.profileOrDefault(profileId: String = DEFAULT_PROFILE): UserProfile =
+    get(profileId) ?: UserProfile.DEFAULT
 
 /**
  * Точка входа в приложение.
@@ -182,6 +211,7 @@ fun Application.module() {
         anyHost()
         allowMethod(HttpMethod.Post)
         allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Put)
         allowMethod(HttpMethod.Delete)
         allowHeader(HttpHeaders.ContentType)
         allowHeader(HttpHeaders.Authorization)
@@ -244,6 +274,11 @@ fun Application.module() {
          * Транспортный адаптер: принимает HTTP-запрос, передаёт набор параметров
          * агенту ([LlmAgent]) и возвращает ответ клиенту. Вся работа с моделью
          * инкапсулирована в агенте.
+         *
+         * Профиль читается из стора на каждый запрос — централизованно, здесь: клиент
+         * его не присылает и не может забыть, и ни одна стратегия контекста не отключает
+         * персонализацию. Сам [com.osvin.aichallenge.models.ChatRequest] профиля не знает:
+         * это объявленные предпочтения сервера, а не поле запроса.
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
@@ -258,7 +293,7 @@ fun Application.module() {
             )
             val result = agent.run(
                 userMessage = request.message,
-                options = request.toAgentOptions()
+                options = request.toAgentOptions(profile = profileStore.profileOrDefault())
             )
 
             call.respond(
@@ -283,6 +318,33 @@ fun Application.module() {
             val sessionId = call.parameters["sessionId"].orEmpty()
             summaryStore.clear(sessionId)
             call.respond(HttpStatusCode.NoContent)
+        }
+
+        /**
+         * Профиль пользователя: объявленные предпочтения, которые уезжают в каждый
+         * запрос к модели.
+         *
+         * Пусто в сторе — отдаём профиль KMP-разработчика ([UserProfile.DEFAULT]):
+         * приложение должно быть персонализировано с первого запуска, а не после того,
+         * как пользователь вручную заполнит шторку профиля.
+         */
+        get("/v1/profile") {
+            call.respond(profileStore.profileOrDefault())
+        }
+
+        /**
+         * Правка профиля: тело — профиль целиком, потому что правится он шторкой,
+         * где заполнены все поля.
+         *
+         * Возвращается сохранённый профиль, а не отправленный: клиент видит то, что
+         * легло в стор, и шторка после сохранения показывает то же, чем пользуется
+         * модель. Профиль не проходит ни слияние с прежним, ни проверки пределов —
+         * это не память, а объявленные предпочтения: что прислали, то и лежит.
+         */
+        put("/v1/profile") {
+            val profile = call.receive<UserProfile>()
+            profileStore.put(DEFAULT_PROFILE, profile)
+            call.respond(profile)
         }
 
         /**

@@ -14,6 +14,11 @@ import java.util.Locale
  *
  * @param systemPrompt Свой system prompt: общий контекст и правила поведения модели.
  *        Не задан — его роль играет первое сообщение диалога (см. [LlmAgent]).
+ * @param profile Профиль пользователя: объявленные предпочтения, которые модель учитывает
+ *        в каждом ответе. Уходит отдельным системным сообщением сразу после system prompt
+ *        и при любой стратегии контекста. Частью памяти профиль не является: память
+ *        наполняет модель, и стратегия то ведёт её, то нет, а профиль заявлен человеком
+ *        и должен дойти до модели всегда. Пустой профиль сообщения не добавляет.
  * @param history Предыдущие сообщения диалога (роли user/assistant), без текущего запроса.
  * @param sessionId Идентификатор сессии диалога: по нему живёт сводка истории (стратегия
  *        «сжатие в сводку»). Памяти он не нужен: её слои лежат по профилю.
@@ -30,6 +35,7 @@ data class AgentOptions(
     val stop: List<String>? = null,
     val temperature: Double? = null,
     val systemPrompt: String? = null,
+    val profile: UserProfile? = null,
     val history: List<ChatMessage> = emptyList(),
     val sessionId: String? = null,
     val strategy: ContextStrategy = ContextStrategy.FULL,
@@ -83,6 +89,15 @@ data class AgentResult(
  * - [ContextStrategy.SUMMARY] — последние сообщения как есть, старшие свёрнуты
  *   в сводку ([HistoryCompressor], [SummaryStore]).
  *
+ * Профиль пользователя ([AgentOptions.profile]) стоит вне этого выбора: он уходит
+ * системным сообщением сразу после system prompt при любой из стратегий. Системным —
+ * потому что это не реплика в диалоге, а правила, которым подчиняется каждый ответ;
+ * после system prompt и до сводки с блоками памяти — потому что это единственное место,
+ * которое стратегия не переставляет: сводку она строит, память ведёт или не ведёт,
+ * историю режет, а профиль остаётся на месте. В память профиль не годится: память
+ * модель достаёт из переписки и переписывает по стратегии, а профиль заявлен
+ * пользователем и в запросе обязан быть всегда.
+ *
  * Слои памяти хранятся отдельно: краткосрочная — сообщения у клиента, рабочая и
  * долговременная — по профилю ([DEFAULT_PROFILE]), поэтому обе видны из любого чата.
  * Различаются эти два слоя не областью, а сроком жизни: рабочая лежит в памяти процесса
@@ -133,8 +148,9 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: system prompt, сводка, слои памяти (долговременный, затем
-        // рабочий), история диалога и текущий запрос — в этом порядке. Свой system prompt из настроек важнее: если он задан,
+        // Сообщения модели: system prompt, профиль пользователя, сводка, слои памяти
+        // (долговременный, затем рабочий), история диалога и текущий запрос — в этом порядке.
+        // Свой system prompt из настроек важнее: если он задан,
         // берём его. Если нет — его роль играет первое сообщение диалога: инструкция
         // из него остаётся в силе и тогда, когда старшие сообщения отброшены.
         val history = options.history.filter { it.content.isNotBlank() }
@@ -144,6 +160,14 @@ class LlmAgent(
         val systemPrompt: String = options.systemPrompt?.takeIf { it.isNotBlank() }
             ?: history.firstOrNull { it.role == USER_ROLE }?.content
             ?: userMessage
+
+        // Профиль пользователя — системное сообщение сразу после system prompt: он не часть
+        // диалога, а правила ответа, и уходит в запрос при любой стратегии контекста.
+        // Пустой профиль (как и его отсутствие) сообщения не добавляет: пустой блок
+        // в промпте читается моделью как незаполненное требование.
+        val profileMessage = options.profile
+            ?.takeIf { !it.isEmpty }
+            ?.let { ChatMessage(SYSTEM_ROLE, it.render()) }
 
         // Что из истории уходит в модель, решает выбранная стратегия: окно, путь
         // активной ветки, сводка вместо свёрнутых сообщений — и слои памяти, которые
@@ -160,6 +184,7 @@ class LlmAgent(
 
         val messages = buildList {
             add(ChatMessage(SYSTEM_ROLE, systemPrompt))
+            profileMessage?.let { add(it) }
             summary?.let { add(compressor.summaryMessage(it)) }
             longTermMessage?.let { add(it) }
             workingMessage?.let { add(it) }
@@ -169,8 +194,9 @@ class LlmAgent(
         }
 
         // Разбивка по частям: API отдаёт только общий prompt_tokens, поэтому
-        // вклад system prompt, слоёв памяти и истории считаем локально.
+        // вклад system prompt, профиля, слоёв памяти и истории считаем локально.
         val systemTokens = tokenCounter.count(systemPrompt)
+        val profileTokens = profileMessage?.let { tokenCounter.count(it.content) } ?: 0
         val summaryTokens = summary?.tokens ?: 0
         val longTermTokens = longTermMessage?.let { tokenCounter.count(it.content) } ?: 0
         val workingTokens = workingMessage?.let { tokenCounter.count(it.content) } ?: 0
@@ -189,6 +215,7 @@ class LlmAgent(
                 "Запрос → $model",
                 "стратегия контекста: ${strategy.title}",
                 "system prompt: $systemTokens ток.",
+                "профиль: $profileTokens ток.",
                 "история: $historyTokens ток. (${historyForRequest.size} сообщ.)",
                 "текущий вопрос: $requestTokens ток.",
                 "всего (оценка): $promptEstimate ток.",
@@ -267,6 +294,7 @@ class LlmAgent(
             completionTokens = replyTokens,
             tokens = TokenReport(
                 systemPrompt = systemTokens,
+                profileTokens = profileTokens,
                 history = historyTokens,
                 request = requestTokens,
                 promptEstimate = promptEstimate,

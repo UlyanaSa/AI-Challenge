@@ -283,26 +283,28 @@ class ApplicationTest {
             history = listOf(ChatMessage("user", "первое"))
         )
 
-        val options = request.toAgentOptions()
+        // Профиль в отображении обязателен, но приходит не из запроса, а от сервера:
+        // здесь он не проверяется, проверяются стратегия, окно и ветки.
+        val options = request.toAgentOptions(profile = null)
         assertEquals(ContextStrategy.BRANCHES, options.strategy)
         assertEquals(6, options.windowMessages)
         assertEquals("a", options.activeBranchId)
         assertEquals(listOf(DialogBranch("a", forkedAfter = 4)), options.branches)
         assertEquals(1, options.history.size)
 
-        val defaulted = ChatRequest(message = "Привет").toAgentOptions()
+        val defaulted = ChatRequest(message = "Привет").toAgentOptions(profile = null)
         assertEquals(ContextStrategy.SUMMARY, defaulted.strategy, "без стратегии клиент получает сжатие истории")
         assertTrue(defaulted.branches.isEmpty())
         assertNull(defaulted.activeBranchId)
 
         assertEquals(
             ContextStrategy.MEMORY,
-            ChatRequest(message = "Привет", strategy = "facts").toAgentOptions().strategy,
+            ChatRequest(message = "Привет", strategy = "facts").toAgentOptions(profile = null).strategy,
             "стратегия дня 10 читается как память агента"
         )
         assertEquals(
             setOf(MemoryLayer.WORKING, MemoryLayer.LONG_TERM),
-            ChatRequest(message = "Привет", strategy = "memory").toAgentOptions().strategy.memory,
+            ChatRequest(message = "Привет", strategy = "memory").toAgentOptions(profile = null).strategy.memory,
             "стратегия памяти ведёт рабочую и долговременную память"
         )
     }

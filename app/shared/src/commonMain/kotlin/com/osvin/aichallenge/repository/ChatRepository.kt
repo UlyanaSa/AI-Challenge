@@ -9,6 +9,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
@@ -40,6 +41,10 @@ import kotlin.random.Random
  *
  * Память агента, наоборот, общая для профиля: и рабочая, и долговременная видны
  * из любого чата, и снимок памяти ([loadMemory]) грузится один и тот же.
+ *
+ * Профиль пользователя ([loadProfile]) тоже общий и лежит на сервере: клиент его
+ * только показывает и правит ([saveProfile]), а в запрос к модели профиль не
+ * подставляет — это делает сервер, поэтому в теле запроса его нет.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -81,6 +86,18 @@ class ChatRepository(
     // Отказ сервера на явную запись в память или на смену стратегии; null — отказа не было
     private val _memoryError = MutableStateFlow<String?>(null)
     val memoryError: StateFlow<String?> = _memoryError.asStateFlow()
+
+    // Профиль пользователя: объявленные предпочтения, общие для всех чатов. Живёт
+    // отдельно от памяти — это разные сущности: память агент извлекает из диалога,
+    // профиль пользователь объявляет сам. null — профиль ещё не загружен или сервер
+    // недоступен, тогда шторка открывается пустой формой.
+    private val _profile = MutableStateFlow<UserProfile?>(null)
+    val profile: StateFlow<UserProfile?> = _profile.asStateFlow()
+
+    // Отказ сервера на чтение или запись профиля; null — отказа не было. Это своя
+    // ошибка, а не [memoryError]: сбой профиля не должен выглядеть как сбой памяти.
+    private val _profileError = MutableStateFlow<String?>(null)
+    val profileError: StateFlow<String?> = _profileError.asStateFlow()
 
     // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
     // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
@@ -143,6 +160,9 @@ class ChatRepository(
         // Память общая для профиля: шторке сразу нужен снимок слоёв и каталога типов,
         // а не записи этого чата — своих записей у чата нет
         loadMemory()
+        // Профиль тоже общий и нужен шторке сразу, а не после первого нажатия:
+        // он подставляется в каждый запрос на сервере, поэтому в чате его видно
+        loadProfile()
         return chat
     }
 
@@ -169,6 +189,9 @@ class ChatRepository(
         // Память общая для профиля, но чат мог остаться без снимка (его чистит
         // удаление чата) — читаем снова, чтобы шторка была наполнена
         loadMemory()
+        // Профиль читаем на каждом открытии чата: его могли поправить с другого
+        // устройства, а шторка должна открываться с тем, что лежит на сервере
+        loadProfile()
     }
 
     /**
@@ -383,6 +406,59 @@ class ChatRepository(
             _layers.value = null
             _memoryError.value = e.message ?: "Память недоступна: нет соединения"
             platformLog("agent", "[agent] Память не загружена: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Профиль пользователя с сервера: объявленные предпочтения, которые агент
+     * учитывает в каждом ответе. Профиль общий для всех чатов, поэтому активный чат
+     * здесь не нужен. Это не память: своего слияния, пределов и отбора типов у профиля
+     * нет — что лежит на сервере, то и показывается, поэтому у него своё состояние
+     * ([profile]) и своя ошибка ([profileError]), и сбой профиля не трогает диалог.
+     * Без профиля шторке нечего показывать: null и до первого запроса, и когда сервер
+     * недоступен — тогда пользователь видит пустую форму и причину строкой ошибки.
+     */
+    suspend fun loadProfile() {
+        try {
+            val response = client.get("$baseUrl/v1/profile")
+            if (response.status.isSuccess()) {
+                _profile.value = response.body()
+                _profileError.value = null
+            } else {
+                _profile.value = null
+                _profileError.value = "Профиль недоступен: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] Профиль не загружен: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _profile.value = null
+            _profileError.value = e.message ?: "Профиль недоступен: нет соединения"
+            platformLog("agent", "[agent] Профиль не загружен: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Сохранение профиля целиком: тело — сам профиль, а состояние — из ответа сервера,
+     * поэтому в шторке видно то, что сохранено, а не то, что набрано: сервер мог
+     * дополнить или урезать поля.
+     * Отказ сервера и сбой сети не переводят чат в [ChatUiState.Error] и не стирают уже
+     * загруженный профиль: диалог продолжается, а причина видна строкой в шторке
+     * ([profileError]) — несделанные правки при этом остаются в черновике на экране.
+     */
+    suspend fun saveProfile(profile: UserProfile) {
+        try {
+            val response = client.put("$baseUrl/v1/profile") {
+                contentType(ContentType.Application.Json)
+                setBody(profile)
+            }
+            if (response.status.isSuccess()) {
+                _profile.value = response.body()
+                _profileError.value = null
+            } else {
+                _profileError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _profileError.value = e.message ?: "Сетевая ошибка"
         }
     }
 

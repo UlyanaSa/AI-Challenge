@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
  * @param onTitleClick Обработчик нажатия на заголовок (для ручной проверки связи).
  * @param onNewChat Создание нового чата с настройкой агента.
  * @param onMemory Открытие шторки памяти чата.
+ * @param onProfile Открытие шторки профиля пользователя.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,6 +39,7 @@ fun ChatTopBar(
     onTitleClick: () -> Unit,
     onNewChat: () -> Unit,
     onMemory: () -> Unit,
+    onProfile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
@@ -68,6 +70,11 @@ fun ChatTopBar(
             // сообщений не занята панелью
             TextButton(onClick = onMemory) {
                 Text("Память", style = MaterialTheme.typography.labelLarge)
+            }
+            // Профиль пользователя: та же шторка, что и память, — обе настройки
+            // агента открываются поверх чата, а не занимают ленту сообщений
+            TextButton(onClick = onProfile) {
+                Text("Профиль", style = MaterialTheme.typography.labelLarge)
             }
             // Кнопка создания нового чата: возвращает к настройке агента
             IconButton(onClick = onNewChat) {

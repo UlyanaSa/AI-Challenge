@@ -615,6 +615,13 @@ class ContextStrategiesClientTest {
         /** Снимок памяти для тестов стратегий: слои пусты, каталог тоже. */
         const val EMPTY_SNAPSHOT = """{"working":[],"long_term":[],"types":[]}"""
 
+        /**
+         * Профиль для тестов стратегий: чат открывается вместе с профилем, и его чтение
+         * тоже уходит на сервер. Содержимое здесь не проверяется — важно лишь, чтобы
+         * запрос профиля не съел ответ агента из очереди подставного сервера.
+         */
+        const val PROFILE_SNAPSHOT = """{"role":"Kotlin Multiplatform разработчик","sign_off":"Ты молодец"}"""
+
         /** Каталог типов задания: подпись и пояснение клиент берёт отсюда, а не из своей таблицы. */
         val TYPES_JSON = """
             [{"layer":"short_term","title":"краткосрочная","hint":"текущий диалог","writable":false},
@@ -665,6 +672,9 @@ class ContextStrategiesClientTest {
                     requests += request
                     val body = when (request.url.encodedPath) {
                         "/v1/memory" -> EMPTY_SNAPSHOT
+                        // Профиль читается при открытии чата: он тоже уходит на сервер
+                        // и не должен тратить ответ агента из очереди
+                        "/v1/profile" -> PROFILE_SNAPSHOT
                         else -> {
                             val answer = answers[minOf(index, answers.lastIndex)]
                             index++
@@ -690,9 +700,9 @@ class ContextStrategiesClientTest {
         /**
          * Подставной сервер с памятью: на `GET /v1/memory` отвечает следующими снимками
          * из [snapshots] (последним — сколько угодно раз), на запись и удаление — из
-         * [writes] (без них — последним снимком), остальные запросы получают обычный
-         * ответ агента. Так в одном тесте видно и что ушло на сервер, и что из ответа
-         * попало в состояние.
+         * [writes] (без них — последним снимком), на `GET /v1/profile` — профилем из
+         * [PROFILE_SNAPSHOT], остальные запросы получают обычный ответ агента. Так в одном
+         * тесте видно и что ушло на сервер, и что из ответа попало в состояние.
          */
         fun memoryServer(
             requests: MutableList<HttpRequestData>,
@@ -705,6 +715,8 @@ class ContextStrategiesClientTest {
                 MockEngine { request ->
                     requests += request
                     val answer = when {
+                        // Профиль читается при открытии чата вместе с памятью
+                        request.url.encodedPath == "/v1/profile" -> HttpStatusCode.OK to PROFILE_SNAPSHOT
                         request.url.encodedPath != "/v1/memory" -> HttpStatusCode.OK to PLAIN_REPLY
                         request.method == HttpMethod.Get -> {
                             val body = snapshots[minOf(reads, snapshots.lastIndex)]

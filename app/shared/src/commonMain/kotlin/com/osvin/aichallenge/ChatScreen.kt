@@ -7,6 +7,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -16,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.DialogBranches
 import com.osvin.aichallenge.data.MemoryLayers
+import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
 
 /**
@@ -26,7 +29,8 @@ import com.osvin.aichallenge.ui.components.*
  * в хранилище, но в чате не мешаются (см. [com.osvin.aichallenge.data.DialogBranches]).
  *
  * Память агента открывается шторкой из верхней панели: в ленте сообщений её нет,
- * чтобы хранилище не мешало диалогу.
+ * чтобы хранилище не мешало диалогу. Профиль пользователя — второй шторкой там же:
+ * он общий для всех чатов и подставляется в каждый запрос к модели.
  *
  * @param title Заголовок активного чата для верхней панели.
  * @param onBack Возврат к списку чатов.
@@ -47,6 +51,9 @@ fun ChatScreen(
     val memory by viewModel.memory.collectAsStateWithLifecycle()
     val layers by viewModel.layers.collectAsStateWithLifecycle()
     val memoryError by viewModel.memoryError.collectAsStateWithLifecycle()
+    // Профиль пользователя: что лежит на сервере и чем закончилось чтение или запись
+    val profile by viewModel.profile.collectAsStateWithLifecycle()
+    val profileError by viewModel.profileError.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
@@ -62,6 +69,27 @@ fun ChatScreen(
     var memoryValue by rememberSaveable { mutableStateOf("") }
     var memoryOpen by rememberSaveable { mutableStateOf(false) }
     val memorySheetState = rememberModalBottomSheetState()
+
+    // Черновик профиля — один объект, а не шесть строк: так его видно целиком,
+    // и его достаточно сравнить с профилем с сервера, чтобы понять, есть ли правки.
+    // Он переживает пересоздание экрана: набранное не теряется при повороте
+    var profileDraft by rememberSaveable(stateSaver = USER_PROFILE_SAVER) {
+        mutableStateOf(UserProfile())
+    }
+    var profileOpen by rememberSaveable { mutableStateOf(false) }
+    val profileSheetState = rememberModalBottomSheetState()
+
+    // Шторка открывается с тем, что лежит на сервере, а не с прошлыми правками;
+    // профиль мог прийти уже после открытия (медленная сеть) — тогда черновик
+    // наполняется, как только он придёт
+    LaunchedEffect(profileOpen, profile) {
+        // Профиль читается через делегат: в локальной переменной он проверяется
+        // на null и тут же переносится в черновик
+        val fromServer = profile
+        if (profileOpen && fromServer != null) {
+            profileDraft = fromServer
+        }
+    }
 
     // Тип записи выбирается только из каталога сервера: по умолчанию — первый
     // писаемый, обычно рабочая память. Пока каталога нет, типа тоже нет.
@@ -87,7 +115,8 @@ fun ChatScreen(
                 onBack = onBack,
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,
-                onMemory = { memoryOpen = true }
+                onMemory = { memoryOpen = true },
+                onProfile = { profileOpen = true }
             )
         },
         bottomBar = {
@@ -184,7 +213,34 @@ fun ChatScreen(
             )
         }
     }
+
+    // Шторка профиля: та же форма, что у памяти, — профиль правится поверх чата,
+    // и правки видны строкой состояния до самого сохранения
+    if (profileOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { profileOpen = false },
+            sheetState = profileSheetState
+        ) {
+            ProfileSheet(
+                draft = profileDraft,
+                saved = profile,
+                error = profileError,
+                onDraftChange = { profileDraft = it },
+                onSave = { viewModel.saveProfile(profileDraft) }
+            )
+        }
+    }
 }
 
 /** Пустой снимок: шторка открывается и до ответа сервера — тогда видно, что каталог типов не пришёл. */
 private val EMPTY_MEMORY_LAYERS = MemoryLayers()
+
+/**
+ * Сохранение черновика профиля между пересозданиями экрана: [UserProfile] — обычный
+ * объект данных, и `rememberSaveable` его без правила не сохранит (сохраняются
+ * примитивы и списки). Шесть полей строк — как раз такой список.
+ */
+private val USER_PROFILE_SAVER: Saver<UserProfile, Any> = listSaver<UserProfile, String>(
+    save = { listOf(it.role, it.stack, it.style, it.format, it.constraints, it.signOff) },
+    restore = { UserProfile(it[0], it[1], it[2], it[3], it[4], it[5]) }
+)

@@ -11,6 +11,8 @@ import kotlinx.serialization.Serializable
  * факт из `usage` ответа API. Стоимость считается по факту и тарифу модели.
  *
  * @param systemPrompt Токены своего system prompt.
+ * @param profileTokens Токены блока профиля пользователя: он уходит системным сообщением
+ *        при любой стратегии, поэтому считается отдельно от system prompt и истории.
  * @param history Токены всей истории диалога.
  * @param request Токены текущего запроса пользователя.
  * @param promptEstimate Оценка всего запроса до отправки (обвязка чата + части).
@@ -41,6 +43,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class TokenReport(
     @SerialName("system_prompt_tokens") val systemPrompt: Int,
+    @SerialName("profile_tokens") val profileTokens: Int = 0,
     @SerialName("history_tokens") val history: Int,
     @SerialName("request_tokens") val request: Int,
     @SerialName("prompt_estimate") val promptEstimate: Int,

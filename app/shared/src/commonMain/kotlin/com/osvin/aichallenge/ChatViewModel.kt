@@ -10,6 +10,7 @@ import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.MemoryReport
+import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.repository.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +34,13 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val memory: StateFlow<MemoryReport?> = repository.memory
     val layers: StateFlow<MemoryLayers?> = repository.layers
     val memoryError: StateFlow<String?> = repository.memoryError
+
+    // Профиль пользователя из шторки профиля. Это не память, поэтому и состояния
+    // свои: профиль объявляет сам пользователь, и он подставляется в каждый запрос
+    // к модели на сервере, а не собирается клиентом
+    val profile: StateFlow<UserProfile?> = repository.profile
+    val profileError: StateFlow<String?> = repository.profileError
+
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
 
@@ -152,6 +160,27 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun forget(layer: String, value: String) {
         viewModelScope.launch {
             repository.forget(layer, value)
+        }
+    }
+
+    /**
+     * Перечитывание профиля пользователя: он общий для всех чатов, поэтому читается
+     * без активного чата. Шторка открывается уже с загруженным профилем — его читает
+     * сам чат при создании и открытии, — а это повторное чтение.
+     */
+    fun loadProfile() {
+        viewModelScope.launch {
+            repository.loadProfile()
+        }
+    }
+
+    /**
+     * Сохранение профиля целиком: шторка отдаёт свой черновик, а состояние берётся
+     * из ответа сервера — в шторке видно то, что сохранено.
+     */
+    fun saveProfile(profile: UserProfile) {
+        viewModelScope.launch {
+            repository.saveProfile(profile)
         }
     }
 }
