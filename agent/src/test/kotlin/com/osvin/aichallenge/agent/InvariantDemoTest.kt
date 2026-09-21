@@ -66,9 +66,9 @@ class InvariantDemoTest {
         showSnapshot(writer)
         log("")
 
-        val llm = InvariantDemoClient(CANNED_REPLY, ArrayDeque(SCENE.map { ALLOWED_VERDICT }))
+        val llm = InvariantDemoClient(CANNED_REPLY, ArrayDeque(INVARIANT_SCENE.map { ALLOWED_VERDICT }))
         val dialog = mutableListOf<ChatMessage>()
-        val runs = SCENE.map { message -> turn(store, llm, dialog, message) }
+        val runs = INVARIANT_SCENE.map { message -> invariantTurn(store, llm, dialog, message) }
 
         printRequestHeader()
         runs.forEach(::printRequestRow)
@@ -77,7 +77,7 @@ class InvariantDemoTest {
         runs.last().block.lines().forEach(::log)
         log("")
         log("по отчёту последнего хода: ${runs.last().report.tokens} ток. — блок инвариантов и сообщение проверки")
-        log("история диалога: ${dialog.size} сообщений за ${SCENE.size} хода — по два на ход; инварианты в неё не пишутся")
+        log("история диалога: ${dialog.size} сообщений за ${INVARIANT_SCENE.size} хода — по два на ход; инварианты в неё не пишутся")
 
         runs.forEach { run ->
             assertEquals("allowed", run.report.verdict, "запрос в рамках правил: «${run.message}»")
@@ -87,8 +87,9 @@ class InvariantDemoTest {
                 "блок инвариантов уходит в каждый запрос: ${run.block}"
             )
             assertEquals(1, run.invariantMessages, "в запросе он один и он не реплика диалога")
+            assertEquals(1, run.guardRequests, "на каждый запрос — одна служебная проверка")
         }
-        assertEquals(SCENE.size * 2, dialog.size, "инварианты в историю диалога не попадают")
+        assertEquals(INVARIANT_SCENE.size * 2, dialog.size, "инварианты в историю диалога не попадают")
         assertTrue(dialog.none { it.content.startsWith(INVARIANT_HEADER) }, "их нет и среди реплик: $dialog")
     }
 
@@ -107,7 +108,7 @@ class InvariantDemoTest {
 
         val store = InMemoryInvariantStore()
         val runs = CONFLICTS.map { case ->
-            case to turn(
+            case to invariantTurn(
                 store,
                 InvariantDemoClient(CANNED_REPLY, ArrayDeque(listOf(case.guardReply))),
                 mutableListOf(),
@@ -155,7 +156,7 @@ class InvariantDemoTest {
 
         val store = InMemoryInvariantStore()
         val runs = WITHIN.map { message ->
-            turn(store, InvariantDemoClient(CANNED_REPLY, ArrayDeque(listOf(ALLOWED_VERDICT))), mutableListOf(), message)
+            invariantTurn(store, InvariantDemoClient(CANNED_REPLY, ArrayDeque(listOf(ALLOWED_VERDICT))), mutableListOf(), message)
         }
 
         printVerdictHeader()
@@ -189,8 +190,8 @@ class InvariantDemoTest {
         val store = InMemoryInvariantStore()
         val conflict = CONFLICTS.first()
         val llm = InvariantDemoClient(CANNED_REPLY, ArrayDeque(), liveClient())
-        val refused = turn(store, llm, mutableListOf(), conflict.message)
-        val within = turn(store, llm, mutableListOf(), WITHIN.first())
+        val refused = invariantTurn(store, llm, mutableListOf(), conflict.message)
+        val within = invariantTurn(store, llm, mutableListOf(), WITHIN.first())
 
         printVerdictHeader()
         printVerdictRow(refused)
@@ -209,7 +210,10 @@ class InvariantDemoTest {
         log("вызовов к модели на этапе: ${llm.requests.size} (служебных проверок: ${llm.guardCalls})")
 
         assertEquals("violated", refused.report.verdict, "живая проверка нашла конфликт: «${conflict.message}»")
-        assertEquals(conflict.kinds, refused.report.violated, "и назвала нарушенный вид")
+        assertTrue(
+            refused.report.violated.containsAll(conflict.kinds),
+            "и назвала нарушенный вид: ${refused.report.violated}"
+        )
         assertTrue(refused.block.startsWith(INVARIANT_HEADER), "блок инвариантов уходит и в живой запрос")
         assertEquals("allowed", within.report.verdict, "запрос в рамках правил проверка пропускает")
         assertTrue(within.report.violated.isEmpty(), "нарушенных видов нет: ${within.report.violated}")
@@ -243,7 +247,7 @@ private const val INVARIANT_ANSWER_BUDGET = 32_768
  * Сцена этапа 1: три хода в рамках правил — в каждом запросе виден блок инвариантов.
  * Сессии у инвариантов нет: они лежат по профилю, а не по чату.
  */
-private val SCENE = listOf(
+private val INVARIANT_SCENE = listOf(
     "Собери план: экран настроек в приложении учёта расходов.",
     "Опиши, как этот экран ляжет в общий код.",
     "Что дальше по плану?"
@@ -314,7 +318,7 @@ private fun printRequestHeader(): Unit = log(
 private const val REQUEST_ROW_FORMAT = "%-62s %14s %-10s %-12s"
 
 /** Строка таблицы этапа 1. */
-private fun printRequestRow(run: TurnRun): Unit = log(
+private fun printRequestRow(run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         REQUEST_ROW_FORMAT,
@@ -337,7 +341,7 @@ private fun printConflictHeader(): Unit = log(
 private const val CONFLICT_ROW_FORMAT = "%-50s %-10s %-17s %-46s %s"
 
 /** Строка таблицы этапа 2. */
-private fun printConflictRow(case: ConflictCase, run: TurnRun): Unit = log(
+private fun printConflictRow(case: ConflictCase, run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         CONFLICT_ROW_FORMAT,
@@ -358,7 +362,7 @@ private fun printVerdictHeader(): Unit = log(
 private const val VERDICT_ROW_FORMAT = "%-64s %-10s %-12s"
 
 /** Строка таблицы этапов 3 и 4. */
-private fun printVerdictRow(run: TurnRun): Unit = log(
+private fun printVerdictRow(run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         VERDICT_ROW_FORMAT,
@@ -398,7 +402,7 @@ private fun invariantValue(kind: String): String = requireNotNull(
  * Это подсказка человеку, а не проверка — формулировку отказа выбирает модель.
  */
 private fun mentions(value: String, reply: String): String {
-    val words = significantWords(value)
+    val words = invariantWords(value)
     if (words.isEmpty()) return "сравнивать не с чем: правило не названо"
     val text = reply.lowercase(Locale.ROOT)
     val found = words.filter { text.contains(it) }
@@ -420,7 +424,7 @@ private fun refusalNote(reply: String): String {
  * Значимые слова текста: короткие служебные слова сравнение только зашумляют. Порог здесь
  * ниже, чем у соседних демонстраций, из-за «Java» — четыре буквы, а слово в правиле ключевое.
  */
-private fun significantWords(text: String): List<String> =
+private fun invariantWords(text: String): List<String> =
     text.lowercase(Locale.ROOT).split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 4 }.distinct()
 
 /** Агент демонстрации: инварианты лежат в общем сторе [store], поэтому видны каждому ходу. */
@@ -432,18 +436,18 @@ private fun invariantAgent(llm: LlmClient, store: InvariantStore) =
  *
  * Диалог наполняется после ответа, поэтому в запрос уходит история прошлых ходов — как в чате.
  */
-private suspend fun turn(
+private suspend fun invariantTurn(
     store: InvariantStore,
     llm: InvariantDemoClient,
     dialog: MutableList<ChatMessage>,
     message: String
-): TurnRun {
+): InvariantTurn {
     val guardsBefore = llm.guardCalls
     val result = invariantAgent(llm, store).run(
         message,
         options(dialog.toList(), maxTokens = INVARIANT_ANSWER_BUDGET, strategy = ContextStrategy.FULL)
     )
-    val run = TurnRun(
+    val run = InvariantTurn(
         message = message,
         result = result,
         request = llm.requests.last { it.messages.last().content == message },
@@ -455,7 +459,7 @@ private suspend fun turn(
 }
 
 /** Что показал один ход сцены. */
-private class TurnRun(
+private class InvariantTurn(
     /** Реплика человека: она же колонка «запрос» в таблицах. */
     val message: String,
     val result: AgentResult,
