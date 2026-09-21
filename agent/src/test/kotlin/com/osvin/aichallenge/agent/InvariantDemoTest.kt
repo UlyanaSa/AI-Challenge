@@ -10,7 +10,6 @@ import org.junit.runners.MethodSorters
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -60,9 +59,20 @@ class InvariantDemoTest {
         stage("Этап 1: инварианты вне диалога и в каждом запросе (подставленный ответ)")
         noteCannedTransport()
 
-        val store = InMemoryInvariantStore()
+        // Правил не задавали: агент работает ровно так, как работал до дня 14, — ни блока
+        // инвариантов в запросе, ни служебной проверки. Это и есть цена включённых правил:
+        // она платится только тогда, когда правила объявлены.
+        val bare = InMemoryInvariantStore()
+        val bareRun = turn(bare, InvariantDemoClient(CANNED_REPLY, ArrayDeque()), mutableListOf(), SCENE.first())
+        log("правил не задавали: служебных проверок — 0, блок инвариантов в запросе: " +
+            if (bareRun.block.isEmpty()) "нет" else "есть")
+        assertTrue(bareRun.block.isEmpty(), "без правил блок в запрос не уходит: ${bareRun.block}")
+        log("")
+
+        // Набор проекта в стор кладёт владелец данных: на сервере — сервер при первом запуске,
+        // здесь — сцена. Дальше правила читаются из стора как есть, без подстановок.
+        val store = projectInvariants()
         val writer = InvariantWriter(store)
-        assertNull(store.get(DEFAULT_PROFILE), "инварианты ещё не задавали: стор пуст")
         showSnapshot(writer)
         log("")
 
@@ -105,7 +115,7 @@ class InvariantDemoTest {
         stage("Этап 2: запрос против инварианта — вердикт проверки и правило отказа (подставленный ответ)")
         noteCannedTransport()
 
-        val store = InMemoryInvariantStore()
+        val store = projectInvariants()
         val runs = CONFLICTS.map { case ->
             case to turn(
                 store,
@@ -139,7 +149,7 @@ class InvariantDemoTest {
         }
         assertEquals(
             Invariant.DEFAULT,
-            store.invariantsOrDefault(),
+            store.get(DEFAULT_PROFILE),
             "отказ ничего в сторе не переписывает: правила остаются прежними"
         )
     }
@@ -156,7 +166,7 @@ class InvariantDemoTest {
         stage("Этап 3: запрос в рамках инвариантов (подставленный ответ)")
         noteCannedTransport()
 
-        val store = InMemoryInvariantStore()
+        val store = projectInvariants()
         val runs = WITHIN.map { message ->
             turn(store, InvariantDemoClient(CANNED_REPLY, ArrayDeque(listOf(ALLOWED_VERDICT))), mutableListOf(), message)
         }
@@ -189,7 +199,7 @@ class InvariantDemoTest {
         assumeTrue("этап идёт только в живом режиме: ./gradlew :agent:demoLogs -Pdemo.live=1", demoOnLiveApi)
         stage("Этап 4: отказ на конфликте и ответ в рамках правил (живой API)")
 
-        val store = InMemoryInvariantStore()
+        val store = projectInvariants()
         val conflict = CONFLICTS.first()
         val llm = InvariantDemoClient(CANNED_REPLY, ArrayDeque(), liveClient())
         val refused = turn(store, llm, mutableListOf(), conflict.message)
@@ -428,6 +438,17 @@ private fun significantWords(text: String): List<String> =
 /** Агент демонстрации: инварианты лежат в общем сторе [store], поэтому видны каждому ходу. */
 private fun invariantAgent(llm: LlmClient, store: InvariantStore) =
     LlmAgent(llm, logger = AgentLogger { }, invariantStore = store)
+
+/**
+ * Стор демонстрации с набором правил проекта: правила кладёт в хранилище владелец данных —
+ * на сервере это делает сам сервер при первом запуске, а здесь их кладёт сцена.
+ *
+ * Агент умолчаний себе не подставляет: правило — условие, наложенное на работу, и назначать
+ * его себе агент не может. Поэтому в сцене набор положен явно, а агент с пустым стором
+ * работает как до дня 14 — ни блока, ни проверки (это видно на первом ходу первого этапа).
+ */
+private fun projectInvariants(): InMemoryInvariantStore =
+    InMemoryInvariantStore().apply { put(DEFAULT_PROFILE, Invariant.DEFAULT) }
 
 /**
  * Один ход сцены: вопрос человека уходит агенту, а из ответа берётся отчёт об инвариантах.

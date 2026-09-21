@@ -26,9 +26,13 @@ sealed interface TaskWrite {
  */
 class TaskWriter(private val store: TaskStateStore) {
 
-    /** Снимок задачи: состояние диалога и каталог этапов для интерфейса. */
+    /** Снимок задачи: состояние диалога, каталог этапов и разрешённые переходы. */
     fun snapshot(sessionId: String): TaskSnapshot =
-        TaskSnapshot(task = store.get(sessionId), stages = TaskStage.info)
+        TaskSnapshot(
+            task = store.get(sessionId),
+            stages = TaskStage.info,
+            transitions = TaskRules.transitions
+        )
 
     /**
      * Берёт задачу в работу: заводит её в этапе «планирование» с пустым шагом — что делать,
@@ -53,7 +57,13 @@ class TaskWriter(private val store: TaskStateStore) {
         val state = store.get(sessionId) ?: return TaskWrite.Rejected(NO_TASK)
         val pausedState = state.copy(paused = paused)
         store.put(sessionId, pausedState)
-        return TaskWrite.Written(TaskSnapshot(task = pausedState, stages = TaskStage.info))
+        return TaskWrite.Written(
+            TaskSnapshot(
+                task = pausedState,
+                stages = TaskStage.info,
+                transitions = TaskRules.transitions
+            )
+        )
     }
 
     /**

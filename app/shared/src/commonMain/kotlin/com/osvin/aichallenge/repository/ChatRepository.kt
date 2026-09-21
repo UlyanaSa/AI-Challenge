@@ -637,10 +637,13 @@ class ChatRepository(
     private fun applyTaskReport(report: TaskReport?) {
         if (report == null) return
         val stages = _task.value?.stages.orEmpty()
+        // Переходы в отчёт не входят по той же причине, что каталог этапов: это таблица снимка,
+        // и берётся она из последнего ответа сервера, а не собирается на клиенте.
+        val transitions = _task.value?.transitions.orEmpty()
         val stage = report.stage
         // Нет этапа — нет и задачи: так сервер сообщает, что она закрыта или не заводилась
         _task.value = if (stage == null) {
-            TaskSnapshot(task = null, stages = stages)
+            TaskSnapshot(task = null, stages = stages, transitions = transitions)
         } else {
             TaskSnapshot(
                 task = TaskState(
@@ -649,7 +652,8 @@ class ChatRepository(
                     expectedAction = report.expectedAction,
                     paused = report.paused
                 ),
-                stages = stages
+                stages = stages,
+                transitions = transitions
             )
         }
     }

@@ -106,6 +106,13 @@ fun TaskStateBar(
                 if (state.expectedAction.isNotBlank()) {
                     taskText("ожидаемое действие: ${state.expectedAction}")
                 }
+                // Куда дальше можно — из таблицы переходов, а не из догадки: ассистент
+                // ограничен ею, поэтому и человек видит тот же список, а не узнаёт
+                // о запрете по отказу. Этап, на котором задача стоит, в списке не повторяется.
+                val next = task.nextStages(state)
+                if (next.isNotEmpty()) {
+                    taskText("дальше можно: ${next.joinToString(", ")}")
+                }
             }
 
             if (error != null) {
@@ -131,6 +138,21 @@ private fun TaskSnapshot.stageTitle(state: TaskState): String =
 /** Пояснение этапа из того же каталога; null — каталог этого этапа не знает. */
 private fun TaskSnapshot.stageHint(state: TaskState): String? =
     stages.firstOrNull { it.stage == state.stage }?.hint?.takeIf { it.isNotBlank() }
+
+/**
+ * Этапы, в которые отсюда можно, — подписями из каталога и без текущего этапа: он в таблице
+ * переходов есть (уточнить шаг, оставаясь на месте, — не переход), но человеку этап, на
+ * котором задача стоит, в списке «дальше можно» ничего не добавляет. Незнакомый этап
+ * печатается значением с провода — как и название текущего.
+ */
+private fun TaskSnapshot.nextStages(state: TaskState): List<String> =
+    transitions
+        .filter { it.from == state.stage && it.to != state.stage }
+        .map { transition ->
+            stages.firstOrNull { it.stage == transition.to }?.title?.takeIf { it.isNotBlank() }
+                ?: transition.to
+        }
+        .distinct()
 
 /** Строка полосы задачи: тот же стиль, что у подписей в шторках памяти и профиля. */
 @Composable
