@@ -211,6 +211,84 @@ class TaskStateDemoTest {
         )
         assertTrue(calls <= 3, "этап стоит не больше трёх вызовов: $calls")
     }
+
+    /**
+     * Этап 5 (день 15): контролируемые переходы — что задаче разрешено и как ассистент
+     * реагирует на попытку перепрыгнуть этап.
+     *
+     * Сначала печатается таблица переходов из снимка ([TaskSnapshot.transitions]) — та же,
+     * по которой отказывает код: из планирования нельзя в проверку, из выполнения нельзя
+     * в готово. Затем задача доводится до выполнения, и сцена просит объявить готово: код
+     * отклоняет переход, а в тот же запрос уходит причина отказа ([TaskState.renderRejection]) —
+     * по ней ассистент и объясняет, чего не хватает работе. Живьём отвечает сцена: служебный
+     * вызов этапа подставлен (иначе живая модель могла бы и не предложить прыжок, и отклонять
+     * было бы нечего), а ответ на отказ — настоящий.
+     */
+    @Test
+    fun stage5_controlledTransitions() = runBlocking {
+        stage("Этап 5 (день 15): допустимые переходы и попытка перепрыгнуть этап")
+        logCannedTransport("переходы и отказ проверяются на подставленном предложении; живой здесь — только ответ на отказ")
+
+        val store = InMemoryTaskStateStore()
+        val writer = TaskWriter(store)
+        val snapshot = writer.snapshot(JUMP_SESSION)
+        printTransitionHeader()
+        printTransitionRows(snapshot)
+        log("")
+
+        val dialog = mutableListOf<ChatMessage>()
+        val setup = TaskDemoClient(CANNED_REPLY, ArrayDeque(ROUTE.getValue(TaskStage.EXECUTION).map { it.proposal }))
+        writer.start(JUMP_SESSION)
+        ROUTE.getValue(TaskStage.EXECUTION).forEach { scene -> turn(store, setup, dialog, scene.message, JUMP_SESSION) }
+        val before = requireNotNull(store.get(JUMP_SESSION))
+        val jump = turn(
+            store,
+            TaskDemoClient(
+                reply = CANNED_REPLY,
+                proposals = ArrayDeque(listOf(JUMP_PROPOSAL)),
+                live = if (demoOnLiveApi) liveClient() else null,
+                liveService = false
+            ),
+            dialog,
+            JUMP_MESSAGE,
+            JUMP_SESSION
+        )
+        val after = requireNotNull(store.get(JUMP_SESSION))
+
+        log("задача стоит на этапе «${stageTitle(before.stage)}»: ${digest(before)}")
+        log("сцена просит: «$JUMP_MESSAGE» (предложен переход ${direction(before, JUMP_PROPOSAL)})")
+        log("")
+        log("причина отказа: ${jump.task.rejectReason}")
+        log("")
+        log("что ушло ассистенту вместе с состоянием:")
+        rejectionLines(jump.request).forEach(::log)
+        log("")
+        log("этап остался: ${stageTitle(after.stage)} — запрещённый переход состояние не сдвинул")
+        log("ответ ассистента: ${jump.result.reply}")
+        log("признак отказа в ответе: ${refusalNote(jump.result.reply)}")
+        if (demoOnLiveApi) {
+            log("ответ на отказ — от живой модели: отказ формулирует она, причину назвал код")
+        } else {
+            log("ответ подставлен: реакция на отказ видна только в живом режиме (-Pdemo.live=1)")
+        }
+
+        val allowed = TaskRules.allowed.entries.flatMap { (from, to) -> to.map { from to it } }
+        assertEquals(allowed.size, snapshot.transitions.size, "таблица переходов полная: ${snapshot.transitions}")
+        assertEquals(
+            allowed.toSet(),
+            snapshot.transitions
+                .map { requireNotNull(TaskStage.ofWire(it.from)) to requireNotNull(TaskStage.ofWire(it.to)) }
+                .toSet(),
+            "переходы снимка — та же таблица, которой ограничен агент"
+        )
+        assertTrue(snapshot.transitions.all { it.why.isNotBlank() }, "у каждого перехода есть причина")
+        assertEquals(1, jump.task.rejected, "прыжок через этап отклонён")
+        assertEquals(before, after, "состояние не сдвинулось: ни этап, ни шаг, ни ожидаемое действие")
+        assertTrue(
+            rejectionLines(jump.request).isNotEmpty(),
+            "ассистент видит отказ: без него он попробовал бы перепрыгнуть снова"
+        )
+    }
 }
 
 /**
@@ -240,6 +318,7 @@ private const val PATH_SESSION = "demo-task-path"
 private const val REJECT_SESSION = "demo-task-reject"
 private const val PAUSE_SESSION = "demo-task-pause"
 private const val RESUME_SESSION = "demo-task-resume"
+private const val JUMP_SESSION = "demo-task-jump"
 
 /** Ход до старта задачи: пока её нет, агент не ведёт ничего. */
 private const val ASK_BEFORE_START = "Сделаем экран расходов?"
@@ -258,6 +337,10 @@ private const val CANNED_RESUME_REPLY = "Продолжаю с шага 2: по�
 
 /** Предложение на возобновлённом ходу: пустые шаг и действие — прежние сохранятся. */
 private const val RESUME_PROPOSAL = """{"task":{"stage":"execution"}}"""
+
+/** Попытка перепрыгнуть этап: из выполнения сразу в готово, минуя проверку. */
+private const val JUMP_MESSAGE = "Хватит проверок, объявляй готово"
+private const val JUMP_PROPOSAL = """{"task":{"stage":"done"}}"""
 
 /**
  * Путь сцены: планирование → выполнение (два шага) → проверка → назад в работу → проверка →
@@ -445,6 +528,49 @@ private fun printResumeRow(title: String, message: String, run: TurnRun): Unit =
     )
 )
 
+/** Шапка таблицы этапа 5: разрешённые переходы задачи и то, что за ними стоит. */
+private fun printTransitionHeader(): Unit = log(
+    String.format(Locale.ROOT, TRANSITION_ROW_FORMAT, "из этапа", "можно в", "почему такой переход")
+)
+
+/** Формат строки этапа 5: причина — самая длинная колонка, её и не обрезаем. */
+private const val TRANSITION_ROW_FORMAT = "%-16s %-18s %s"
+
+/** Таблица переходов из снимка: её же показывает полоса задачи и ею ограничен агент. */
+private fun printTransitionRows(snapshot: TaskSnapshot) {
+    snapshot.transitions.forEach { transition ->
+        log(
+            String.format(
+                Locale.ROOT,
+                TRANSITION_ROW_FORMAT,
+                stageTitle(transition.from),
+                stageTitle(transition.to),
+                transition.why
+            )
+        )
+    }
+}
+
+/**
+ * Сообщение об отклонённом переходе, как его видит модель: строки того системного сообщения,
+ * которое ушло вместе с состоянием. Пусто — отказа в этом запросе не было.
+ */
+private fun rejectionLines(request: DeepSeekRequest): List<String> =
+    request.messages.firstOrNull { it.content.startsWith(TASK_REJECTION_HEADER) }
+        ?.content
+        ?.lines()
+        .orEmpty()
+
+/** Признаки отказа в ответе: подсказка человеку — формулировку выбирает модель. */
+private val REFUSAL_MARKERS = listOf("нельзя", "не могу", "не буду", "не объяв", "сначала", "без провер")
+
+/** Отказался ли ассистент от прыжка через этап: тоже подсказка, а не проверка формулировки. */
+private fun refusalNote(reply: String): String {
+    val text = reply.lowercase(Locale.ROOT)
+    val found = REFUSAL_MARKERS.filter { text.contains(it) }
+    return if (found.isEmpty()) "прямого отказа в ответе не видно" else "отказ: ${found.joinToString(", ")}"
+}
+
 /**
  * Оговорка о транспорте для этапа, который идёт на подставленных ответах в любом режиме:
  * без неё подпись живого прогона обещала бы вызовы API, которых не было.
@@ -587,7 +713,16 @@ private class PauseRun(
 private class TaskDemoClient(
     private val reply: String = CANNED_REPLY,
     private val proposals: ArrayDeque<String> = ArrayDeque(),
-    private val live: LlmClient? = null
+    private val live: LlmClient? = null,
+    /**
+     * Каким вызовом отвечает живая модель — и служебным тоже.
+     *
+     * Проверка перехода должна быть предсказуемой: живая модель может и не предложить
+     * запрещённый переход, и тогда отклонять будет нечего. Поэтому этапу, который проверяет
+     * реакцию на отказ, служебный вызов отдаёт подставленное предложение, а сцена — живую
+     * модель: отказ обеспечен сценой, а реакция на него настоящая.
+     */
+    private val liveService: Boolean = true
 ) : LlmClient {
 
     val requests = mutableListOf<DeepSeekRequest>()
@@ -600,7 +735,7 @@ private class TaskDemoClient(
         requests += request
         val service = request.messages.first().content.startsWith(TASK_CALL_MARKER)
         if (service) serviceCalls++
-        live?.let { return it.complete(request) }
+        if (!service || liveService) live?.let { return it.complete(request) }
         val answer = if (service) proposals.removeFirstOrNull() ?: NO_PROPOSAL else reply
         val promptTokens = EstimatingTokenCounter.countPrompt(request.messages)
         return DeepSeekResponse(

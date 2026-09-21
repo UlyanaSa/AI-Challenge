@@ -118,6 +118,9 @@ class InvariantDemoTest {
         printConflictHeader()
         runs.forEach { (case, run) -> printConflictRow(case, run) }
         log("")
+        log("что ушло модели на конфликте — по строке на запрос:")
+        runs.forEach { (case, run) -> log("«${case.message}» → ${run.check}") }
+        log("")
         log("вид нарушения и причину называет служебная проверка, формулировку правила агент берёт")
         log("из стора, а отказывается уже модель — по сообщению проверки в запросе")
 
@@ -314,7 +317,7 @@ private fun printRequestHeader(): Unit = log(
 private const val REQUEST_ROW_FORMAT = "%-62s %14s %-10s %-12s"
 
 /** Строка таблицы этапа 1. */
-private fun printRequestRow(run: TurnRun): Unit = log(
+private fun printRequestRow(run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         REQUEST_ROW_FORMAT,
@@ -326,26 +329,25 @@ private fun printRequestRow(run: TurnRun): Unit = log(
 )
 
 /**
- * Шапка таблицы этапа 2: вердикт, нарушенные виды, причина проверки и то, что ушло модели.
- * Последняя колонка — сообщение проверки целиком: по нему и видно, чего от модели хотят.
+ * Шапка таблицы этапа 2: вердикт, нарушенные виды и причина от проверки. Сообщение проверки
+ * печатается отдельной строкой под таблицей: оно длинное, и колонкой его пришлось бы резать.
  */
 private fun printConflictHeader(): Unit = log(
-    String.format(Locale.ROOT, CONFLICT_ROW_FORMAT, "запрос", "вердикт", "нарушенные виды", "причина от проверки", "что ушло модели")
+    String.format(Locale.ROOT, CONFLICT_ROW_FORMAT, "запрос", "вердикт", "нарушенные виды", "причина от проверки")
 )
 
-/** Формат строки этапа 2: сообщение проверки не обрезаем — оно и есть предмет этапа. */
-private const val CONFLICT_ROW_FORMAT = "%-50s %-10s %-17s %-46s %s"
+/** Формат строки этапа 2: причина от проверки — она и объясняет, чем запрос нарушил правило. */
+private const val CONFLICT_ROW_FORMAT = "%-56s %-10s %-17s %s"
 
 /** Строка таблицы этапа 2. */
-private fun printConflictRow(case: ConflictCase, run: TurnRun): Unit = log(
+private fun printConflictRow(case: ConflictCase, run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         CONFLICT_ROW_FORMAT,
         case.message,
         verdictText(run.report.verdict),
         violationsText(run.report.violated),
-        run.report.reason ?: "причина не названа",
-        run.check
+        run.report.reason ?: "причина не названа"
     )
 )
 
@@ -358,7 +360,7 @@ private fun printVerdictHeader(): Unit = log(
 private const val VERDICT_ROW_FORMAT = "%-64s %-10s %-12s"
 
 /** Строка таблицы этапов 3 и 4. */
-private fun printVerdictRow(run: TurnRun): Unit = log(
+private fun printVerdictRow(run: InvariantTurn): Unit = log(
     String.format(
         Locale.ROOT,
         VERDICT_ROW_FORMAT,
@@ -437,13 +439,13 @@ private suspend fun turn(
     llm: InvariantDemoClient,
     dialog: MutableList<ChatMessage>,
     message: String
-): TurnRun {
+): InvariantTurn {
     val guardsBefore = llm.guardCalls
     val result = invariantAgent(llm, store).run(
         message,
         options(dialog.toList(), maxTokens = INVARIANT_ANSWER_BUDGET, strategy = ContextStrategy.FULL)
     )
-    val run = TurnRun(
+    val run = InvariantTurn(
         message = message,
         result = result,
         request = llm.requests.last { it.messages.last().content == message },
@@ -455,7 +457,7 @@ private suspend fun turn(
 }
 
 /** Что показал один ход сцены. */
-private class TurnRun(
+private class InvariantTurn(
     /** Реплика человека: она же колонка «запрос» в таблицах. */
     val message: String,
     val result: AgentResult,
