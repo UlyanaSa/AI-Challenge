@@ -622,6 +622,13 @@ class ContextStrategiesClientTest {
          */
         const val PROFILE_SNAPSHOT = """{"role":"Kotlin Multiplatform разработчик","sign_off":"Ты молодец"}"""
 
+        /**
+         * Снимок задачи для тестов стратегий: задачи нет, каталог этапов пуст. Содержимое
+         * здесь не проверяется — важно лишь, чтобы чтение задачи на открытии чата
+         * не съело ответ агента из очереди подставного сервера.
+         */
+        const val NO_TASK_SNAPSHOT = """{"task":null,"stages":[]}"""
+
         /** Каталог типов задания: подпись и пояснение клиент берёт отсюда, а не из своей таблицы. */
         val TYPES_JSON = """
             [{"layer":"short_term","title":"краткосрочная","hint":"текущий диалог","writable":false},
@@ -675,6 +682,9 @@ class ContextStrategiesClientTest {
                         // Профиль читается при открытии чата: он тоже уходит на сервер
                         // и не должен тратить ответ агента из очереди
                         "/v1/profile" -> PROFILE_SNAPSHOT
+                        // Состояние задачи читается там же, где память и профиль,
+                        // и тоже не должно тратить ответ агента из очереди
+                        "/v1/task" -> NO_TASK_SNAPSHOT
                         else -> {
                             val answer = answers[minOf(index, answers.lastIndex)]
                             index++
@@ -717,6 +727,8 @@ class ContextStrategiesClientTest {
                     val answer = when {
                         // Профиль читается при открытии чата вместе с памятью
                         request.url.encodedPath == "/v1/profile" -> HttpStatusCode.OK to PROFILE_SNAPSHOT
+                        // Задача читается там же — и своим ответом, а не ответом агента
+                        request.url.encodedPath == "/v1/task" -> HttpStatusCode.OK to NO_TASK_SNAPSHOT
                         request.url.encodedPath != "/v1/memory" -> HttpStatusCode.OK to PLAIN_REPLY
                         request.method == HttpMethod.Get -> {
                             val body = snapshots[minOf(reads, snapshots.lastIndex)]

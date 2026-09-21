@@ -104,13 +104,27 @@ data class AgentResult(
  * и перезапуск сервера её обнуляет, долговременная — в файле и перезапуск переживает.
  * Сообщения присылает клиент, а слои памяти и сводки живут на сервере.
  *
+ * Состояние задачи ([TaskState]) стоит вне стратегии контекста так же, как профиль:
+ * задачу ведёт агент, а не стратегия. Пока задачи нет, её не ведёт никто — задачу заводит
+ * человек явным действием ([TaskWriter]), и тогда состояния не существует, служебных
+ * вызовов к модели нет вовсе и поведение прежних дней не меняется. Появившись, состояние
+ * уходит системным сообщением сразу после профиля в каждом запросе этого диалога: этап,
+ * текущий шаг и ожидаемое действие — то, по чему модель продолжает работу, а не начинает
+ * её заново. Переход предлагает модель, а принимает код ([TaskRules]): запрещённый переход
+ * отклоняется причиной, и состояние остаётся прежним. На паузе служебного вызова нет:
+ * состояние заморожено, и после снятия паузы работа идёт с того же шага.
+ *
  * @param llm Транспорт к LLM API.
  * @param tokenCounter Счётчик токенов для разбивки запроса и проверки контекста.
  * @param logger Лог агента: запрос, стратегия, история диалога, ответ модели и ответ API при ошибке.
  * @param compressor Правило сжатия истории: сколько сообщений не трогать и когда строить сводку.
  * @param summaryStore Хранилище сводок. Сервер передаёт общее на все запросы, иначе
  *        сводка живёт только внутри одного запуска агента.
+ * @param taskStateStore Хранилище состояний задач. Ключ — сессия диалога
+ *        ([AgentOptions.sessionId]), потому что задача принадлежит диалогу, а не профилю:
+ *        сервер передаёт общее на все запросы, иначе состояние живёт внутри одного запуска.
  * @param memoryExtractor Правило памяти: как обновлять записи слоёв.
+ * @param taskExtractor Правило задачи: как обновлять этап, текущий шаг и ожидаемое действие.
  * @param workingMemory Хранилище рабочей памяти по профилю: память процесса
  *        ([InMemoryMemoryStore]), поэтому перезапуск сервера её обнуляет.
  * @param longTermMemory Хранилище долговременной памяти по тому же профилю: файл, поэтому
@@ -122,7 +136,9 @@ class LlmAgent(
     private val logger: AgentLogger = AgentLogger.Console,
     private val compressor: HistoryCompressor = HistoryCompressor(),
     private val summaryStore: SummaryStore = InMemorySummaryStore(),
+    private val taskStateStore: TaskStateStore = InMemoryTaskStateStore(),
     private val memoryExtractor: MemoryExtractor = MemoryExtractor(),
+    private val taskExtractor: TaskExtractor = TaskExtractor(),
     private val workingMemory: MemoryStore = InMemoryMemoryStore(),
     private val longTermMemory: MemoryStore = InMemoryMemoryStore()
 ) {
@@ -148,8 +164,9 @@ class LlmAgent(
             ?.takeIf { it.isNotEmpty() }
         val spec = ModelCatalog.spec(model)
 
-        // Сообщения модели: system prompt, профиль пользователя, сводка, слои памяти
-        // (долговременный, затем рабочий), история диалога и текущий запрос — в этом порядке.
+        // Сообщения модели: system prompt, профиль пользователя, состояние задачи, сводка,
+        // слои памяти (долговременный, затем рабочий), история диалога и текущий запрос —
+        // в этом порядке.
         // Свой system prompt из настроек важнее: если он задан,
         // берём его. Если нет — его роль играет первое сообщение диалога: инструкция
         // из него остаётся в силе и тогда, когда старшие сообщения отброшены.
@@ -178,6 +195,11 @@ class LlmAgent(
         val context = planContext(model, strategy, history, window, options, userMessage)
         val historyForRequest = context.history
         val summary = context.summary
+        // Состояние задачи — системное сообщение сразу после профиля: этап, текущий шаг
+        // и ожидаемое действие. От стратегии контекста оно не зависит: стратегия решает,
+        // что уходит из истории, а задача ведётся по диалогу целиком.
+        val taskState = context.task.state
+        val taskMessage = taskState?.let { ChatMessage(SYSTEM_ROLE, it.render()) }
         // Блоки памяти: слой уходит в запрос, только если его ведёт стратегия и он не пуст.
         val longTermMessage = memoryBlock(MemoryLayer.LONG_TERM, context, strategy)
         val workingMessage = memoryBlock(MemoryLayer.WORKING, context, strategy)
@@ -185,6 +207,7 @@ class LlmAgent(
         val messages = buildList {
             add(ChatMessage(SYSTEM_ROLE, systemPrompt))
             profileMessage?.let { add(it) }
+            taskMessage?.let { add(it) }
             summary?.let { add(compressor.summaryMessage(it)) }
             longTermMessage?.let { add(it) }
             workingMessage?.let { add(it) }
@@ -197,6 +220,7 @@ class LlmAgent(
         // вклад system prompt, профиля, слоёв памяти и истории считаем локально.
         val systemTokens = tokenCounter.count(systemPrompt)
         val profileTokens = profileMessage?.let { tokenCounter.count(it.content) } ?: 0
+        val taskTokens = taskMessage?.let { tokenCounter.count(it.content) } ?: 0
         val summaryTokens = summary?.tokens ?: 0
         val longTermTokens = longTermMessage?.let { tokenCounter.count(it.content) } ?: 0
         val workingTokens = workingMessage?.let { tokenCounter.count(it.content) } ?: 0
@@ -209,6 +233,8 @@ class LlmAgent(
 
         // Лог стратегии: что именно ушло в модель и чего это стоило.
         context.log(strategy, window, historyRawTokens, historyTokens, memoryTokens)?.let(logger::log)
+        // Лог задачи: где работа стоит, чем кончился переход и чего стоил служебный вызов.
+        context.task.log(taskTokens)?.let(logger::log)
 
         logger.log(
             listOf(
@@ -216,6 +242,7 @@ class LlmAgent(
                 "стратегия контекста: ${strategy.title}",
                 "system prompt: $systemTokens ток.",
                 "профиль: $profileTokens ток.",
+                "задача: $taskTokens ток.",
                 "история: $historyTokens ток. (${historyForRequest.size} сообщ.)",
                 "текущий вопрос: $requestTokens ток.",
                 "всего (оценка): $promptEstimate ток.",
@@ -328,6 +355,18 @@ class LlmAgent(
                     evicted = context.evicted,
                     updateTokens = if (strategy.memory.isNotEmpty()) context.service?.totalTokens ?: 0 else 0,
                     updateCostUsd = if (strategy.memory.isNotEmpty()) context.service?.costUsd else null
+                ),
+                task = TaskReport(
+                    stage = taskState?.stage,
+                    step = taskState?.step.orEmpty(),
+                    expectedAction = taskState?.expectedAction.orEmpty(),
+                    paused = taskState?.paused == true,
+                    moved = context.task.moved,
+                    rejected = context.task.rejected,
+                    rejectReason = context.task.rejectReason,
+                    tokens = taskTokens,
+                    updateTokens = context.task.call?.totalTokens ?: 0,
+                    updateCostUsd = context.task.call?.costUsd
                 )
             )
         )
@@ -347,6 +386,7 @@ class LlmAgent(
      * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
      * @param branchId Активная ветка: null — основная линия диалога.
      * @param sharedMessages Сколько сообщений в пути до точки ветвления.
+     * @param task Состояние задачи после этого сообщения и цена его обновления.
      */
     private data class ContextPlan(
         val history: List<ChatMessage>,
@@ -359,7 +399,8 @@ class LlmAgent(
         val droppedMessages: Int = 0,
         val excludedMessages: Int = 0,
         val branchId: String? = null,
-        val sharedMessages: Int = 0
+        val sharedMessages: Int = 0,
+        val task: TaskPlan = TaskPlan()
     ) {
 
         /** Записи слоя, которые ушли в запрос. */
@@ -480,8 +521,8 @@ class LlmAgent(
         // Окно и слои памяти отправляют только последние сообщения диалога.
         val windowed = if (strategy.usesWindow) path.takeLast(window) else path
 
-        // Сессию держит только сводка истории: рабочей памяти она не нужна — слой лежит
-        // по профилю, поэтому читается и пишется без неё.
+        // Сессию держат сводка истории и состояние задачи: рабочей памяти она не нужна —
+        // слой лежит по профилю, поэтому читается и пишется без неё.
         val sessionId = options.sessionId?.takeIf { it.isNotBlank() }
         if (strategy == ContextStrategy.SUMMARY && sessionId == null) {
             logger.log("Сжатие истории: сессия не названа — сводка не ведётся, в модель уходит вся история")
@@ -498,6 +539,9 @@ class LlmAgent(
             // Стратегия слои не ведёт: памяти нет, контекст собирается по истории.
             MemoryPlan()
         }
+        // Задача ведётся независимо от стратегии: состояние — не часть контекста, а работа,
+        // которую агент ведёт сам, поэтому стратегия на него не влияет.
+        val task = planTask(model, sessionId, windowed, userMessage)
 
         return ContextPlan(
             history = summary?.history ?: windowed,
@@ -514,7 +558,8 @@ class LlmAgent(
                 path.size - history.count { it.branchId == branchId }
             } else {
                 0
-            }
+            },
+            task = task
         )
     }
 
@@ -637,6 +682,98 @@ class LlmAgent(
         val evicted: Int = 0,
         val call: ServiceCall? = null
     )
+
+    /**
+     * Состояние задачи после этого сообщения и цена его обновления.
+     *
+     * @param state Состояние, которое уходит в запрос и остаётся в сторе; null — задачи нет.
+     * @param moved Этап сменился этим ответом.
+     * @param rejected Сколько переходов отклонено: этап неизвестен или запрещён таблицей.
+     * @param rejectReason Причина последнего отказа.
+     * @param call Служебный вызов обновления состояния; null — вызова не было.
+     */
+    private data class TaskPlan(
+        val state: TaskState? = null,
+        val moved: Boolean = false,
+        val rejected: Int = 0,
+        val rejectReason: String? = null,
+        val call: ServiceCall? = null
+    ) {
+
+        /**
+         * Блок лога «Задача»: где работа стоит, чем кончился переход и чего стоил
+         * служебный вызов. null — задачи в диалоге нет, и рассказывать нечего.
+         */
+        fun log(tokens: Int): String? {
+            val task = state ?: return null
+            return buildList {
+                add("Задача")
+                add("этап: ${task.stageOf()?.title ?: task.stage}${if (moved) " (этап сменился)" else ""}")
+                add("текущий шаг: ${task.step.ifEmpty { "не назван" }}")
+                add("ожидаемое действие: ${task.expectedAction.ifEmpty { "не названо" }}")
+                add("блок задачи в запросе: $tokens ток.")
+                rejectReason?.let { add("переход отклонён: $it") }
+                if (task.paused) add("задача на паузе: служебного вызова нет — состояние заморожено")
+                call?.let {
+                    add(
+                        "обновление задачи: ${it.totalTokens} ток. " +
+                            "(вход ${it.promptTokens}, ответ ${it.replyTokens}), цена ${costUsd(it.costUsd)}"
+                    )
+                }
+            }.joinToString("\n")
+        }
+    }
+
+    /**
+     * Состояние задачи: где работа стоит после этого сообщения (день 13).
+     *
+     * Задачу заводит человек явным действием ([TaskWriter]) — до этого состояния нет,
+     * и спрашивать модель не о чем: служебных вызовов не будет вовсе, поэтому поведение
+     * прежних дней не меняется. Дальше переход предлагает модель, а принимает код
+     * ([TaskRules]): запрещённый переход отклоняется причиной, и состояние остаётся прежним.
+     *
+     * На паузе вызова нет: состояние заморожено, и работа продолжится с того же шага —
+     * в этом и смысл паузы. Сбой вызова диалог не ломает: остаётся прежнее состояние.
+     */
+    private suspend fun planTask(
+        model: String,
+        sessionId: String?,
+        history: List<ChatMessage>,
+        userMessage: String
+    ): TaskPlan {
+        // Состояние задачи адресуется диалогом: без имени сессии читать его негде, а значит
+        // и вести нечего. Строка в логе объясняет, почему задачи в запросе не будет.
+        if (sessionId == null) {
+            logger.log("Задача: у запроса нет sessionId — состояние задачи не ведётся")
+            return TaskPlan()
+        }
+        val previous = taskStateStore.get(sessionId) ?: return TaskPlan()
+        // Пауза: состояние заморожено, поэтому модель о переходе не спрашивают вовсе —
+        // иначе ответ на паузе сдвинул бы этап, которого человек не продолжал.
+        if (previous.paused) return TaskPlan(previous)
+
+        val fresh = history.takeLast(MEMORY_CONTEXT_MESSAGES) + ChatMessage(USER_ROLE, userMessage)
+        val reply = callService("задача", taskExtractor.request(model, previous, fresh))
+            ?: return TaskPlan(previous)
+        val proposal = taskExtractor.parse(reply.text)
+        if (proposal == null) {
+            logger.log(
+                "Состояние задачи не обновилось (модель вернула не JSON или сказала, что задачи нет) — " +
+                    "оставлено прежнее состояние"
+            )
+            return TaskPlan(previous, call = reply.call)
+        }
+
+        return when (val decision = TaskRules.accept(previous, proposal)) {
+            is TaskDecision.Accepted -> {
+                taskStateStore.put(sessionId, decision.state)
+                TaskPlan(decision.state, moved = decision.moved, call = reply.call)
+            }
+
+            is TaskDecision.Rejected ->
+                TaskPlan(previous, rejected = 1, rejectReason = decision.reason, call = reply.call)
+        }
+    }
 
     /** Блок слоя для запроса: null — слой не ведёт стратегия или он пуст. */
     private fun memoryBlock(layer: MemoryLayer, context: ContextPlan, strategy: ContextStrategy): ChatMessage? =

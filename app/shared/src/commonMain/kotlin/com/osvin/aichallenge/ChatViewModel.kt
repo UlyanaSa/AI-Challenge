@@ -10,6 +10,7 @@ import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.MemoryReport
+import com.osvin.aichallenge.data.TaskSnapshot
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.repository.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +41,12 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     // к модели на сервере, а не собирается клиентом
     val profile: StateFlow<UserProfile?> = repository.profile
     val profileError: StateFlow<String?> = repository.profileError
+
+    // Задача активного чата: этап, шаг и ожидаемое действие. Состояние и каталог этапов
+    // приходят с сервера, поэтому и потоки свои: задача не часть профиля и не память —
+    // она принадлежит диалогу, и её состояние не выводится на клиенте
+    val task: StateFlow<TaskSnapshot?> = repository.task
+    val taskError: StateFlow<String?> = repository.taskError
 
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
@@ -181,6 +188,46 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun saveProfile(profile: UserProfile) {
         viewModelScope.launch {
             repository.saveProfile(profile)
+        }
+    }
+
+    /**
+     * Перечитывание состояния задачи активного чата. Чат читает его сам при создании
+     * и открытии, а это повторное чтение — например, после сбоя сети.
+     */
+    fun loadTask() {
+        viewModelScope.launch {
+            repository.loadTask()
+        }
+    }
+
+    /**
+     * Взятие задачи активного чата в работу: дальше её ведёт сервер, а полоса
+     * показывает то, что он вернул.
+     */
+    fun startTask() {
+        viewModelScope.launch {
+            repository.startTask()
+        }
+    }
+
+    /**
+     * Пауза и продолжение задачи активного чата: оба действия — одно поле,
+     * состояние после них берётся из ответа сервера.
+     */
+    fun setTaskPaused(paused: Boolean) {
+        viewModelScope.launch {
+            repository.setTaskPaused(paused)
+        }
+    }
+
+    /**
+     * Забвение задачи активного чата: работа стирается на сервере, полоса
+     * показывает, что задачи нет.
+     */
+    fun forgetTask() {
+        viewModelScope.launch {
+            repository.forgetTask()
         }
     }
 }

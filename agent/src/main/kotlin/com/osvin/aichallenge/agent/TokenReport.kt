@@ -39,6 +39,9 @@ import kotlinx.serialization.Serializable
  * @param excludedMessages Сколько сообщений диалога не попало в путь активной ветки.
  * @param branchId Активная ветка диалога; null — основная линия.
  * @param memory Память агента: записи по слоям, токены слоёв, цена обновления.
+ * @param task Состояние задачи: этап, шаг и ожидаемое действие на конец ответа, токены
+ *        блока состояния в запросе и цена служебного вызова. Пустой отчёт — задачи
+ *        в этом диалоге нет, и тогда агент её не ведёт.
  */
 @Serializable
 data class TokenReport(
@@ -66,7 +69,8 @@ data class TokenReport(
     @SerialName("dropped_messages") val droppedMessages: Int = 0,
     @SerialName("excluded_messages") val excludedMessages: Int = 0,
     @SerialName("branch_id") val branchId: String? = null,
-    @SerialName("memory") val memory: MemoryReport = MemoryReport()
+    @SerialName("memory") val memory: MemoryReport = MemoryReport(),
+    @SerialName("task") val task: TaskReport = TaskReport()
 )
 
 /**

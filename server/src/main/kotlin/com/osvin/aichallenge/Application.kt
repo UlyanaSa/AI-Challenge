@@ -8,12 +8,15 @@ import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
 import com.osvin.aichallenge.agent.InMemoryMemoryStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
+import com.osvin.aichallenge.agent.InMemoryTaskStateStore
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.agent.MemoryForget
 import com.osvin.aichallenge.agent.MemoryWrite
 import com.osvin.aichallenge.agent.MemoryWriter
 import com.osvin.aichallenge.agent.ProfileStore
+import com.osvin.aichallenge.agent.TaskWrite
+import com.osvin.aichallenge.agent.TaskWriter
 import com.osvin.aichallenge.agent.UserProfile
 import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
@@ -30,6 +33,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -77,6 +81,24 @@ val client = HttpClient(CIO) {
  * а сводка должна пережить запрос и заменить свёрнутые сообщения в следующем.
  */
 val summaryStore = InMemorySummaryStore()
+
+/**
+ * Состояние задачи по сессии: этап, текущий шаг и ожидаемое действие.
+ *
+ * Стоит рядом со сводками, а не с памятью, потому что живёт так же — по диалогу.
+ * Задача описывает работу в конкретном чате, и её шаг — продолжение именно этой
+ * истории: чат удалили, задача ушла вместе с ним, а в соседнем диалоге своя. Память
+ * же обоих слоёв принадлежит профилю и видна из любого чата.
+ *
+ * Лежит в памяти процесса, а не в файле, по той же причине, по которой привязана
+ * к сессии: это курсор текущей работы, и перезапуск сервера означает, что продолжать
+ * нечего — сообщения диалога, относительно которых шаг что-то значит, сервер не хранит.
+ * Состояние из файла показывало бы шаг к истории, которой на сервере уже нет.
+ *
+ * Общее на все запросы, как сводки: агент создаётся на каждый запрос, а задача должна
+ * пережить запрос, чтобы следующий продолжил с того же шага, а не начал заново.
+ */
+val taskStateStore = InMemoryTaskStateStore()
 
 /**
  * Память агента на сервере: два хранилища, по одному на слой с состоянием.
@@ -150,6 +172,23 @@ private fun envFile(): Map<String, String> {
         .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains('=') }
         .associate { it.substringBefore('=').trim() to it.substringAfter('=').trim() }
 }
+
+/**
+ * Причина отказа, когда запрос к задаче не назвал диалог.
+ *
+ * Состояние задачи живёт по сессии, а не по профилю, поэтому безымянный запрос
+ * адресовать нечего: ответ пустым снимком значил бы «задачи нет ни у кого»,
+ * а запись в безымянную сессию потерялась бы при удалении любого чата.
+ */
+private const val TASK_SESSION_REQUIRED =
+    "не названа сессия: состояние задачи живёт по диалогу, поэтому без sessionId у запроса нет адреса"
+
+/** Отказ «сессия не названа» — ошибка клиента, а не пустой снимок. */
+private suspend fun ApplicationCall.respondTaskSessionRequired() =
+    respond(
+        HttpStatusCode.BadRequest,
+        ErrorResponse(success = false, error = TASK_SESSION_REQUIRED)
+    )
 
 /**
  * Основной модуль сервера Ktor.
@@ -288,6 +327,7 @@ fun Application.module() {
             val agent = LlmAgent(
                 DeepSeekClient(apiKey, client),
                 summaryStore = summaryStore,
+                taskStateStore = taskStateStore,
                 workingMemory = workingMemory,
                 longTermMemory = longTermMemory
             )
@@ -308,15 +348,17 @@ fun Application.module() {
 
         /**
          * Удаление сессии чата.
-         * Клиент удалил чат — сводка его истории серверу больше не нужна: без этого
-         * сводки копились бы на каждый удалённый диалог. Память не трогается: оба
-         * слоя принадлежат профилю, а не чату, поэтому удаление чата не стирает
-         * рабочую память задачи — её убирают только забыванием в шторке, вытеснением
-         * и перезапуск сервера.
+         * Клиент удалил чат — сводка его истории и состояние его задачи серверу больше
+         * не нужны: без этого они копились бы на каждый удалённый диалог. Сессионное
+         * стирается целиком, потому что продолжать в удалённом чате нечего: ни сводки,
+         * ни этапа с шагом у него не остаётся. Память не трогается: оба слоя принадлежат
+         * профилю, а не чату, поэтому удаление чата не стирает рабочую память задачи —
+         * её убирают только забыванием в шторке, вытеснением и перезапуск сервера.
          */
         delete("/v1/chats/{sessionId}") {
             val sessionId = call.parameters["sessionId"].orEmpty()
             summaryStore.clear(sessionId)
+            taskStateStore.clear(sessionId)
             call.respond(HttpStatusCode.NoContent)
         }
 
@@ -400,6 +442,81 @@ fun Application.module() {
 
                 is MemoryForget.Forgotten -> call.respond(forget.layers)
             }
+        }
+
+        /**
+         * Состояние задачи этого диалога: этап, текущий шаг и ожидаемое действие.
+         *
+         * Снимок читается и до старта: пустое состояние — это ответ «задачи нет»,
+         * а не ошибка, поэтому шторка задачи рисуется всегда, а не после того, как
+         * пользователь её завёл. Каталог этапов уезжает вместе со снимком — подписи
+         * в интерфейсе берутся из него, и своей копии таблицы этапов на клиенте нет.
+         * Сессия в параметрах обязательна: состояние живёт по диалогу.
+         */
+        get("/v1/task") {
+            val sessionId = call.request.queryParameters["sessionId"].orEmpty()
+            if (sessionId.isBlank()) {
+                call.respondTaskSessionRequired()
+                return@get
+            }
+            call.respond(TaskWriter(taskStateStore).snapshot(sessionId))
+        }
+
+        /**
+         * Взятие задачи в работу: явное действие человека, как запись в память.
+         *
+         * Ведёт задачу дальше агент сам, а этот вызов только заводит её — и заводит
+         * в этапе «планирование». Повторное нажатие не ошибка и не сбрасывает уже
+         * пройденный путь: кнопка может нажаться дважды. Ответ — снимок, а не пустая
+         * строка: клиент сразу видит, что задача в работе и с какого шага.
+         */
+        post("/v1/task") {
+            val request = call.receive<TaskStartRequest>()
+            if (request.sessionId.isBlank()) {
+                call.respondTaskSessionRequired()
+                return@post
+            }
+            call.respond(TaskWriter(taskStateStore).start(request.sessionId))
+        }
+
+        /**
+         * Пауза и продолжение задачи: состояние замораживается, шаг остаётся на месте.
+         *
+         * Отказ (задача не заведена) — ошибка запроса: ставить на паузу нечего, и клиент
+         * покажет причину вместо того, чтобы решить, будто задача есть. Снятие паузы
+         * продолжает с того же шага: служебного вызова к модели на паузе нет вовсе,
+         * поэтому терять нечего.
+         */
+        put("/v1/task") {
+            val request = call.receive<TaskPauseRequest>()
+            if (request.sessionId.isBlank()) {
+                call.respondTaskSessionRequired()
+                return@put
+            }
+            val write = TaskWriter(taskStateStore).setPaused(request.sessionId, request.paused)
+            when (write) {
+                is TaskWrite.Rejected -> call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(success = false, error = write.reason)
+                )
+
+                is TaskWrite.Written -> call.respond(write.snapshot)
+            }
+        }
+
+        /**
+         * Забывание задачи: пользователь закрыл работу в этом диалоге.
+         *
+         * Повторное удаление не ошибка: снимок вернётся как был — пустым, потому что
+         * забывать уже нечего. Тем же способом задача чистится при удалении чата.
+         */
+        delete("/v1/task") {
+            val sessionId = call.request.queryParameters["sessionId"].orEmpty()
+            if (sessionId.isBlank()) {
+                call.respondTaskSessionRequired()
+                return@delete
+            }
+            call.respond(TaskWriter(taskStateStore).forget(sessionId))
         }
     }
 }

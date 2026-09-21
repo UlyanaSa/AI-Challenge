@@ -45,6 +45,13 @@ import kotlin.random.Random
  * Профиль пользователя ([loadProfile]) тоже общий и лежит на сервере: клиент его
  * только показывает и правит ([saveProfile]), а в запрос к модели профиль не
  * подставляет — это делает сервер, поэтому в теле запроса его нет.
+ *
+ * Задача ([loadTask]) — наоборот, своя у каждого чата: этап и шаг описывают работу
+ * в этом диалоге, поэтому состояние адресуется сессией чата. Ведёт задачу сервер,
+ * а клиент её только показывает и передаёт явные действия человека: взял в работу
+ * ([startTask]), поставил на паузу ([setTaskPaused]), забыл ([forgetTask]). Как и
+ * память, задачу он не выводит сам — состояние и каталог этапов приходят с сервера,
+ * а после каждого ответа модели обновляются из отчёта ([TaskReport]) без перезапроса.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -98,6 +105,20 @@ class ChatRepository(
     // ошибка, а не [memoryError]: сбой профиля не должен выглядеть как сбой памяти.
     private val _profileError = MutableStateFlow<String?>(null)
     val profileError: StateFlow<String?> = _profileError.asStateFlow()
+
+    // Задача активного чата: на каком этапе работа и что ждут от человека. Живёт
+    // отдельно от памяти: память — это то, что агент помнит из диалога, а задача —
+    // состояние работы, которое человек заводит сам и которым сам управляет. Снимок
+    // несёт и каталог этапов, поэтому подписи полосы берутся из ответа сервера.
+    // null — снимка ещё не было: состояние задачи на экране неизвестно.
+    private val _task = MutableStateFlow<TaskSnapshot?>(null)
+    val task: StateFlow<TaskSnapshot?> = _task.asStateFlow()
+
+    // Отказ сервера на чтение задачи и на действия с ней; null — отказа не было.
+    // Это своя ошибка, а не [memoryError] и не [profileError]: сбой задачи не должен
+    // выглядеть как сбой памяти, а сбой профиля — как сбой задачи.
+    private val _taskError = MutableStateFlow<String?>(null)
+    val taskError: StateFlow<String?> = _taskError.asStateFlow()
 
     // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
     // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
@@ -155,6 +176,10 @@ class ChatRepository(
         _memory.value = null
         _layers.value = null
         _memoryError.value = null
+        // Состояние задачи принадлежит чату, поэтому у нового чата его нет: свой
+        // снимок читается ниже, а прежний относился к прошлому диалогу
+        _task.value = null
+        _taskError.value = null
         _state.value = ChatUiState.Idle
         _chats.value = store.chats()
         // Память общая для профиля: шторке сразу нужен снимок слоёв и каталога типов,
@@ -163,6 +188,9 @@ class ChatRepository(
         // Профиль тоже общий и нужен шторке сразу, а не после первого нажатия:
         // он подставляется в каждый запрос на сервере, поэтому в чате его видно
         loadProfile()
+        // Задача своя у каждого чата: полоса показывает работу этого диалога сразу,
+        // а не после первого сообщения — состояние живёт на сервере, не в переписке
+        loadTask()
         return chat
     }
 
@@ -184,6 +212,10 @@ class ChatRepository(
         _memory.value = null
         _layers.value = null
         _memoryError.value = null
+        // Прежнее состояние задачи относилось к соседнему чату: задача у каждого
+        // диалога своя, поэтому до ответа сервера о ней лучше молчать, чем показать чужую
+        _task.value = null
+        _taskError.value = null
         _messages.value = DialogBranches.activePath(store.messages(id), branches, chat.activeBranchId)
         _state.value = ChatUiState.Idle
         // Память общая для профиля, но чат мог остаться без снимка (его чистит
@@ -192,6 +224,9 @@ class ChatRepository(
         // Профиль читаем на каждом открытии чата: его могли поправить с другого
         // устройства, а шторка должна открываться с тем, что лежит на сервере
         loadProfile()
+        // Задача у каждого чата своя, и состояние её живёт на сервере, а не в истории
+        // сообщений: без чтения открытый чат показал бы пустую полосу при живой задаче
+        loadTask()
     }
 
     /**
@@ -230,6 +265,10 @@ class ChatRepository(
             // профиля в ней не остаётся — следующий открытый чат прочитает его заново
             _layers.value = null
             _memoryError.value = null
+            // Полоса задачи чистится вместе с чатом: её состояние адресовалось сессией
+            // этого диалога, и после удаления показывать его нечему
+            _task.value = null
+            _taskError.value = null
             _state.value = ChatUiState.Idle
         }
         _chats.value = store.chats()
@@ -350,10 +389,12 @@ class ChatRepository(
 
                 // Отчёт агента печатаем в лог платформы (на Android — в logcat):
                 // строки те же, что агент пишет на сервере, но видны рядом с приложением.
-                // Память агента оттуда же попадает в шторку на экране чата.
+                // Память агента оттуда же попадает в шторку на экране чата, а состояние
+                // задачи — в полосу над полем ввода: и то, и другое без перезапроса.
                 chatResponse.tokens?.let { report ->
                     platformLog("agent", report.logEntry(settings.model))
                     _memory.value = report.memory
+                    applyTaskReport(report.task)
                 }
 
                 val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply, branchId = activeBranchId)
@@ -463,6 +504,137 @@ class ChatRepository(
     }
 
     /**
+     * Состояние задачи активного чата: этап, шаг, ожидаемое действие и каталог этапов.
+     * Задача адресуется сессией диалога, поэтому без активного чата читать нечего —
+     * тогда состояние пустое, а не чужое.
+     *
+     * Без снимка полосе нечего показывать, поэтому null и до первого запроса, и когда
+     * сервер недоступен: чат при этом продолжает работать — задача не часть диалога,
+     * а отдельный слой работы.
+     */
+    suspend fun loadTask() {
+        val chat = _activeChat.value
+        if (chat == null) {
+            _task.value = null
+            return
+        }
+        try {
+            val response = client.get("$baseUrl/v1/task") {
+                parameter("sessionId", chat.id)
+            }
+            if (response.status.isSuccess()) {
+                _task.value = response.body()
+                _taskError.value = null
+            } else {
+                _task.value = null
+                // Без снимка полоса молчит, а причина должна быть видна: иначе
+                // «Взять в работу» выглядела бы сломанной кнопкой
+                _taskError.value = "Задача недоступна: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] Задача не загружена: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _task.value = null
+            _taskError.value = e.message ?: "Задача недоступна: нет соединения"
+            platformLog("agent", "[agent] Задача не загружена: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Взятие задачи в работу: сервер заводит её и отвечает первым этапом — планированием.
+     * Действие явное, как запись в память: пока человек не нажал, агент задачу не ведёт
+     * и состояние работы ему неоткуда взять.
+     */
+    suspend fun startTask() {
+        val chat = _activeChat.value ?: return taskUnavailable("задача не взята")
+        applyTask {
+            client.post("$baseUrl/v1/task") {
+                contentType(ContentType.Application.Json)
+                setBody(TaskStartRequest(sessionId = chat.id))
+            }
+        }
+    }
+
+    /**
+     * Пауза и продолжение задачи: одно поле на оба действия, потому что разница между
+     * ними только в нём — на паузе состояние остаётся на месте, и после продолжения
+     * работа идёт с того же шага, без повторных объяснений.
+     */
+    suspend fun setTaskPaused(paused: Boolean) {
+        val chat = _activeChat.value ?: return taskUnavailable(
+            if (paused) "задача не поставлена на паузу" else "задача не продолжена"
+        )
+        applyTask {
+            client.put("$baseUrl/v1/task") {
+                contentType(ContentType.Application.Json)
+                setBody(TaskPauseRequest(sessionId = chat.id, paused = paused))
+            }
+        }
+    }
+
+    /**
+     * Забвение задачи: состояние и шаг стираются на сервере, каталог этапов остаётся
+     * в ответе — поэтому полоса сразу показывает, что задачи нет, а не пустоту.
+     * Операция идемпотентна: сервер отвечает тем же снимком, поэтому забыть задачу
+     * можно и повторно.
+     */
+    suspend fun forgetTask() {
+        val chat = _activeChat.value ?: return taskUnavailable("задача не забыта")
+        applyTask {
+            client.delete("$baseUrl/v1/task") { parameter("sessionId", chat.id) }
+        }
+    }
+
+    /**
+     * Состояние задачи из отчёта ответа: этап, шаг и ожидаемое действие посчитал сервер,
+     * пока отвечал, поэтому клиент их только переносит — без отдельного запроса, который
+     * показал бы то же самое с задержкой.
+     *
+     * Каталог этапов в отчёт не входит: он остаётся тем, что пришёл со снимком
+     * ([loadTask]). Взять его в отчёте неоткуда, а вторая копия на клиенте разошлась бы
+     * с серверной.
+     *
+     * @param report Отчёт задачи; null — агент о задаче не отчитывался, и состояние
+     *        остаётся прежним: молчание отчёта о задаче не значит, что её больше нет.
+     */
+    private fun applyTaskReport(report: TaskReport?) {
+        if (report == null) return
+        val stages = _task.value?.stages.orEmpty()
+        val stage = report.stage
+        // Нет этапа — нет и задачи: так сервер сообщает, что она закрыта или не заводилась
+        _task.value = if (stage == null) {
+            TaskSnapshot(task = null, stages = stages)
+        } else {
+            TaskSnapshot(
+                task = TaskState(
+                    stage = stage,
+                    step = report.step,
+                    expectedAction = report.expectedAction,
+                    paused = report.paused
+                ),
+                stages = stages
+            )
+        }
+    }
+
+    /** Общий путь действий с задачей: снимок из ответа идёт в состояние, отказ — в текст ошибки. */
+    private suspend fun applyTask(request: suspend () -> HttpResponse) {
+        try {
+            val response = request()
+            if (response.status.isSuccess()) {
+                _task.value = response.body()
+                _taskError.value = null
+            } else {
+                // Сервер объясняет отказ в теле (например, задачи нет) — показываем его
+                // текст, а не только код статуса
+                _taskError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _taskError.value = e.message ?: "Сетевая ошибка"
+        }
+    }
+
+    /**
      * Явная запись в память: тип и текст. Запись адресуется парой «тип + текст»,
      * поэтому ключа в запросе нет, и чат в ней не назван: оба писаемых типа живут
      * по профилю, поэтому записать в память можно и без активного чата, и запись
@@ -503,6 +675,17 @@ class ChatRepository(
      */
     private fun noActiveChat(reason: String) {
         _memoryError.value = "$reason: чат не выбран"
+    }
+
+    /**
+     * Действие с задачей, когда чат не выбран: адресовать его нечем, потому что
+     * состояние задачи живёт по сессии диалога, а не по профилю. Молчание выглядело бы
+     * как сломанная кнопка в полосе, поэтому причина уходит в [taskError].
+     *
+     * @param reason Что именно не сделано.
+     */
+    private fun taskUnavailable(reason: String) {
+        _taskError.value = "$reason: чат не выбран"
     }
 
     /** Общий путь записи и удаления: снимок из ответа идёт в состояние, отказ — в текст ошибки. */

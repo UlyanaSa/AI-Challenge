@@ -32,6 +32,10 @@ import com.osvin.aichallenge.ui.components.*
  * чтобы хранилище не мешало диалогу. Профиль пользователя — второй шторкой там же:
  * он общий для всех чатов и подставляется в каждый запрос к модели.
  *
+ * Задача чата видна полосой над полем ввода: состояние работы адресуется сессией
+ * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставят на паузу
+ * и забывают (см. [com.osvin.aichallenge.ui.components.TaskStateBar]).
+ *
  * @param title Заголовок активного чата для верхней панели.
  * @param onBack Возврат к списку чатов.
  * @param onNewChat Переход к экрану создания нового чата с настройкой агента.
@@ -54,6 +58,10 @@ fun ChatScreen(
     // Профиль пользователя: что лежит на сервере и чем закончилось чтение или запись
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val profileError by viewModel.profileError.collectAsStateWithLifecycle()
+    // Задача активного чата: этап, шаг и ожидаемое действие вместе с каталогом этапов,
+    // и чем закончилось последнее обращение к серверу
+    val task by viewModel.task.collectAsStateWithLifecycle()
+    val taskError by viewModel.taskError.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
@@ -120,16 +128,29 @@ fun ChatScreen(
             )
         },
         bottomBar = {
-            ChatInputBar(
-                text = inputText,
-                onTextChange = { inputText = it },
-                onSend = {
-                    viewModel.sendMessage(inputText)
-                    inputText = ""
-                },
-                isLoading = uiState is ChatUiState.Loading,
-                enabled = isOnline == true
-            )
+            // Полоса задачи встаёт над полем ввода: состояние работы видно рядом
+            // с тем, чем её продолжают, и не занимает места в ленте сообщений
+            Column {
+                TaskStateBar(
+                    task = task,
+                    error = taskError,
+                    onStart = { viewModel.startTask() },
+                    // Действие одно, а значение — обратное текущему: на паузе кнопка
+                    // продолжает, а идущую задачу останавливает
+                    onTogglePause = { viewModel.setTaskPaused(task?.task?.paused != true) },
+                    onForget = { viewModel.forgetTask() }
+                )
+                ChatInputBar(
+                    text = inputText,
+                    onTextChange = { inputText = it },
+                    onSend = {
+                        viewModel.sendMessage(inputText)
+                        inputText = ""
+                    },
+                    isLoading = uiState is ChatUiState.Loading,
+                    enabled = isOnline == true
+                )
+            }
         }
     ) { padding ->
         Box(
