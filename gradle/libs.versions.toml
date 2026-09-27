@@ -12,12 +12,14 @@ androidx-testExt = "1.3.0"
 composeMultiplatform = "1.11.1"
 junit = "4.13.2"
 kotlin = "2.4.10"
-kotlinx-coroutines = "1.7.3"
+kotlinx-coroutines = "1.11.0"
 ksp = "2.3.6"
 room = "2.8.4"
 kotlin-wrappers = "2026.8.4"
 ktor = "3.5.2"
-kotlinx-serialization = "1.6.0"
+kotlinx-serialization = "1.11.0"
+kotlinx-io = "0.9.1"
+mcp = "0.15.0"
 logback = "1.4.14"
 dotenv = "6.4.1"
 material3 = "1.11.0-alpha07"
@@ -72,6 +74,11 @@ ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx
 kotlin-stdlib = { group = "org.jetbrains.kotlin", name = "kotlin-stdlib-jdk8", version.ref = "kotlin" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+kotlinx-io-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-io-core", version.ref = "kotlinx-io" }
+
+# MCP: клиент живёт в агенте, сервер — в серверном модуле; версия одна на оба конца протокола
+mcp-client = { module = "io.modelcontextprotocol:kotlin-sdk-client", version.ref = "mcp" }
+mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
