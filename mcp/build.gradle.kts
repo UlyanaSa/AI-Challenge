@@ -63,6 +63,23 @@ tasks.jar {
 }
 
 /**
+ * Инструменты сервера в консоли: `./gradlew :mcp:mcpTools`.
+ *
+ * Тот же процесс сервера, но с флагом `--list-tools`: печатает то, что сервер объявляет
+ * клиенту, и выходит. Отдельная задача, а не запуск сервера: сервер через Gradle запускать
+ * нельзя — Gradle пишет в его стандартный вывод свои строки, а там кадры протокола. Здесь
+ * наоборот: запуск разовый и человеческий, поэтому строки Gradle в выводе не мешают.
+ */
+val mcpTools by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Печатает инструменты, которые объявляет MCP-сервер проекта"
+    mainClass.set("com.osvin.aichallenge.mcp.ProjectMcpServerKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    args("--list-tools")
+    outputs.upToDateWhen { false }
+}
+
+/**
  * Демонстрация подключения к MCP: печатает список инструментов сервера.
  *
  * `./gradlew :mcp:mcpDemo` — клиент поднимает локальный MCP-сервер проекта процессом,

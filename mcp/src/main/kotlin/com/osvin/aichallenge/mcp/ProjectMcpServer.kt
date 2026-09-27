@@ -32,6 +32,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.system.exitProcess
 import org.slf4j.LoggerFactory
 
 /**
@@ -204,7 +205,48 @@ object ProjectMcpServer {
         is JsonPrimitive -> argument.content.takeIf { it.isNotEmpty() }
         else -> null
     }
+
+    /**
+     * Что сервер объявляет клиенту, словами, — для консоли ([LIST_TOOLS_FLAG]).
+     *
+     * Печатается, когда серверу задают вопрос «что у тебя есть», а не подключаются к нему:
+     * список берётся из той же спецификации ([tools]), по которой сервер регистрирует
+     * инструменты и строит их схемы, поэтому показать одно, а объявить другое он не может —
+     * имена, описания и аргументы идут из одного места.
+     */
+    fun describeTools(): String = buildString {
+        appendLine("$NAME $VERSION — инструменты MCP-сервера проекта")
+        appendLine(
+            "инструментов: ${tools.size}; список объявлен кодом, поэтому изменения не рассылаются " +
+                "(listChanged = false)"
+        )
+        tools.forEachIndexed { index, tool ->
+            appendLine()
+            appendLine("${index + 1}. ${tool.name}")
+            appendLine("   ${tool.description}")
+            if (tool.arguments.isEmpty()) {
+                appendLine("   аргументов нет")
+            } else {
+                appendLine("   аргументы:")
+                tool.arguments.forEach { argument ->
+                    val required = if (argument.required) "обязательный" else "необязательный"
+                    appendLine("     ${argument.name}: ${argument.type}, $required — ${argument.description}")
+                }
+            }
+        }
+    }
 }
+
+/**
+ * Флаг консольного режима: показать инструменты сервера и выйти.
+ *
+ * Отдельный режим нужен потому, что в рабочем режиме стандартный вывод сервера занят
+ * протоколом ([stdoutForProtocol]): напечатать туда список инструментов значило бы послать
+ * клиенту мусор вместо кадра. Поэтому «что у тебя есть» — это команда
+ * (`java -cp mcp-1.0.0.jar … --list-tools`, а из репозитория `./gradlew :mcp:mcpTools`),
+ * а подключение — запуск без аргументов.
+ */
+const val LIST_TOOLS_FLAG = "--list-tools"
 
 /**
  * Точка входа локального MCP-сервера: работает на stdio, пока клиент не закроет соединение.
@@ -212,6 +254,9 @@ object ProjectMcpServer {
  * Ни порта, ни регистрации нет — сервер поднимает клиент процессом (как и большинство
  * MCP-серверов), поэтому запуск сводится к команде, а конец работы — к концу входного
  * потока: закрывая соединение, клиент закрывает и сервер.
+ *
+ * Аргумент один — [LIST_TOOLS_FLAG]: он отвечает на вопрос о списке инструментов и выходит,
+ * ничего не поднимая (ни транспорта, ни хранилищ — печатать список можно и без данных).
  *
  * Что осталось позади: транспорт при естественной остановке сам закрывает вход и выход,
  * снимает свои корутины и зовёт `onClose` — поэтому здесь достаточно дождаться этой
@@ -221,7 +266,23 @@ object ProjectMcpServer {
  * остановленный транспорт (гонка в SDK 0.15.0). Проверено на пяти прогонах: с закрытием
  * процесс висел в трёх, без него выходит всегда.
  */
-fun main(): Unit = runBlocking {
+fun main(args: Array<String>): Unit = runBlocking {
+    when {
+        // `singleOrNull`, а не сравнение с `listOf(флаг)`: массив и список не равны никогда.
+        args.singleOrNull() == LIST_TOOLS_FLAG -> {
+            println(ProjectMcpServer.describeTools())
+            return@runBlocking
+        }
+
+        args.isNotEmpty() -> {
+            System.err.println(
+                "неизвестные аргументы: ${args.joinToString(" ")}; поддерживается только " +
+                    "$LIST_TOOLS_FLAG, без аргументов — сервер на stdio"
+            )
+            exitProcess(2)
+        }
+    }
+
     val protocolOutput = stdoutForProtocol()
     logsToStderr()
     val server = ProjectMcpServer.create(
