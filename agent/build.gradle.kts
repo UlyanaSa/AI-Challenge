@@ -11,11 +11,6 @@ dependencies {
     api(libs.ktor.client.core)
     // DTO запроса/ответа DeepSeek и JSON-режим формата в публичном API агента.
     api(libs.kotlinx.serialization.json)
-    // MCP-клиент: агент подключается к серверам инструментов и видит их список.
-    // api, а не implementation: сессия отдаёт протокольный клиент SDK наружу.
-    api(libs.mcp.client)
-    // Кадры протокола MCP идут по stdio — потоками kotlinx-io, а не строками.
-    implementation(libs.kotlinx.io.core)
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.core)

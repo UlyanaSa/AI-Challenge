@@ -22,8 +22,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.dotenv.kotlin)
     implementation(libs.logback)
-    // MCP-сервер проекта: инструменты отдаются клиенту по протоколу, а не подсказкой в промпте.
-    implementation(libs.mcp.server)
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.ktor.server.test.host)
@@ -84,21 +82,4 @@ tasks.register<JavaExec>("runDev") {
                 environment(key, value)
             }
     }
-}
-
-/**
- * Демонстрация подключения к MCP: печатает список инструментов сервера.
- *
- * `./gradlew :server:mcpDemo` — клиент поднимает локальный MCP-сервер проекта процессом,
- * проходит рукопожатие и печатает инструменты, которые тот объявил.
- */
-val mcpDemo by tasks.registering(Test::class) {
-    group = "verification"
-    description = "Прогон подключения к MCP-серверу с печатью списка инструментов"
-    testClassesDirs = sourceSets["test"].output.classesDirs
-    classpath = sourceSets["test"].runtimeClasspath
-    filter { includeTestsMatching("com.osvin.aichallenge.mcp.McpDemoTest") }
-    // Только печать демонстрации: статусы тестов в консоль не нужны.
-    testLogging { events("standardOut") }
-    outputs.upToDateWhen { false }
 }

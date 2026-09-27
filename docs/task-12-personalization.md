@@ -137,7 +137,7 @@
 | `agent/.../ProfileStore.kt` | `ProfileStore`, `InMemoryProfileStore` |
 | `agent/.../LlmAgent.kt` | `AgentOptions.profile`, системное сообщение профиля, строка «профиль: N ток.» |
 | `agent/.../TokenReport.kt` | `profile_tokens` |
-| `server/.../profile/JsonFileProfileStore.kt` | файловое хранилище профиля |
+| `server/.../profile/JsonFileProfileStore.kt` | файловое хранилище профиля (день 16 перенёс файл в `:agent` — `agent/.../profile/`, пакет тот же) |
 | `server/.../Application.kt` | стор, `GET`/`PUT /v1/profile`, чтение профиля на каждый запрос |
 | `server/.../ChatRequestOptions.kt` | `ChatRequest.toAgentOptions(profile)` |
 | `app/shared/.../data/UserProfile.kt` | копия модели на клиенте |

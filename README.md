@@ -973,25 +973,31 @@ DeepSeek API error: 400 Bad Request - {"error":{"message":"This model's maximum 
 
 До этого дня агент собирал данные проекта своим кодом и вкладывал их в запрос. MCP меняет способ: данные объявляются **инструментами**, и клиент спрашивает у сервера, что у него есть. День 16 — подключение: клиент запускает MCP-сервер процессом (транспорт stdio — так подключают большинство серверов в мире: у сервера не адрес, а команда запуска), проходит рукопожатие и получает список инструментов с описаниями и схемами аргументов.
 
-**Результат:** код, который подключается к MCP и выводит список доступных инструментов — `./gradlew :server:mcpDemo`.
+**Результат:** код, который подключается к MCP и выводит список доступных инструментов — `./gradlew :mcp:mcpDemo`.
 
-Ставится `io.modelcontextprotocol:kotlin-sdk-client` 0.15.0 в агент и `kotlin-sdk-server` 0.15.0 в серверный модуль: версия одна на оба конца протокола, иначе в одном проекте оказались бы две реализации разбора кадров. SDK требует более новых общих библиотек, чем было в каталоге, поэтому `kotlinx-serialization-json` поднят 1.6.0 → 1.11.0, `kotlinx-coroutines-core` 1.7.3 → 1.11.0, добавлен `kotlinx-io-core` 0.9.1 (кадры stdio — потоки байтов); версии подняты в каталоге явно, а не «как разрешит Gradle», и проверены всеми тремя наборами тестов и сборкой APK.
+Оба конца протокола (`kotlin-sdk-client` 0.15.0 и `kotlin-sdk-server` 0.15.0) ставятся в **отдельный модуль `:mcp`**: версия одна на оба конца, иначе в одном проекте оказались бы две реализации разбора кадров. SDK требует более новых общих библиотек, чем было в каталоге, поэтому `kotlinx-serialization-json` поднят 1.6.0 → 1.11.0, `kotlinx-coroutines-core` 1.7.3 → 1.11.0, добавлен `kotlinx-io-core` 0.9.1 (кадры stdio — потоки байтов); версии подняты в каталоге явно, а не «как разрешит Gradle», и проверены всеми четырьмя наборами тестов и сборкой APK.
 
-Подключаться есть к кому: сервер проекта сам стал MCP-сервером (`server/.../mcp/ProjectMcpServer.kt`) и отдаёт по протоколу свои же данные — только на чтение, из тех же хранилищ, что сервер приложения.
+**MCP — не часть агента и не часть серверного приложения.** Сначала клиент стоял в `:agent`, а сервер — в `:server`; и то и другое неверно. Агент — логика работы с моделью: он не должен меняться, когда меняется транспорт или версия MCP-клиента, поэтому про MCP он не знает вовсе, а зависимость направлена в обратную сторону (`:mcp` → `:agent`) — инструменты отдают данные проекта, типы которых описывает агент. Серверное приложение — HTTP-маршруты для приложения и человека; локальный MCP-сервер — отдельная точка входа со своим жизненным циклом (процесс, stdio, выход по концу входного потока), и в модуле приложения он значил бы, что модуль приложения отвечает за два разных сервера. Заодно файловые хранилища переехали из `:server` в `:agent`: это реализации контрактов, объявленных агентом (`InvariantStore`, `ProfileStore`, `MemoryStore`), и потребителей у них теперь двое — приложение и MCP-сервер; пакеты не изменились, поэтому приложение собирает их по-прежнему, а MCP-сервер читает те же файлы, что и приложение, и ответ инструмента не расходится с ответом маршрута.
+
+**MCP не заменяет сервер приложения, и замены не было.** `:server` остался Ktor-приложением (`:server:run`, `Main-Class` `com.osvin.aichallenge.ApplicationKt`), MCP-сервер — вторая точка входа рядом, а `:mcp` от `:server` не зависит вовсе. Причина в потребителях: HTTP-маршруты нужны приложению и человеку — Compose-клиент читает и правит состояние, шторка профиля пишет предпочтения, и всё это с кодами ответа и контрактом, который держит код, а не языковая модель; MCP нужен агенту — это способ отдать модели список инструментов и вызвать их (процесс на stdio против слушающего порта, у каждого своя роль). Права тоже разные: MCP-сервер проекта только читает правила и профиль, а запись осталась маршрутам `POST`/`PUT`, потому что менять состояние — решение человека. Подключиться к MCP-серверу можно и сторонним клиентом: `./gradlew :mcp:jar && java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (запускать из каталога, рядом с которым лежит `data/`, либо указать путь переменной `INVARIANT_FILE`).
+
+Подключаться есть к кому: сервер проекта сам стал MCP-сервером (`mcp/.../ProjectMcpServer.kt`) и отдаёт по протоколу свои же данные — только на чтение, из тех же хранилищ, что сервер приложения.
 
 | Инструмент | Что отдаёт | Аргумент |
 | --- | --- | --- |
 | `list_invariants` | правила проекта (инварианты): вид правила и формулировка | `profile_id` — чей набор; необязательный |
 | `user_profile` | профиль пользователя: объявленные предпочтения | `profile_id`; необязательный |
 
-**Соединение — это рукопожатие, а не «процесс запустился».** Клиент ждёт `initialize` → `initialized` с ограничением по времени (молчащий сервер не должен вешать вызывающего), и только потом спрашивает инструменты. Процессом владеет тот, кто его поднял: закрытие сессии закрывает транспорт, потом процесс, а если сервер не вышел сам — силой; неудачное рукопожатие гасит процесс там же, чтобы не осталось сироты. Поток ошибок сервера идёт вызывающему построчно, потому что его поток вывода занят протоколом. Список инструментов спрашивается каждый раз и не кэшируется: живой сервер может его менять. Схему разбирает клиент — имена, типы и обязательность аргументов объявляет сервер, своих мы не придумываем.
+**Соединение — это рукопожатие, а не «процесс запустился».** Клиент ждёт `initialize` → `initialized` с ограничением по времени (молчащий сервер не должен вешать вызывающего), и только потом спрашивает инструменты. Процессом владеет тот, кто его поднял: закрытие сессии закрывает транспорт, потом процесс, а если сервер не вышел сам — силой; неудачное рукопожатие гасит процесс там же, чтобы не осталось сироты. Поток ошибок сервера идёт вызывающему построчно, потому что его поток вывода занят протоколом. Список инструментов спрашивается каждый раз и не кэшируется: живой сервер может его менять. Конец входного потока — конец работы сервера: транспорт при естественной остановке закрывает вход и выход сам, поэтому `main` только ждёт её и `Server.close()` после неё не зовёт — служба уведомлений SDK в этом состоянии завершается через раз (уведомление о конце уходит в поток без буфера и висит, если подписчик занят отправкой в уже остановленный транспорт), и с закрытием процесс висел в трёх прогонах из пяти, а без него выходит каждый раз. Схему разбирает клиент — имена, типы и обязательность аргументов объявляет сервер, своих мы не придумываем.
 
 **Стандартный вывод — это протокол, и он отдан протоколу целиком.** Первый прогон упал именно на этом: `kotlin-logging` печатает приветствие в stdout, клиент разобрал его как сообщение протокола (`Failed to deserialize message from line: kotlin-logging: initializing…`) и потерял бы ответ. Поэтому сервер не «старается не печатать» в stdout, а забирает его: прежний `System.out` уходит транспорту, а `System.out` процесса перенаправляется в поток ошибок — печатать в канал протокола больше не может никто, а логи сервера идут в stderr (`warn` для чужого, `info` для своего).
 
-**Демонстрация** — `McpDemoTest` (`./gradlew :server:mcpDemo`): клиент поднимает сервер проекта процессом, проходит рукопожатие, печатает список инструментов, вызывает один из них и закрывает сессию.
+**Демонстрация** — `McpDemoTest` (`./gradlew :mcp:mcpDemo`): клиент поднимает сервер проекта процессом, проходит рукопожатие, печатает список инструментов, вызывает один из них и закрывает сессию.
 
 ```
 [agent] === MCP: подключение к серверу проекта ===
+[agent] хранилище сервера: временный файл правил, правил 2
+[agent] сервер: kotlin-logging: initializing... active logger factory: Slf4jLoggerFactory
 [agent] соединение установлено: ai-challenge-project 1.0.0
 [agent] сервер объявил инструменты: да
 [agent] получено инструментов: 2
@@ -1001,16 +1007,16 @@ DeepSeek API error: 400 Bad Request - {"error":{"message":"This model's maximum 
 [agent] инструмент 2/2: user_profile
 [agent]   Профиль пользователя: объявленные им предпочтения — кто он, на чём пишет и каким хочет видеть ответ.
 [agent]   аргументы: profile_id: string, необязательный
-[agent] вызов list_invariants: правил 4, первое — architecture: один общий код на Kotlin Multiplatform в commonMain и тонкие…
+[agent] вызов list_invariants: правил 2, первое — stack: правило из файла: версия MCP SDK одна на оба конца протокола
 [agent] сессия закрыта: серверный процесс остановлен
 [agent] список сверен со спецификацией сервера: 2 инструмента, схемы совпали
 ```
 
-Ожидаемый список демонстрация берёт из `ProjectMcpServer.tools` — той же спецификации, по которой сервер регистрирует инструменты: копии «как должно быть у клиента» рядом с настоящей спецификацией нет. Вызов инструмента добавлен, чтобы список не остался декларацией: ответ разбирается в правила проекта теми же типами, что и у сервера.
+Ожидаемый список демонстрация берёт из `ProjectMcpServer.tools` — той же спецификации, по которой сервер регистрирует инструменты: копии «как должно быть у клиента» рядом с настоящей спецификацией нет. Вызов инструмента добавлен, чтобы список не остался декларацией, и сервер при этом запускается с `INVARIANT_FILE` на временный файл с двумя правилами, которых в умолчаниях проекта нет: ответ разбирается в правила проекта теми же типами, что и у сервера, и сверяется с этим файлом целиком. Слабое утверждение («правил непусто») прошло бы и на умолчаниях — то есть не заметило бы инструмента, который хранилище не читает.
 
 **Проверка против сторонней реализации.** Проверка «наш клиент против нашего сервера» доказывала бы, что SDK понимает сам себя, поэтому отдельным разовым прогоном (файл в репозиторий не вошёл) клиент подключался к MCP-серверу на чистом Python без SDK: рукопожатие, `tools/list`, `tools/call`. Пришли `echo` и `sum`, обязательные аргументы прочитались как `text: string (required)`, `a: number (required)`, `b: number (required)` — клиент говорит по протоколу, а не только со своим SDK. Заодно это единственная проверка ветки обязательного аргумента: у инструментов проекта аргумент необязательный, поэтому на разбор схемы поставлен `McpToolTest`.
 
-**Проверка.** `:agent:test` — 89 тестов (два живых этапа пропущены без ключа), `:server:test` — 10, `:app:shared:testAndroidHostTest` — 19, APK собирается: 118 проверок, падений нет. Новых тестов день написал три: демонстрация подключения и два на разбор схемы инструмента.
+**Проверка.** `:agent:test` — 90 тестов (два живых этапа пропущены без ключа; сюда добавился переехавший `JsonFileMemoryStoreTest`), `:mcp:test` — 3, `:server:test` — 6, `:app:shared:testAndroidHostTest` — 19, APK собирается: 118 проверок, падений нет. Новых тестов день написал три: демонстрация подключения и два на разбор схемы инструмента; остальные переехали вместе с кодом (два — в `:mcp`, хранилище — в `:agent`).
 
 Что осталось непроверенным: инструменты не подставляются в запрос к модели (вызовы инструментов моделью — следующий шаг), сторонний сервер проверен на написанном для этого сервере без SDK, а `npx`-серверы — нет: в окружении не установлен `node`; HTTP-транспорт (`StreamableHttpClientTransport`) в этот день не проверялся.
 
@@ -1040,13 +1046,21 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 * [/agent](./agent/src/main/kotlin) is a separate module with the LLM agent logic: the `LlmAgent` itself,
   the `LlmClient` transport contract, the Ktor `DeepSeekClient` implementation, the message assembly
-  and the DeepSeek API DTOs. The server depends on it and only adapts HTTP. It also holds the MCP
-  client (`agent/.../mcp/McpClient.kt`): it starts an MCP server as a child process, speaks stdio
-  JSON-RPC to it and returns the tools the server declares.
+  and the DeepSeek API DTOs. The server depends on it and only adapts HTTP. It also holds the state
+  stores: the `InvariantStore`/`ProfileStore`/`MemoryStore` contracts with their in-memory and
+  file-backed implementations (`agent/.../{invariants,profile,memory}/JsonFile*Store.kt`), because
+  both the app server and the MCP server read them. It knows nothing about MCP: the protocol lives in
+  `:mcp`.
+
+* [/mcp](./mcp/src/main/kotlin) is the MCP layer of the project, a separate module on purpose —
+  neither the agent nor the app server owns it. It holds the client (`McpClient.kt`): it starts an MCP
+  server as a child process, speaks stdio JSON-RPC to it and returns the tools that server declares;
+  and the local MCP server (`ProjectMcpServer.kt`): the project data declared as read-only MCP tools.
+  It depends on `:agent` for those data types; `:server` does not depend on it at all.
 
 * [/server](./server/src/main/kotlin) is for the Ktor server application: HTTP routes, server plugins
-  and the client-facing request/response models. It also holds the local MCP server
-  (`server/.../mcp/ProjectMcpServer.kt`): the project data, declared as MCP tools.
+  and the client-facing request/response models. It stays a plain HTTP app: MCP did not replace it,
+  and they serve different consumers (HTTP — the app and the human, MCP — the agent).
 
 ### Running the apps
 
@@ -1054,7 +1068,8 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 
 - Android app: `./gradlew :app:androidApp:assembleDebug`
 - Server: `./gradlew :server:run`
-- MCP connection demo (agent connects to the project MCP server, prints its tools): `./gradlew :server:mcpDemo`
+- MCP connection demo (the client connects to the project MCP server, prints its tools): `./gradlew :mcp:mcpDemo`
+- MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:jar` then `java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt`
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
   - JS target (slower, supports older browsers): `./gradlew :app:webApp:jsBrowserDevelopmentRun`

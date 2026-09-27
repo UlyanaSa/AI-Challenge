@@ -1,4 +1,4 @@
-package com.osvin.aichallenge.agent.mcp
+package com.osvin.aichallenge.mcp
 
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.StdioClientTransport

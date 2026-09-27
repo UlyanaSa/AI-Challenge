@@ -1,4 +1,4 @@
-package com.osvin.aichallenge.agent.mcp
+package com.osvin.aichallenge.mcp
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

@@ -4,10 +4,7 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import com.osvin.aichallenge.agent.DEFAULT_PROFILE
 import com.osvin.aichallenge.agent.Invariant
-import com.osvin.aichallenge.agent.mcp.McpTool
-import com.osvin.aichallenge.agent.mcp.McpToolArgument
-import com.osvin.aichallenge.agent.mcp.localMcpServerConfig
-import com.osvin.aichallenge.agent.mcp.openMcpSession
+import com.osvin.aichallenge.agent.InvariantKind
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlin.test.Test
@@ -15,7 +12,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
 
@@ -38,8 +37,15 @@ class McpDemoTest {
     fun `агент видит инструменты MCP-сервера`() = runBlocking {
         quietProtocolLogs()
         stage("MCP: подключение к серверу проекта")
+        val rulesInStore = listOf(
+            Invariant(InvariantKind.STACK.wire, "правило из файла: версия MCP SDK одна на оба конца протокола"),
+            Invariant(InvariantKind.BUSINESS.wire, "правило из файла: данные пользователя не уходят третьим лицам")
+        )
+        val invariantsFile = invariantsFile(rulesInStore)
+        log("хранилище сервера: временный файл правил, правил ${rulesInStore.size}")
         val session = openMcpSession(
-            localMcpServerConfig(mainClass = "com.osvin.aichallenge.mcp.ProjectMcpServerKt"),
+            localMcpServerConfig(mainClass = "com.osvin.aichallenge.mcp.ProjectMcpServerKt")
+                .copy(env = mapOf("INVARIANT_FILE" to invariantsFile.absolutePath)),
             onServerStderr = { log("сервер: $it") }
         )
         val tools = try {
@@ -52,12 +58,13 @@ class McpDemoTest {
             listed.forEachIndexed { index, tool -> printTool(index + 1, listed.size, tool) }
 
             // Список — это объявление; вызов показывает, что за ним стоит настоящий инструмент:
-            // ответ разбирается в правила проекта теми же типами, что и у сервера.
+            // ответ разбирается в правила проекта теми же типами, что и у сервера, и сверяется
+            // с набором в хранилище — тест упал бы, ответь инструмент умолчаниями проекта.
             val answer = session.client.callTool("list_invariants", mapOf("profile_id" to DEFAULT_PROFILE))
             val rules = Json.decodeFromString<List<Invariant>>(answer.text())
-            assertTrue(rules.isNotEmpty(), "инструмент list_invariants вернул пустой набор правил")
+            assertEquals(rulesInStore, rules, "инструмент вернул не то, что лежит в его хранилище")
             val first = rules.first()
-            log("вызов list_invariants: правил ${rules.size}, первое — ${first.kind}: ${first.value.take(60)}…")
+            log("вызов list_invariants: правил ${rules.size}, первое — ${first.kind}: ${first.value}")
             listed
         } finally {
             session.close()
@@ -81,6 +88,19 @@ class McpDemoTest {
             )
         }
         log("список сверен со спецификацией сервера: ${tools.size} инструмента, схемы совпали")
+    }
+
+    /**
+     * Файл правил для серверного процесса: путь к хранилищу сервер берёт из переменной
+     * окружения (`INVARIANT_FILE`), как и при обычном запуске. Набор нарочно не похож
+     * на умолчания проекта: ответ инструмента должен прийти из этого файла, а не из них.
+     */
+    private fun invariantsFile(rules: List<Invariant>): File {
+        val file = File.createTempFile("invariants", ".json")
+        file.deleteOnExit()
+        val stored: Map<String, Map<String, List<Invariant>>> = mapOf("profiles" to mapOf(DEFAULT_PROFILE to rules))
+        file.writeText(Json.encodeToString(stored))
+        return file
     }
 
     /** Инструмент глазами клиента: имя, описание и аргументы из схемы сервера. */

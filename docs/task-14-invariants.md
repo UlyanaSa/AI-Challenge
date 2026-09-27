@@ -89,7 +89,7 @@
 | `agent/.../InvariantGuard.kt` | служебный вызов проверки конфликта и сборка правила отказа |
 | `agent/.../LlmAgent.kt` | блок правил и сообщение проверки в запросе, отчёт, лог |
 | `agent/.../TokenReport.kt` | блок `invariants` в отчёте ответа |
-| `server/.../invariants/JsonFileInvariantStore.kt` | файловое хранилище: различает «не задавали» и «правил нет» |
+| `server/.../invariants/JsonFileInvariantStore.kt` | файловое хранилище: различает «не задавали» и «правил нет» (день 16 перенёс файл в `:agent` — `agent/.../invariants/`, пакет тот же) |
 | `server/.../Application.kt` | маршруты, набор проекта при первом запуске |
 | `server/.../models/InvariantWriteRequest.kt` | тело объявления правила |
 | `app/shared/.../data/Invariant.kt`, `data/InvariantReport.kt` | копии моделей на клиенте |
