@@ -162,7 +162,7 @@ class GitHubToolsClientTest {
         }
         val chat = repository.createChat()
 
-        repository.callGitHubTool("get_repositories", """{"visibility":"private"}""")
+        repository.callGitHubTool("get_repositories", mapOf("visibility" to "private"))
 
         val record = repository.messages.value.last()
         assertEquals(MessageRole.TOOL, record.role)
@@ -176,6 +176,36 @@ class GitHubToolsClientTest {
 
         // Запись сохранена, а не только показана: после перезапуска видно, откуда взялись данные
         assertEquals(MessageRole.TOOL, store.messages(chat.id).last().role)
+    }
+
+    /**
+     * Инструмент без аргументов вызывается как есть: в ленте появляется тот же пустой
+     * объект, что ушёл серверу. Проверка отдельная потому, что у состояния доступа
+     * аргументов нет вовсе, и такой вызов — не исключение, а обычный путь: пустые
+     * аргументы не должны ни отсекаться, ни подменяться умолчаниями по дороге.
+     */
+    @Test
+    fun toolWithoutArgumentsIsCalledAndRecorded() = runBlocking {
+        val requests = mutableListOf<HttpRequestData>()
+        val repository = newRepository(requests, InMemoryChatStore()) { request ->
+            when (request.url.encodedPath) {
+                "/v1/github/call" -> CALL_RESPONSE to HttpStatusCode.OK
+                else -> CHAT_RESPONSE to HttpStatusCode.OK
+            }
+        }
+        repository.createChat()
+
+        repository.callGitHubTool("github_access", emptyMap())
+
+        val call = repository.messages.value.last().tools.single()
+        assertEquals("github_access", call.name)
+        assertEquals("{}", call.arguments)
+        assertEquals("github_access {}", call.command())
+
+        // Тело запроса тоже несёт пустой объект: отсутствие поля сервер прочитал бы как
+        // «аргументы не прислали», а это уже другой запрос
+        val body = (requests.last { it.url.encodedPath == "/v1/github/call" }.body as TextContent).text
+        assertTrue(body.contains("\"arguments\":{}"), "в теле запроса нет пустых аргументов: $body")
     }
 
     /**
@@ -196,7 +226,7 @@ class GitHubToolsClientTest {
         val chat = repository.createChat()
 
         repository.sendMessage("Покажи репозитории")
-        repository.callGitHubTool("get_repositories", """{"visibility":"all"}""")
+        repository.callGitHubTool("get_repositories", mapOf("visibility" to "all"))
         repository.sendMessage("И что там")
 
         val sent = lastChatRequest(requests)

@@ -1,6 +1,9 @@
 package com.osvin.aichallenge.ui.components
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -8,15 +11,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.osvin.aichallenge.data.GitHubConnection
@@ -46,7 +47,7 @@ import com.osvin.aichallenge.data.GitHubToolArgument
  *        отсутствие доступа сервер не кэширует, поэтому токен, подложенный на машине
  *        за это время, подхватится без перезапуска приложения.
  * @param onDisconnect Отключение от MCP-сервера.
- * @param onCall Вызов инструмента: имя и аргументы строкой JSON, как их набрал человек.
+ * @param onCall Вызов инструмента: имя и выбранные варианты аргументов.
  */
 @Composable
 fun GitHubSheet(
@@ -54,7 +55,7 @@ fun GitHubSheet(
     error: String?,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onCall: (String, String) -> Unit,
+    onCall: (String, Map<String, String>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -135,25 +136,35 @@ fun GitHubSheet(
 }
 
 /**
- * Раздел инструмента: имя и описание, объявленные аргументы и поле вызова.
+ * Раздел инструмента: имя и описание, выбор вариантов и кнопка вызова.
  *
  * Аргументы печатаются объявлением сервера, а не разбором схемы на клиенте: имя, тип,
  * обязательность, пояснение и допустимые значения уже пришли готовыми, и второй разбор
- * JSON-схемы разошёлся бы с тем, что сервер обещает модели. Аргументы вводятся строкой
- * JSON, а не полями по одному: так вызов выглядит так же, как его присылает модель,
- * и подстановка значений с проверкой типа не нужна.
+ * JSON-схемы разошёлся бы с тем, что сервер обещает модели.
  *
- * Набранные аргументы — обычное состояние на инструмент с ключом по имени: список
- * инструментов переспрашивается при переподключении, и без ключа строка переехала бы
- * на чужой инструмент. Переживать пересоздание экрана ей незачем: она уходит вызовом
- * или пропадает.
+ * Значение выбирается из перечисленных, а не набирается строкой JSON: у аргумента вида
+ * «какие репозитории вернуть» свободы нет — сервер принимает три значения и сам их назвал,
+ * — и поле ввода предлагало бы набрать то, чего не существует, а отказ прилетал бы
+ * за опечатку в имени поля или в значении. Выбор стоит одного нажатия, и перед вызовом
+ * видно, что именно уйдёт. Первое объявленное значение отмечено заранее: выбор без отметки
+ * не читается с экрана, а «какое значение уйдёт» должно быть видно до нажатия.
+ *
+ * Выбор — обычное состояние на инструмент с ключом по имени: список инструментов
+ * переспрашивается при переподключении, и без ключа выбор переехал бы на чужой инструмент.
+ * Переживать пересоздание экрана ему незачем: он уходит вызовом или пропадает.
+ *
+ * @param tool Инструмент из снимка: имя, описание и объявленные аргументы.
+ * @param onCall Вызов инструмента: имя и выбранные значения аргументов.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun GitHubToolSection(
     tool: GitHubTool,
-    onCall: (String, String) -> Unit
+    onCall: (String, Map<String, String>) -> Unit
 ) {
-    var arguments by remember(tool.name) { mutableStateOf("") }
+    // В состоянии лежит только то, что выбрал человек: значение по умолчанию берётся
+    // из объявления в момент показа, поэтому писать в состояние из отрисовки не нужно
+    val chosen = remember(tool.name) { mutableStateMapOf<String, String>() }
 
     Spacer(Modifier.height(12.dp))
     Text(
@@ -166,22 +177,53 @@ private fun GitHubToolSection(
     }
     if (tool.arguments.isEmpty()) {
         githubText("аргументов нет: инструмент вызывается без них")
-    } else {
-        tool.arguments.forEach { argument ->
-            githubText(argument.label())
+    }
+
+    tool.arguments.forEach { argument ->
+        githubText(argument.label())
+        if (argument.values.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                argument.values.forEach { value ->
+                    FilterChip(
+                        // Отмечено либо выбранное человеком, либо первое объявленное
+                        selected = chosen[argument.name]?.let { it == value }
+                            ?: (value == argument.values.first()),
+                        onClick = { chosen[argument.name] = value },
+                        label = { Text(value) }
+                    )
+                }
+            }
         }
     }
 
+    // Аргумент без объявленных значений выбрать нечем: свободного ввода здесь нет намеренно,
+    // поэтому о нём говорится словами, а если он к тому же обязателен, вызов заведомо
+    // не пройдёт — и кнопка не показывается вовсе, чтобы не звать в тупик
+    val unlisted = tool.arguments.filter { it.values.isEmpty() }
+    unlisted.forEach { argument ->
+        githubText(
+            if (argument.required) {
+                "вызвать из шторки нельзя: значения аргумента «${argument.name}» не объявлены"
+            } else {
+                "аргумент «${argument.name}» пойдёт без значения: сервер его значения не объявил"
+            }
+        )
+    }
+    if (unlisted.any { it.required }) {
+        return
+    }
+
     Spacer(Modifier.height(4.dp))
-    OutlinedTextField(
-        value = arguments,
-        onValueChange = { arguments = it },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("Аргументы (JSON)") },
-        supportingText = { Text(tool.argumentsHint()) },
-        maxLines = 3
-    )
-    Button(onClick = { onCall(tool.name, arguments) }) {
+    Button(
+        onClick = {
+            onCall(
+                tool.name,
+                tool.arguments
+                    .filter { it.values.isNotEmpty() }
+                    .associate { it.name to (chosen[it.name] ?: it.values.first()) }
+            )
+        }
+    ) {
         Text("Выполнить")
     }
 }
@@ -239,35 +281,13 @@ private fun githubAccess(connection: GitHubConnection, onConnect: () -> Unit) {
 }
 
 /**
- * Строка аргумента инструмента: имя, тип, обязательность, пояснение и допустимые значения —
- * ровно то, что о нём сказал сервер. Отсутствующий тип печатается словами, а не пропуском:
- * на месте пустоты читалось бы, что тип не важен.
+ * Строка аргумента инструмента: имя, тип, обязательность и пояснение — ровно то, что
+ * о нём сказал сервер. Отсутствующий тип печатается словами, а не пропуском: на месте
+ * пустоты читалось бы, что тип не важен. Допустимые значения здесь не повторяются: их
+ * несёт выбор под этой строкой, и тот же список двумя строками подряд читался бы как
+ * две разные вещи.
  */
 private fun GitHubToolArgument.label(): String {
     val head = "$name (${type ?: "тип не назван"}, ${if (required) "обязательный" else "необязательный"})"
-    val details = listOfNotNull(
-        description,
-        values.takeIf { it.isNotEmpty() }
-            ?.joinToString(separator = " | ", prefix = "значения: ")
-    )
-    return if (details.isEmpty()) head else "$head — ${details.joinToString("; ")}"
-}
-
-/**
- * Подсказка к полю аргументов: пример собирается из объявления самого инструмента, а не
- * пишется литералом. Литерал рано или поздно назвал бы поле, которого у инструмента нет,
- * и человек набирал бы по подсказке заведомо неверный вызов.
- */
-private fun GitHubTool.argumentsHint(): String {
-    val sample = arguments.firstOrNull()
-        ?: return "Аргументов у инструмента нет: поле можно оставить пустым"
-    val value = sample.values.firstOrNull()?.let { "\"$it\"" }
-        ?: when (sample.type) {
-            "integer", "number" -> "0"
-            "boolean" -> "true"
-            // Тип не назван или это строка: подставляется слово-заглушка в кавычках,
-            // потому что без кавычек пример строки выглядел бы нерабочим JSON
-            else -> "\"значение\""
-        }
-    return "Например: {\"${sample.name}\": $value}; пусто — без аргументов"
+    return if (description == null) head else "$head — $description"
 }

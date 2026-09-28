@@ -312,15 +312,15 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Вызов инструмента GitHub с аргументами, которые набрал человек. Результат остаётся
-     * в ленте служебной записью, а причина отказа — строкой ошибки: диалог при этом
+     * Вызов инструмента GitHub с вариантами аргументов, которые выбрал человек. Результат
+     * остаётся в ленте служебной записью, а причина отказа — строкой ошибки: диалог при этом
      * продолжается.
      *
      * @param name Имя инструмента из снимка.
-     * @param arguments Аргументы строкой JSON; пусто — инструмент вызывается
-     *        со своими умолчаниями.
+     * @param arguments Выбранные значения по именам аргументов; пустая карта — инструмент
+     *        вызывается без аргументов (у него их нет или объявленных значений не было).
      */
-    fun callGitHubTool(name: String, arguments: String = "") {
+    fun callGitHubTool(name: String, arguments: Map<String, String> = emptyMap()) {
         viewModelScope.launch {
             repository.callGitHubTool(name, arguments)
         }

@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.random.Random
 
 /**
@@ -941,22 +942,27 @@ class ChatRepository(
      * та же, что у отправки сообщения.
      *
      * @param name Имя инструмента из снимка ([GitHubTool.name]).
-     * @param arguments Аргументы строкой JSON, как их набрал человек; пусто — инструмент
-     *        вызывается со своими умолчаниями.
+     * @param arguments Значения аргументов по именам — те, что человек выбрал из объявленных;
+     *        пустая карта — вызов без аргументов (у инструмента их нет либо все его
+     *        аргументы без объявленных значений).
      */
-    suspend fun callGitHubTool(name: String, arguments: String = "") {
+    suspend fun callGitHubTool(name: String, arguments: Map<String, String>) {
         val chat = _activeChat.value
         if (chat == null) {
             _state.value = ChatUiState.Error("Чат не выбран")
             return
         }
-        // Мусор в аргументах — это отказ без запроса: причина уже в [githubError]
-        val parsed = parseToolArguments(arguments) ?: return
+        // Аргументы собираются из выбранных вариантов, а не разбираются из набранного текста:
+        // строка JSON, написанная руками, могла не быть объектом, и отказ прилетал бы
+        // за опечатку, а не за вызов. Типизировать аргументы классом на клиенте всё равно
+        // нечем — набор полей у каждого инструмента свой ([GitHubToolArgument]), — поэтому
+        // здесь свободный JSON-объект из готовых значений.
+        val payload = JsonObject(arguments.mapValues { JsonPrimitive(it.value) })
 
         try {
             val response = client.post("$baseUrl/v1/github/call") {
                 contentType(ContentType.Application.Json)
-                setBody(GitHubCallRequest(name = name, arguments = parsed))
+                setBody(GitHubCallRequest(name = name, arguments = payload))
             }
             if (response.status.isSuccess()) {
                 val call = response.body<GitHubCallResponse>()
@@ -972,9 +978,8 @@ class ChatRepository(
                     tools = listOf(
                         ToolCallRecord(
                             name = name,
-                            // Пустые аргументы записываются как отправленный пустой объект:
-                            // в ленте видно ровно то, что ушло серверу
-                            arguments = arguments.ifBlank { EMPTY_ARGUMENTS },
+                            // В ленте видно ровно то, что ушло серверу
+                            arguments = payload.toString(),
                             result = call.result,
                             failed = call.failed
                         )
@@ -993,25 +998,6 @@ class ChatRepository(
         } catch (e: Exception) {
             _githubError.value = e.message ?: "Сетевая ошибка"
         }
-    }
-
-    /**
-     * Аргументы инструмента из строки, которую набрал человек.
-     *
-     * Набор полей у каждого инструмента свой ([GitHubToolArgument]), поэтому типизировать
-     * аргументы общим классом на клиенте нечем — разбирается свободный JSON-объект.
-     * Пустая строка — пустой объект: инструмент вызывается со своими умолчаниями,
-     * и тело запроса всё равно должно быть. Не JSON или не объект (например, массив) —
-     * запрос не уходит вовсе: сервер на такой аргумент ответит невнятно, а причину
-     * видно и без сети, сразу после нажатия.
-     */
-    private fun parseToolArguments(arguments: String): JsonObject? {
-        if (arguments.isBlank()) return JsonObject(emptyMap())
-        val parsed = runCatching { Json.parseToJsonElement(arguments) }.getOrNull() as? JsonObject
-        if (parsed == null) {
-            _githubError.value = "Аргументы инструмента — не JSON-объект"
-        }
-        return parsed
     }
 
     /**
@@ -1083,11 +1069,5 @@ class ChatRepository(
 
         /** Сколько символов первого сообщения попадает в заголовок списка. */
         const val TITLE_LIMIT = 40
-
-        /**
-         * Аргументы вызова инструмента, когда человек их не задал: пустой объект —
-         * инструмент вызывается со своими умолчаниями, и именно это уходит серверу.
-         */
-        const val EMPTY_ARGUMENTS = "{}"
     }
 }
