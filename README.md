@@ -983,6 +983,21 @@ DeepSeek API error: 400 Bad Request - {"error":{"message":"This model's maximum 
 
 Подключаться есть к кому: сервер проекта сам стал MCP-сервером (`mcp/.../ProjectMcpServer.kt`) и отдаёт по протоколу свои же данные — только на чтение, из тех же хранилищ, что сервер приложения.
 
+**Сервер можно запустить службой и остановить** — `mcp/mcp-server.sh` (`start`, `stop`, `restart`, `status`, `tools`, `logs`, `frames`). Это нужно потому, что stdio-сервер живёт ровно столько, сколько живёт клиент, и посмотреть на работающий сервер иначе нельзя: скрипт поднимает его фоном, держит открытым канал ввода (именованный канал, FIFO), пишет кадры протокола и логи в файлы, а `status` проверяет не процесс, а ответ на `tools/list` по протоколу. Сторонний клиент к такому процессу не подключается — клиенты MCP поднимают сервер сами; служба нужна человеку: увидеть сервер, проверить его и положить кадр в протокол руками.
+
+```
+$ ./mcp/mcp-server.sh start
+сервер запущен: pid 54723
+  данные:      …/server/data
+  логи:        mcp/build/mcp-server/server.log
+  кадры:       mcp/build/mcp-server/frames.log
+$ ./mcp/mcp-server.sh status
+сервер работает: pid 54723, запущен 4 с назад
+сервер отвечает: кадров получено на 1077 байт
+$ ./mcp/mcp-server.sh stop
+сервер остановлен: pid 54723
+```
+
 **«Что у тебя есть» — это команда, а не печать во время работы.** В рабочем режиме стандартный вывод сервера занят протоколом, и список инструментов, напечатанный туда, ушёл бы клиенту мусором вместо кадра. Поэтому список печатает отдельный режим — флаг `--list-tools`: сервер поднимается, отвечает на вопрос о своих инструментах и выходит, не открывая ни транспорта, ни хранилищ (печатать список можно и без данных):
 
 ```
@@ -1090,6 +1105,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Server: `./gradlew :server:run`
 - MCP connection demo (the client connects to the project MCP server, prints its tools): `./gradlew :mcp:mcpDemo`
 - MCP server tools, no connection (the server process prints what it declares and exits): `./gradlew :mcp:mcpTools`
+- MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`
 - MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:jar` then `java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (add `--list-tools` to print the tools instead of serving)
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
