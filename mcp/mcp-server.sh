@@ -23,10 +23,11 @@
 # на stdio, `--list-tools` — инструменты и выход). Запускается fat JAR, а не обычный jar
 # модуля: обычный — тонкий, и его берут те, кто зависит от модуля при компиляции.
 #
-# Серверов теперь два, и обслуживает их один скрипт: флаг `--server` выбирает, чей процесс
-# поднимать (`project` — данные проекта, `github` — инструмент get_repositories к GitHub API).
-# Механика у них одна — канал ввода, кадры, логи, остановка, — поэтому второй сервер здесь
-# не отдельный скрипт, а выбор модуля, точки входа и каталога состояния.
+# Серверов теперь три, и обслуживает их один скрипт: флаг `--server` выбирает, чей процесс
+# поднимать (`project` — данные проекта, `github` — инструмент get_repositories к GitHub API,
+# `currency` — сервис курсов с историей в SQLite и сбором по расписанию). Механика у них одна —
+# канал ввода, кадры, логи, остановка, — поэтому третий сервер здесь не отдельный скрипт,
+# а выбор модуля, точки входа и каталога состояния.
 #
 # Запускать сервер через Gradle нельзя, и это не забывчивость: Gradle пишет в стандартный
 # вывод процесса свои строки, а там кадры протокола. Поэтому инструмент — скрипт.
@@ -60,8 +61,15 @@ select_server() {
             MAIN="com.osvin.aichallenge.mcp.github.GitHubMcpServerKt"
             STATE="$GITHUB_DIR/build/mcp-server"
             ;;
+        currency)
+            MODULE=":currency-monitor"
+            CURRENCY_DIR="$ROOT/currency-monitor"
+            JAR="$CURRENCY_DIR/build/libs/currency-monitor-1.0.0-all.jar"
+            MAIN="com.osvin.aichallenge.currency.ApplicationKt"
+            STATE="$CURRENCY_DIR/build/mcp-server"
+            ;;
         *)
-            fail "неизвестный сервер: $SERVER (ожидается project или github)"
+            fail "неизвестный сервер: $SERVER (ожидается project, github или currency)"
             ;;
     esac
     # Собирается именно fat JAR: для запуска процессом нужен один файл со всеми
@@ -96,20 +104,20 @@ usage() {
     cat <<'USAGE'
 Локальные MCP-серверы проекта: запуск и остановка.
 
-  ./mcp/mcp-server.sh start [--server project|github] [--no-build] [--data-dir DIR]
-  ./mcp/mcp-server.sh stop [--server project|github]
-  ./mcp/mcp-server.sh restart [--server project|github] [--no-build] [--data-dir DIR]
-  ./mcp/mcp-server.sh status [--server project|github]
-  ./mcp/mcp-server.sh tools [--server project|github]
-  ./mcp/mcp-server.sh logs [--server project|github]
-  ./mcp/mcp-server.sh frames [--server project|github]
+  ./mcp/mcp-server.sh start [--server project|github|currency] [--no-build] [--data-dir DIR]
+  ./mcp/mcp-server.sh stop [--server project|github|currency]
+  ./mcp/mcp-server.sh restart [--server project|github|currency] [--no-build] [--data-dir DIR]
+  ./mcp/mcp-server.sh status [--server project|github|currency]
+  ./mcp/mcp-server.sh tools [--server project|github|currency]
+  ./mcp/mcp-server.sh logs [--server project|github|currency]
+  ./mcp/mcp-server.sh frames [--server project|github|currency]
 
   start    поднять сервер фоном: pid, канал, кадры и логи — в build/mcp-server модуля
   stop     остановить: SIGTERM, ожидание выхода, при упорстве SIGKILL
   restart  остановить и поднять снова
   status   работает ли и отвечает ли на tools/list (код возврата 1, если не запущен)
   tools    что сервер объявляет клиенту (для project — то же, что ./gradlew :mcp:mcpTools,
-           для github — :mcp-github:mcpTools)
+           для github — :mcp-github:mcpTools, для currency — :currency-monitor:mcpTools)
   logs     логи сервера — поток ошибок текущего запуска
   frames   кадры протокола — поток вывода текущего запуска
 
@@ -120,6 +128,12 @@ usage() {
            берутся из окружения самого скрипта (GITHUB_TOKEN, GITHUB_API_BASE) и
            передаются процессу сервера как есть; без токена сервер отвечает отказом
            на вызов инструмента, а не падает при запуске
+  currency сервис мониторинга курсов: get_currency_rates и get_currency_summary
+           (:currency-monitor). Поставщик курсов, путь к истории и промежуток обновления
+           берутся из окружения скрипта (CURRENCY_API_BASE, CURRENCY_DB, CURRENCY_INTERVAL);
+           по умолчанию — публичный источник ЦБ, файл currency.db рядом с процессом и час
+           между обновлениями. Сбор начинается сразу при запуске и идёт по расписанию, то
+           есть независимо от того, подключён ли клиент: отдельной команды «собирать» нет
 
 Опции start/restart:
   --no-build       не собирать fat JAR перед запуском (по умолчанию собирается)
@@ -343,7 +357,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --server)
             shift
-            [ $# -gt 0 ] || fail "--server требует имя: project или github"
+            [ $# -gt 0 ] || fail "--server требует имя: project, github или currency"
             SERVER="$1"
             ;;
         --no-build) NO_BUILD=1 ;;
@@ -367,9 +381,9 @@ done
 
 select_server
 
-# У сервера GitHub нет своих файлов данных: инструменты читают GitHub по токену, и
-# каталог данных к ним не относится. Молча принять опцию значило бы сделать вид, что
-# она что-то меняет.
+# У серверов GitHub и курсов нет файлов данных проекта: первый читает GitHub по токену,
+# второй ведёт свою историю в SQLite. Молча принять опцию значило бы сделать вид, что она
+# что-то меняет.
 if [ "$SERVER" != "project" ] && [ "$DATA_DIR_GIVEN" = "1" ]; then
     fail "--data-dir относится к серверу project: у сервера $SERVER своих файлов данных нет"
 fi

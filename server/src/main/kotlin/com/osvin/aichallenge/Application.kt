@@ -251,8 +251,15 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
  *        маршруты проверяются на настоящем MCP-процессе с подставным GitHub, а глобального
  *        изменяемого состояния в сервере не остаётся. Запуск без аргумента создаёт обычные
  *        инструменты, поэтому [main] этим значением не занимается.
+ * @param currencyTools Инструменты сервиса курсов — такое же общее состояние, и устроено оно
+ *        так же, с одним отличием: сессию открывает первый запрос к модели, а не человек
+ *        кнопкой, потому что у сервиса курсов нет ни доступа, который надо настроить, ни
+ *        состояния, которое надо показать (см. [CurrencyTools]).
  */
-fun Application.module(githubTools: GitHubTools = GitHubTools()) {
+fun Application.module(
+    githubTools: GitHubTools = GitHubTools(),
+    currencyTools: CurrencyTools = CurrencyTools()
+) {
     // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
         json(Json {
@@ -325,7 +332,10 @@ fun Application.module(githubTools: GitHubTools = GitHubTools()) {
     // его завершение — наша забота, иначе после остановки приложения в системе остался бы
     // висеть чужой процесс, которому больше некому отвечать.
     monitor.subscribe(ApplicationStopped) {
-        runBlocking { githubTools.close() }
+        runBlocking {
+            githubTools.close()
+            currencyTools.close()
+        }
     }
 
     routing {
@@ -487,11 +497,11 @@ fun Application.module(githubTools: GitHubTools = GitHubTools()) {
             )
             val result = agent.run(
                 userMessage = request.message,
-                // Инструменты берутся у подключённой сессии: соединение открывает человек
-                // кнопкой, поэтому здесь только выборка готового списка. Соединения нет —
-                // список пуст, и это не отменяет ответ: модель отвечает без инструментов.
+                // Инструменты — из двух серверов: GitHub (сессию открывает человек кнопкой)
+                // и сервиса курсов (сессию открывает первый запрос). Недоступный сервер даёт
+                // пустой список, и это не отменяет ответ: модель отвечает без инструментов.
                 options = request.toAgentOptions(profile = profileStore.profileOrDefault())
-                    .copy(tools = githubTools.tools())
+                    .copy(tools = githubTools.tools() + currencyTools.tools())
             )
 
             call.respond(

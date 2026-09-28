@@ -221,14 +221,20 @@ class McpConnectionException(message: String, cause: Throwable? = null) : Except
  *        токен и адрес API. Именно «поверх»: `ProcessBuilder` начинает с окружения родителя,
  *        поэтому переменные, которые нужны и родителю, и серверу инструментов (адрес
  *        подставного GitHub в проверках), не приходится перечислять второй раз.
+ * @param args Аргументы режима после класса точки входа. Нужны там, где у сервера есть режим
+ *        службы и режим клиента: сервис курсов без аргумента поднимается сборщиком и живёт
+ *        до остановки, а клиенту нужен `--mcp` — процесс, который выходит вместе с ним.
+ *        По умолчанию пусто: остальным серверам режимы не нужны, и лишний аргумент был бы
+ *        отказом запуска.
  */
 fun localMcpServerConfig(
     mainClass: String,
     classpath: String = System.getProperty("java.class.path").orEmpty(),
-    env: Map<String, String> = emptyMap()
+    env: Map<String, String> = emptyMap(),
+    args: List<String> = emptyList()
 ): McpServerConfig = McpServerConfig(
     command = File(System.getProperty("java.home"), "bin/java").absolutePath,
-    args = listOf("-cp", classpath, mainClass),
+    args = listOf("-cp", classpath, mainClass) + args,
     env = env
 )
 

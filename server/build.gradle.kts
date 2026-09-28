@@ -19,6 +19,11 @@ dependencies {
     // нужен и как зависимость (имя точки входа), и как классы для запуска процесса.
     implementation(project(":mcp"))
     implementation(project(":mcp-github"))
+    // Сервис курсов поднимается так же — из своего classpath, поэтому модуль нужен и как
+    // зависимость (имя точки входа), и как классы для запуска процесса. Его собственные
+    // зависимости (драйвер SQLite, HTTP-клиент) приходят вместе с ним: процесс сервиса
+    // работает на том же classpath, что и сервер приложения.
+    implementation(project(":currency-monitor"))
     implementation(libs.bundles.ktor.server)
     implementation(libs.bundles.ktor.client)
     implementation(libs.ktor.serialization.kotlinx.json)
