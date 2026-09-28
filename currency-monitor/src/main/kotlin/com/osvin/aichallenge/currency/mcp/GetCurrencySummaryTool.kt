@@ -8,13 +8,10 @@ import com.osvin.aichallenge.mcp.ServerTool
 import com.osvin.aichallenge.mcp.argument
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
-import java.math.BigDecimal
 
 /** Что сказать, когда за период записей нет: пустая сводка без объяснения выглядит как сбой. */
 private const val NO_PERIOD_NOTE =
@@ -35,7 +32,7 @@ private const val NO_PERIOD_NOTE =
  * утверждением, которого сервис не проверял.
  */
 fun getCurrencySummaryTool(period: DeclaredArgument): ServerTool<CurrencyToolsData> = ServerTool(
-    name = "get_currency_summary",
+    name = CurrencyMcpServer.SUMMARY_TOOL,
     description = "Сводка по курсам за период: текущий и предыдущий курс, изменение в рублях " +
         "и процентах, минимум, максимум и среднее по каждой отслеживаемой валюте.",
     arguments = listOf(period)
@@ -90,6 +87,3 @@ private fun summaryJson(summary: CurrencySummary): JsonObject = buildJsonObject 
     put("averageRate", summary.averageRate.asJson())
     put("samples", summary.samples)
 }
-
-/** Значение курса в JSON: null остаётся null, число остаётся числом. */
-private fun BigDecimal?.asJson() = this?.let { JsonPrimitive(it) } ?: JsonNull

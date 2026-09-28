@@ -1,21 +1,23 @@
 package com.osvin.aichallenge.currency.mcp
 
 import com.osvin.aichallenge.currency.CurrencyService
+import com.osvin.aichallenge.currency.summary.CurrencyHourlySummaryService
 import com.osvin.aichallenge.currency.summary.CurrencySummaryService
 import com.osvin.aichallenge.currency.summary.SummaryPeriod
 import com.osvin.aichallenge.mcp.DeclaredArgument
 import com.osvin.aichallenge.mcp.ServerTool
 
 /**
- * Данные инструментов: сбор курсов и сводка — две службы, поэтому пара.
+ * Данные инструментов: сбор курсов, сводка за период и сводка за часы — три службы.
  *
- * Одним типом, а не двумя параметрами, потому что сервер объявляет инструменты одного вида
+ * Одним типом, а не тремя параметрами, потому что сервер объявляет инструменты одного вида
  * ([ServerTool] с одними данными на весь список): своих данных у инструментов нет, они лишь
  * читают то, что им передали при сборке сервера.
  */
 data class CurrencyToolsData(
     val service: CurrencyService,
-    val summary: CurrencySummaryService
+    val summary: CurrencySummaryService,
+    val hourly: CurrencyHourlySummaryService
 )
 
 /**
@@ -37,6 +39,22 @@ object CurrencyMcpServer {
 
     /** Версия сервера в рукопожатии. */
     const val VERSION = "1.0.0"
+
+    /**
+     * Имена инструментов: одно на объявление и на того, кто зовёт их по имени.
+     *
+     * Зовёт по имени не только модель: маршруты сервера приложения (_GET /v1/currency_ и
+     * `GET /v1/currency/change`) обращаются к сервису теми же именами. Литералом в двух местах
+     * они разошлись бы молча — сервер получил бы «инструмент не объявлен» уже на живом запуске,
+     * и это выглядело бы как недоступный сервис, а не как опечатка в имени.
+     */
+    const val RATES_TOOL = "get_currency_rates"
+
+    /** Имя инструмента со сводкой за период. */
+    const val SUMMARY_TOOL = "get_currency_summary"
+
+    /** Имя инструмента с изменением за окно часов. */
+    const val CHANGE_TOOL = "get_currency_change"
 
     /**
      * Имя точки входа на JVM: его называют те, кто поднимает сервис процессом.
@@ -63,6 +81,21 @@ object CurrencyMcpServer {
     )
 
     /**
+     * Аргумент `hours`: за сколько последних часов считать изменение.
+     *
+     * Список значений пуст: часов от одного до семисот двадцати, и перечислять их схемой было бы
+     * таблицей вместо объявления. Разбор поэтому ручной, в обработчике, а границы — те же
+     * константы, которыми объявлено описание: схема и проверка не могут разойтись.
+     */
+    val hoursArgument = DeclaredArgument(
+        name = "hours",
+        description = "за сколько последних закрытых часов считать изменение: целое число " +
+            "от $MIN_CHANGE_HOURS до $MAX_CHANGE_HOURS (24 — сутки)",
+        values = emptyList(),
+        required = true
+    )
+
+    /**
      * Инструменты сервера.
      *
      * Данных здесь нет намеренно: список инструментов нужен и консольному режиму
@@ -72,6 +105,7 @@ object CurrencyMcpServer {
      */
     fun tools(): List<ServerTool<CurrencyToolsData>> = listOf(
         getCurrencyRatesTool(),
-        getCurrencySummaryTool(periodArgument)
+        getCurrencySummaryTool(periodArgument),
+        getCurrencyChangeTool(hoursArgument)
     )
 }

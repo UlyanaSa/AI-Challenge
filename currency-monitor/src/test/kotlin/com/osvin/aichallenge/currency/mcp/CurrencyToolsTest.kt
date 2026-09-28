@@ -4,8 +4,11 @@ import com.osvin.aichallenge.currency.Currency
 import com.osvin.aichallenge.currency.CurrencyRate
 import com.osvin.aichallenge.currency.CurrencyService
 import com.osvin.aichallenge.currency.CurrencyStorageException
+import com.osvin.aichallenge.currency.FakeCurrencyHourlySummaryRepository
 import com.osvin.aichallenge.currency.FakeCurrencyRateProvider
 import com.osvin.aichallenge.currency.FakeCurrencyRateRepository
+import com.osvin.aichallenge.currency.summary.CurrencyHourlySummary
+import com.osvin.aichallenge.currency.summary.CurrencyHourlySummaryService
 import com.osvin.aichallenge.currency.summary.CurrencySummaryService
 import com.osvin.aichallenge.currency.summary.SummaryPeriod
 import com.osvin.aichallenge.mcp.ServerTool
@@ -112,21 +115,138 @@ class CurrencyToolsTest {
     }
 
     @Test
-    fun `server declares both tools and the period as a required choice`() {
+    fun `change tool answers with the change per currency from the stored hours`() {
+        val summaries = FakeCurrencyHourlySummaryRepository(
+            listOf(
+                hour("2026-09-28T10:00:00Z", first = "95.0000", last = "95.5000", average = "95.2500"),
+                hour("2026-09-28T11:00:00Z", first = "95.5000", last = "96.5000", average = "96.0000")
+            )
+        )
+
+        val body = call(
+            CurrencyMcpServer.tools().change(),
+            data(FakeCurrencyRateRepository(), emptyMap(), summaries),
+            mapOf("hours" to "24")
+        ).json()
+
+        assertEquals(24, body.getValue("hours").jsonPrimitive.int)
+        assertEquals(2, body.getValue("hoursCovered").jsonPrimitive.int)
+        assertEquals("2026-09-28T10:00:00Z", body.getValue("from").jsonPrimitive.content)
+        assertEquals("2026-09-28T12:00:00Z", body.getValue("to").jsonPrimitive.content)
+        val currencies = body.getValue("currencies").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("EUR", "USD", "GEL"), currencies.map { it.getValue("currency").jsonPrimitive.content })
+        val eur = currencies.first()
+        // Число в JSON — значение, а не текст: конечные нули масштаба оно теряет, и «1.5000»
+        // уезжает как «1.5». Для модели это то же число, а строкой его отдавать нельзя.
+        assertEquals(BigDecimal("1.5"), eur.getValue("change").jsonPrimitive.content.toBigDecimal())
+        assertEquals(BigDecimal("1.5789"), eur.getValue("changePercent").jsonPrimitive.content.toBigDecimal())
+        assertEquals(2, eur.getValue("hours").jsonPrimitive.int)
+        assertEquals(120, eur.getValue("samples").jsonPrimitive.int)
+        // Валюта без сводок остаётся в ответе с null: пропуск читался бы как «валюта не отслеживается».
+        assertEquals(JsonNull, currencies[1]["change"])
+        assertEquals(0, currencies[1].getValue("hours").jsonPrimitive.int)
+        assertNull(body["note"], "окно покрыто не полностью, но сводки есть — объясняться не о чем")
+    }
+
+    @Test
+    fun `change tool explains an empty window instead of answering with zeros`() {
+        val result = call(
+            CurrencyMcpServer.tools().change(),
+            data(FakeCurrencyRateRepository(), emptyMap()),
+            mapOf("hours" to "24")
+        )
+        val body = result.json()
+
+        assertEquals(0, body.getValue("hoursCovered").jsonPrimitive.int)
+        assertEquals(JsonNull, body["from"])
+        assertNotNull(body["note"], "пустое окно без объяснения читается как сбой службы")
+    }
+
+    @Test
+    fun `change tool refuses a missing or non-numeric hours and names the bounds`() {
+        val tool = CurrencyMcpServer.tools().change()
+        val data = data(FakeCurrencyRateRepository(), emptyMap())
+
+        listOf(null, "сутки").forEach { value ->
+            val result = call(tool, data, if (value == null) emptyMap() else mapOf("hours" to value))
+
+            assertEquals(true, result.isError, "hours=$value должен быть отвергнут")
+            assertTrue(result.text().contains("от 1 до 720"), result.text())
+        }
+    }
+
+    @Test
+    fun `change tool refuses hours outside the allowed range`() {
+        val tool = CurrencyMcpServer.tools().change()
+        val data = data(FakeCurrencyRateRepository(), emptyMap())
+
+        listOf("0", "-3", "721").forEach { value ->
+            val result = call(tool, data, mapOf("hours" to value))
+
+            assertEquals(true, result.isError, "hours=$value должен быть отвергнут")
+            assertTrue(result.text().contains("вне допустимого"), result.text())
+        }
+    }
+
+    @Test
+    fun `change tool reports storage failure as a tool refusal`() {
+        val summaries = FakeCurrencyHourlySummaryRepository().apply {
+            failure = CurrencyStorageException("сводки недоступны")
+        }
+
+        val result = call(
+            CurrencyMcpServer.tools().change(),
+            data(FakeCurrencyRateRepository(), emptyMap(), summaries),
+            mapOf("hours" to "24")
+        )
+
+        assertEquals(true, result.isError)
+        assertTrue(result.text().contains("сводки недоступны"))
+    }
+
+    @Test
+    fun `server declares all three tools and the required arguments`() {
         val tools = CurrencyMcpServer.tools()
 
-        assertEquals(listOf("get_currency_rates", "get_currency_summary"), tools.map { it.name })
+        assertEquals(
+            listOf("get_currency_rates", "get_currency_summary", "get_currency_change"),
+            tools.map { it.name }
+        )
         assertEquals(emptyList(), tools.first { it.name == "get_currency_rates" }.arguments)
         val period = tools.first { it.name == "get_currency_summary" }.arguments.single()
         assertEquals("period", period.name)
         assertTrue(period.required)
         assertEquals(listOf("DAY", "WEEK", "MONTH"), period.values)
+        // Часы объявлены без списка значений: их слишком много для схемы, и пределы проверяет
+        // обработчик — тем же числом, которым объявлено описание.
+        val hours = tools.first { it.name == "get_currency_change" }.arguments.single()
+        assertEquals("hours", hours.name)
+        assertTrue(hours.required)
+        assertEquals(emptyList(), hours.values)
+        assertTrue(hours.description.contains("от 1 до 720"), hours.description)
     }
 
     /** Инструмент по имени из объявленного списка: проверка не повторяет его объявление у себя. */
     private fun List<ServerTool<CurrencyToolsData>>.rates() = first { it.name == "get_currency_rates" }
 
     private fun List<ServerTool<CurrencyToolsData>>.summary() = first { it.name == "get_currency_summary" }
+
+    private fun List<ServerTool<CurrencyToolsData>>.change() = first { it.name == "get_currency_change" }
+
+    /** Сводка закрытого часа для проверок окна: числа — те, что проверка хочет увидеть в ответе. */
+    private fun hour(at: String, first: String, last: String, average: String): CurrencyHourlySummary =
+        CurrencyHourlySummary(
+            currency = Currency.EUR,
+            hour = Instant.parse(at),
+            firstRate = BigDecimal(first),
+            lastRate = BigDecimal(last),
+            change = BigDecimal(last).subtract(BigDecimal(first)),
+            changePercent = null,
+            minRate = BigDecimal(first),
+            maxRate = BigDecimal(last),
+            averageRate = BigDecimal(average),
+            samples = 60
+        )
 
     /** Вызов инструмента так, как его зовёт клиент: через объявление, а не через внутренний метод. */
     private fun call(
@@ -152,7 +272,11 @@ class CurrencyToolsTest {
      * идёт тем же путём, что и работа, — курсы попадают в историю через службу, а инструмент
      * читает то, что она сохранила.
      */
-    private fun data(repository: FakeCurrencyRateRepository, rates: Map<Currency, String>): CurrencyToolsData {
+    private fun data(
+        repository: FakeCurrencyRateRepository,
+        rates: Map<Currency, String>,
+        summaries: FakeCurrencyHourlySummaryRepository = FakeCurrencyHourlySummaryRepository()
+    ): CurrencyToolsData {
         val provider = FakeCurrencyRateProvider(
             rates = rates.map { (currency, value) ->
                 CurrencyRate(currency, BigDecimal(value), now)
@@ -160,9 +284,11 @@ class CurrencyToolsTest {
         )
         val service = CurrencyService(provider, repository)
         runBlocking { service.update() }
+        val clock = Clock.fixed(now, java.time.ZoneOffset.UTC)
         return CurrencyToolsData(
             service,
-            CurrencySummaryService(repository, Clock.fixed(now, java.time.ZoneOffset.UTC))
+            CurrencySummaryService(repository, clock),
+            CurrencyHourlySummaryService(repository, summaries, clock)
         )
     }
 

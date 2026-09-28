@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.math.BigDecimal
 import java.time.temporal.ChronoUnit
 
 /**
@@ -23,6 +24,14 @@ import java.time.temporal.ChronoUnit
  * JSON, и ключи те же.
  */
 internal val CURRENCY_JSON = Json { prettyPrint = true }
+
+/**
+ * Значение курса в JSON: null остаётся null, число остаётся числом.
+ *
+ * Общий на все инструменты сервиса: правило одно — неизвестное значение уезжает как `null`,
+ * а не нулём, и ноль на месте курса читался бы как утверждение, которого сервис не проверял.
+ */
+internal fun BigDecimal?.asJson(): JsonPrimitive = this?.let { JsonPrimitive(it) } ?: JsonNull
 
 /** Что сказать, когда истории ещё нет вовсе: пустые курсы без объяснения выглядят как сбой. */
 private const val NO_RATES_NOTE =
@@ -42,7 +51,7 @@ private const val NO_RATES_NOTE =
  * увидел бы отказ вызова, которого не делал).
  */
 fun getCurrencyRatesTool(): ServerTool<CurrencyToolsData> = ServerTool(
-    name = "get_currency_rates",
+    name = CurrencyMcpServer.RATES_TOOL,
     description = "Последние сохранённые курсы EUR, USD и GEL к рублю: сколько рублей стоит " +
         "одна единица валюты и когда эти значения получены."
 ) { data, _ ->
