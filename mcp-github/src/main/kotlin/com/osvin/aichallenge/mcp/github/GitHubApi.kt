@@ -22,6 +22,27 @@ interface GitHubApi {
     suspend fun repositories(): List<GitHubRepository>
 
     /**
+     * Один репозиторий владельца токена по короткому имени.
+     *
+     * Имя, а не полное `владелец/репозиторий`: владелец — это владелец токена, и он один
+     * и тот же у [repositories]; спрашивать его у вызывающего значило бы заставлять модель
+     * угадывать логин, которого она не знает.
+     *
+     * @throws GitHubApiException То же, что у [repositories]: см. её KDoc. Отдельный случай —
+     *         код 404: репозитория с таким именем у владельца нет.
+     */
+    suspend fun repository(name: String): GitHubRepository
+
+    /**
+     * Последние коммиты репозитория владельца токена, свежие первыми, не больше [limit].
+     *
+     * @param limit Сколько коммитов вернуть; проверка границ — на стороне инструмента, здесь
+     *        значение уходит в размер страницы GitHub как есть.
+     * @throws GitHubApiException То же, что у [repositories]: см. её KDoc.
+     */
+    suspend fun commits(name: String, limit: Int): List<GitHubCommit>
+
+    /**
      * Профиль владельца токена: кто вошёл и какие права у токена.
      *
      * @throws GitHubApiException То же, что у [repositories]: см. её KDoc.

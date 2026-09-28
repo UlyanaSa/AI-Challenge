@@ -145,9 +145,10 @@ class GetRepositoriesToolTest {
     /**
      * Источник репозиториев для проверок: считает вызовы, в сеть не ходит.
      *
-     * Профиль и отчёт о доступе отдаёт-заглушки: инструменту `get_repositories` они не нужны,
-     * но интерфейс обязан их иметь — иначе подставной источник не был бы источником данных
-     * GitHub, и инструмент проверялся бы на другом типе, чем настоящий.
+     * Профиль, отчёт о доступе и коммиты отдаёт-заглушки, а один репозиторий ищет в том же
+     * наборе: инструменту `get_repositories` это не нужно, но интерфейс обязан их иметь —
+     * иначе подставной источник не был бы источником данных GitHub, и инструмент проверялся
+     * бы на другом типе, чем настоящий.
      */
     private class FakeGitHubApi(private val repositories: List<GitHubRepository>) : GitHubApi {
 
@@ -158,6 +159,12 @@ class GetRepositoriesToolTest {
             calls++
             return repositories
         }
+
+        override suspend fun repository(name: String): GitHubRepository =
+            repositories.first { it.name == name }
+
+        override suspend fun commits(name: String, limit: Int): List<GitHubCommit> =
+            emptyList()
 
         override suspend fun account(): GitHubAccount =
             GitHubAccount(login = null, scopes = emptyList(), scopesReported = false)

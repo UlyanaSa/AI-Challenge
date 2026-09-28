@@ -1,6 +1,7 @@
 package com.osvin.aichallenge
 
 import com.osvin.aichallenge.agent.AgentOptions
+import com.osvin.aichallenge.agent.AgentTool
 import com.osvin.aichallenge.agent.ContextStrategy
 import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DEFAULT_PROFILE
@@ -30,6 +31,9 @@ import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
 import com.osvin.aichallenge.profile.JsonFileProfileStore
 import com.osvin.aichallenge.models.config.AppConfig
+import com.osvin.aichallenge.orchestration.McpOrchestrator
+import com.osvin.aichallenge.orchestration.McpToolRegistry
+import com.osvin.aichallenge.orchestration.ToolServers
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
@@ -267,12 +271,36 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
  *        Поднимаются тем же ленивым путём, что и курсы: сервер пайплайна не спрашивает
  *        ни ключей, ни разрешений, а цепочку собирает модель по описаниям инструментов
  *        (см. [PipelineTools]).
+ * @param reportTools Инструменты сервера отчётов — сборка markdown и запись файла. Четвёртый
+ *        сервер в том же общем списке: инструменты всех серверов уезжают модели одним набором,
+ *        а маршрут вызова ищет сервер по имени (см. [McpOrchestrator]).
  */
 fun Application.module(
     githubTools: GitHubTools = GitHubTools(),
     currencyTools: CurrencyTools = CurrencyTools(),
-    pipelineTools: PipelineTools = PipelineTools()
+    pipelineTools: PipelineTools = PipelineTools(),
+    reportTools: ReportTools = ReportTools()
 ) {
+    // Единый реестр инструментов всех серверов и оркестратор, который по имени вызова находит
+    // сервер: модель видит один список инструментов, а куда отправить вызов — знает реестр.
+    val toolRegistry = McpToolRegistry()
+    val orchestrator = McpOrchestrator(toolRegistry, onLog = { println("[orchestrator] $it") })
+
+    /**
+     * Инструменты всех серверов на этот запрос.
+     *
+     * Список собирается заново на каждый запрос, а не один раз при запуске: сессия сервера
+     * поднимается лениво, и сервер, который в прошлый раз не ответил, в следующий раз может
+     * ответить — а сервер, чей процесс умер, наоборот, объявит инструменты, которых уже нет,
+     * и вызов по ним вернётся отказом с кодом, а не тишиной.
+     */
+    suspend fun toolServers(): List<Pair<String, List<AgentTool>>> = listOf(
+        ToolServers.GITHUB to githubTools.tools(),
+        ToolServers.CURRENCY to currencyTools.tools(),
+        ToolServers.PIPELINE to pipelineTools.tools(),
+        ToolServers.REPORT to reportTools.tools()
+    )
+
     // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
         json(Json {
@@ -349,6 +377,7 @@ fun Application.module(
             githubTools.close()
             currencyTools.close()
             pipelineTools.close()
+            reportTools.close()
         }
     }
 
@@ -573,12 +602,12 @@ fun Application.module(
             )
             val result = agent.run(
                 userMessage = request.message,
-                // Инструменты — из трёх серверов: GitHub (сессию открывает человек кнопкой),
-                // сервиса курсов (сессию открывает первый запрос) и пайплайна (три шага цепочки,
-                // порядок вызовов выбирает модель). Недоступный сервер даёт пустой список,
-                // и это не отменяет ответ: модель отвечает без инструментов.
+                // Инструменты — из всех серверов сразу, одним набором: имена в нём несут признак
+                // сервера (`currency.get_currency_rates`, `github.get_repositories`), и по имени
+                // вызова оркестратор находит, кому его передать. Недоступный сервер просто ничего
+                // не добавляет, и ответ без его инструментов не отменяется.
                 options = request.toAgentOptions(profile = profileStore.profileOrDefault())
-                    .copy(tools = githubTools.tools() + currencyTools.tools() + pipelineTools.tools())
+                    .copy(tools = orchestratedTools(toolRegistry, orchestrator, toolServers()))
             )
 
             call.respond(
@@ -822,4 +851,40 @@ fun Application.module(
             call.respond(TaskWriter(taskStateStore).forget(sessionId))
         }
     }
+}
+
+/**
+ * Инструменты всех серверов на один запрос человека: реестр пополняется, вызовы маршрутизируются.
+ *
+ * Реестр пополняется перед каждым запросом, а не один раз при запуске: сессии серверов поднимаются
+ * лениво, и сервер, поднявшийся позже, иначе не попал бы в список до перезапуска приложения.
+ * Повторная запись того же инструмента пропускается ([McpToolRegistry.register]), поэтому копии
+ * в реестре не накапливаются.
+ *
+ * Заодно начинается новый номер запроса: строки протокола оркестратора нумеруются внутри него,
+ * и по ним видно весь workflow одной просьбы — включая то, какой сервер выбран для каждого вызова
+ * (`requestId=3 iteration=4 tool=github.getRecentCommits server=github duration=340ms success=true`).
+ *
+ * Недоступный сервер даёт пустой список инструментов и строку в логе, а не отказ ответа: ответ
+ * человека не должен отменяться из-за того, что один из серверов инструментов не поднялся.
+ */
+internal suspend fun orchestratedTools(
+    registry: McpToolRegistry,
+    orchestrator: McpOrchestrator,
+    servers: List<Pair<String, List<AgentTool>>>
+): List<AgentTool> {
+    val requestId = orchestrator.newRequest()
+    var declaredTools = 0
+    servers.forEach { (serverId, declared) ->
+        val registration = registry.register(serverId, declared)
+        declaredTools += declared.size
+        val skipped = if (registration.skipped > 0) ", повторных пропущено ${registration.skipped}" else ""
+        if (declared.isEmpty()) {
+            println("[orchestrator] сервер $serverId: инструментов нет — сервер не ответил")
+        } else {
+            println("[orchestrator] сервер $serverId: инструментов ${registration.added}$skipped")
+        }
+    }
+    println("[orchestrator] запрос $requestId: инструментов у модели $declaredTools")
+    return orchestrator.tools()
 }

@@ -65,6 +65,37 @@ class GitHubApiImpl(
     }
 
     /**
+     * Один репозиторий владельца токена.
+     *
+     * Владелец спрашивается у профиля ([account]), а не берётся параметром: адрес репозитория
+     * включает логин, а из токена логин не выводится — GitHub его не называет в ответе на
+     * `/user/repos`. Лишний запрос на вызов — цена за то, что владелец всегда тот же, что
+     * у токена: иначе модель угадывала бы логин, которого не знает.
+     */
+    override suspend fun repository(name: String): GitHubRepository {
+        val access = accessOrFail()
+        val owner = ownerOrFail()
+        val response = request(repositoryUrl(owner, name), access, REPOSITORY_FORBIDDEN)
+        return JSON.decodeFromString<GitHubRepositoryResponse>(response.bodyAsText()).toRepository()
+    }
+
+    /**
+     * Последние коммиты репозитория владельца токена.
+     *
+     * `limit` уходит в `per_page`: GitHub отдаёт коммиты страницами, и просить страницу нужного
+     * размера дешевле, чем получить сотню и обрезать её у себя — лишние данные ещё и уехали бы
+     * в разбор. Постраничного обхода здесь нет намеренно: инструмент обещает «последние
+     * коммиты», а не «все», и предел [limit] задаёт вызывающий.
+     */
+    override suspend fun commits(name: String, limit: Int): List<GitHubCommit> {
+        val access = accessOrFail()
+        val owner = ownerOrFail()
+        val response = request(commitsUrl(owner, name, limit), access, COMMITS_FORBIDDEN)
+        return JSON.decodeFromString<List<GitHubCommitResponse>>(response.bodyAsText())
+            .map { it.toCommit() }
+    }
+
+    /**
      * Профиль владельца токена и права токена.
      *
      * Права берутся из заголовка [OAUTH_SCOPES_HEADER]: у classic-токена это список через
@@ -149,12 +180,38 @@ class GitHubApiImpl(
     private suspend fun lookupAccess(): GitHubCredentialLookup =
         withContext(Dispatchers.IO) { credentials.lookup() }
 
+    /**
+     * Логин владельца токена или внятный отказ, если GitHub его не назвал.
+     *
+     * Профиль переспрашивается, а не запоминается в поле: логин — часть адреса, и кэш в поле
+     * либо устарел бы после смены токена в процессе, либо потребовал бы сброса при отзыве
+     * доступа, о котором сервер узнаёт только ответом GitHub. Цена — один запрос, а профиль
+     * всё равно читается инструментом `github_access`; повторный поиск доступа не дороже:
+     * успех [GitHubCredentials] кэширует.
+     *
+     * Отказ здесь — не 401 и не 403, а форма ответа: до GitHub дошло и он ответил, но без
+     * логина. Как и у [GitHubAccount.login], это «не названо», а не «прав нет».
+     */
+    private suspend fun ownerOrFail(): String =
+        account().login?.takeIf { it.isNotBlank() } ?: throw GitHubApiException(
+            status = null,
+            message = "GitHub не назвал владельца токена: адрес репозитория собрать не из чего"
+        )
+
     /** Первая страница: количество на страницу и порядок — от недавно обновлённых. */
     private fun firstPage(): String =
         "${config.apiBase.trimEnd('/')}/user/repos?per_page=$PAGE_SIZE&sort=$SORT"
 
     /** Адрес профиля владельца токена. */
     private fun profileUrl(): String = "${config.apiBase.trimEnd('/')}/user"
+
+    /** Адрес одного репозитория владельца. */
+    private fun repositoryUrl(owner: String, name: String): String =
+        "${config.apiBase.trimEnd('/')}/repos/$owner/$name"
+
+    /** Адрес коммитов: сколько просить за страницу, задаёт вызывающий через `per_page`. */
+    private fun commitsUrl(owner: String, name: String, limit: Int): String =
+        "${config.apiBase.trimEnd('/')}/repos/$owner/$name/commits?per_page=$limit"
 
     /**
      * Запрос с заголовками доступа и разбором отказа.
@@ -242,6 +299,14 @@ class GitHubApiImpl(
         /** Почему 403 при чтении профиля: причина другая, и путать их нельзя. */
         const val PROFILE_FORBIDDEN =
             "у токена нет прав на чтение профиля или исчерпан лимит запросов"
+
+        /** Почему 403 при чтении одного репозитория: причин две, и обе называются. */
+        const val REPOSITORY_FORBIDDEN =
+            "у токена нет прав на чтение этого репозитория или исчерпан лимит запросов"
+
+        /** Почему 403 при чтении коммитов: причина другая, и путать их нельзя. */
+        const val COMMITS_FORBIDDEN =
+            "у токена нет прав на чтение коммитов или исчерпан лимит запросов"
 
         /** Сколько тела ошибки показать: длинный ответ GitHub человеку не нужен. */
         const val ERROR_BODY_LIMIT = 500

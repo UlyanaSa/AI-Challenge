@@ -27,6 +27,8 @@ dependencies {
     // Сервер пайплайна поднимается так же — из своего classpath: модуль нужен и как зависимость
     // (имя точки входа), и как классы процесса, который читает базу службы курсов и пишет отчёты.
     implementation(project(":mcp-pipeline"))
+    // Сервер отчётов (день 20) — четвёртый сервер инструментов, тоже из своего classpath.
+    implementation(project(":mcp-report"))
     implementation(libs.bundles.ktor.server)
     implementation(libs.bundles.ktor.client)
     implementation(libs.ktor.serialization.kotlinx.json)

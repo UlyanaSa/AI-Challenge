@@ -117,6 +117,17 @@ class GitHubAccessToolTest {
         val broken = object : GitHubApi {
             override suspend fun repositories(): List<GitHubRepository> = emptyList()
 
+            override suspend fun repository(name: String): GitHubRepository = GitHubRepository(
+                id = 0,
+                name = name,
+                fullName = "octo/$name",
+                `private` = false,
+                visibility = "public",
+                url = "https://github.com/octo/$name"
+            )
+
+            override suspend fun commits(name: String, limit: Int): List<GitHubCommit> = emptyList()
+
             override suspend fun account(): GitHubAccount =
                 GitHubAccount(login = null, scopes = emptyList(), scopesReported = false)
 

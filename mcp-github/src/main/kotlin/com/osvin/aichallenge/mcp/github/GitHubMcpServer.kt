@@ -6,7 +6,8 @@ import com.osvin.aichallenge.mcp.mcpServer
 import com.osvin.aichallenge.mcp.runStdioServer
 
 /**
- * Локальный MCP-сервер GitHub: отдаёт агенту репозитории пользователя по протоколу MCP.
+ * Локальный MCP-сервер GitHub: отдаёт агенту данные пользователя из GitHub по протоколу MCP —
+ * его репозитории, один репозиторий по имени и последние коммиты.
  *
  * Смысл отдельного сервера в том же, что и у сервера проекта: доступ к данным даёт инструмент,
  * а не подсказка в промпте. Отличие — данные не наши, а чужие: сервер ходит в GitHub REST API
@@ -56,14 +57,48 @@ object GitHubMcpServer {
     )
 
     /**
+     * Аргумент `repository`: короткое имя репозитория владельца токена.
+     *
+     * Объявление одно на оба инструмента: имя одно и то же, а описание расходиться между ними
+     * не должно — модель выбирает аргумент по нему и в `get_repository`, и в `get_recent_commits`.
+     * Обязательный: владельца в имени нет, а без репозитория инструменту нечего читать.
+     */
+    val repositoryArgument = DeclaredArgument(
+        name = "repository",
+        description = "короткое имя репозитория владельца токена (например ai_challenge_task1), " +
+            "без владельца — он всегда владелец доступа",
+        required = true
+    )
+
+    /**
+     * Аргумент `limit`: сколько последних коммитов вернуть.
+     *
+     * Необязательный: «последние коммиты» и без числа понятны, а умолчание названо в описании,
+     * поэтому модель выбирает между «сколько есть по умолчанию» и своим числом, а не угадывает.
+     * Тип `integer`, а не `string`: это счётчик, и клиент вправе проверить его до вызова.
+     */
+    val commitsLimitArgument = DeclaredArgument(
+        name = "limit",
+        description = "сколько последних коммитов вернуть: целое число от " +
+            "${COMMITS_LIMIT_RANGE.first} до ${COMMITS_LIMIT_RANGE.last}; без аргумента — " +
+            DEFAULT_COMMITS_LIMIT,
+        type = "integer",
+        required = false
+    )
+
+    /**
      * Инструменты сервера, читающие переданный источник данных GitHub.
      *
      * Источник приходит параметром, а не берётся из окружения здесь: список инструментов нужен
      * и консольному режиму (`--list-tools`), где в GitHub никто не ходит, — поэтому объявление
      * отделено от доступа к сети. Доступ к сети и токен появляются только у поднятого сервера.
      */
-    fun tools(api: GitHubApi): List<ServerTool<GitHubApi>> =
-        listOf(getRepositoriesTool(visibilityArgument), githubAccessTool())
+    fun tools(api: GitHubApi): List<ServerTool<GitHubApi>> = listOf(
+        getRepositoriesTool(visibilityArgument),
+        githubAccessTool(),
+        getRepositoryTool(repositoryArgument),
+        getRecentCommitsTool(repositoryArgument, commitsLimitArgument)
+    )
 }
 
 /**
