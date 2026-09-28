@@ -21,6 +21,7 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -262,6 +263,89 @@ class CurrencyMonitorTest {
     }
 
     /**
+     * Пауза между ударами ведёт к точке минутной сетки, а не отмеряется минутой после работы.
+     *
+     * Момент времени берётся у монитора на каждом шаге цикла (начало сетки, удар, расчёт
+     * паузы), поэтому записанные паузы показывают, что именно отмеряет цикл: удар в полсекунды
+     * оставляет 59,3 с до следующей минуты, а удар в 70 с перекрывает свою точку — и пауза
+     * ведёт к следующей, не сдвигая сетку и не повторяя удар немедленно.
+     */
+    @Test
+    fun pauseGoesToTheNextGridPoint() = runBlocking {
+        val server = FakeCurrencyServer()
+        val repository = server.repository()
+
+        assertEquals(
+            59_300L,
+            firstPause(this, repository, listOf(FIRST_TICK, FIRST_TICK + 500, FIRST_TICK + 700)),
+            "пауза должна вести к точке сетки, а не отмеряться минутой после работы"
+        )
+        assertEquals(
+            49_900L,
+            firstPause(this, repository, listOf(FIRST_TICK, FIRST_TICK + 70_000, FIRST_TICK + 70_100)),
+            "удар длиннее минуты должен пропускать перекрытую точку сетки, а не сдвигать её"
+        )
+    }
+
+    /**
+     * Первая пауза цикла за заданные моменты времени: моментов ровно на один удар —
+     * начало сетки, сам удар и расчёт паузы после него.
+     */
+    private suspend fun firstPause(
+        scope: CoroutineScope,
+        repository: ChatRepository,
+        moments: List<Long>
+    ): Long {
+        val clock = ArrayDeque(moments)
+        val pauses = Channel<Long>(Channel.UNLIMITED)
+        val gate = Channel<Unit>(Channel.UNLIMITED)
+        val job = scope.launch {
+            repository.runCurrencyMonitor(
+                now = { clock.removeFirst() },
+                wait = {
+                    pauses.send(it)
+                    gate.receive()
+                }
+            )
+        }
+        val pause = pauses.receive()
+        job.cancel()
+        return pause
+    }
+
+    /**
+     * Медленный сервер не останавливает ленту: чтение курсов срывается по сроку, и удар
+     * заканчивается, не дождавшись ответа.
+     *
+     * Срок в приложении — двадцать секунд ([ChatRepository.CURRENCY_READ_TIMEOUT_MS]),
+     * а здесь он задан сотней миллисекунд: проверке важно поведение, а не число — чтение
+     * возвращает «курсов нет» вместо вечного ожидания. Без срока зависший сервер держал бы
+     * удар, и следующий удар монитора не наступал бы вовсе.
+     */
+    @Test
+    fun slowServerEndsTheReadByDeadline() = runBlocking {
+        val store = InMemoryChatStore()
+        val client = HttpClient(
+            MockEngine {
+                delay(SLOW_ANSWER_MS)
+                respond(
+                    CURRENCY_SNAPSHOT,
+                    HttpStatusCode.OK,
+                    headersOf(HttpHeaders.ContentType, "application/json")
+                )
+            }
+        ) {
+            install(ContentNegotiation) { json(JSON) }
+        }
+        val repository = ChatRepository(BASE_URL, store, client, currencyReadTimeoutMs = READ_DEADLINE_MS)
+
+        assertNull(
+            repository.loadCurrencySnapshot(),
+            "чтение по сроку должно вернуть отсутствие курсов, а не дождаться медленного ответа"
+        )
+    }
+
+    /**
      * Подставной сервер курсов: на свои маршруты отвечает заданными телами, на остальные —
      * обычным ответом агента. Ответы памяти, профиля, задачи и инвариантов намеренно не
      * разводятся: у всех этих моделей есть умолчания, а неизвестные поля отбрасываются,
@@ -319,7 +403,7 @@ class CurrencyMonitorTest {
         private val job: Job = scope.launch {
             repository.runCurrencyMonitor(
                 now = { now },
-                wait = {
+                wait = { _ ->
                     beat.send(Unit)
                     gate.receive()
                 }
@@ -354,6 +438,12 @@ class CurrencyMonitorTest {
 
         /** Миллисекунд в часе. */
         const val HOUR_MS = 3_600_000L
+
+        /** Срок чтения курсов в проверке срока: короткий, чтобы проверка не ждала секунды. */
+        const val READ_DEADLINE_MS = 100L
+
+        /** Ответ подставного сервера в проверке срока: медленнее срока, поэтому он и срабатывает. */
+        const val SLOW_ANSWER_MS = 300L
 
         /** 12:05 UTC: номер часа 492 — это 12 часов суток, минута — пятая. */
         val FIRST_TICK = 492L * HOUR_MS + 5 * 60_000L

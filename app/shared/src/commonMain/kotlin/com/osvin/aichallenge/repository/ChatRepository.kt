@@ -4,6 +4,7 @@ import com.osvin.aichallenge.data.*
 import com.osvin.aichallenge.platformLog
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -16,7 +17,9 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,7 +94,21 @@ class ChatRepository(
                 isLenient = true
             })
         }
-    }
+        // Срок ставится на соединение, а не на весь запрос: ответ модели приходит минутами,
+        // и общий срок запроса обрывал бы долгие ответы. Срок самого чтения курсов короче
+        // и ставится там, где читаются курсы ([loadCurrencySnapshot])
+        install(HttpTimeout) {
+            connectTimeoutMillis = CONNECT_TIMEOUT_MS
+        }
+    },
+    /**
+     * Срок одного чтения курсов ([CURRENCY_READ_TIMEOUT_MS] по умолчанию).
+     *
+     * Параметром, а не только константой, — по тому же счёту, что время и пауза монитора
+     * ([runCurrencyMonitor]): проверять срок приходится на медленном сервере, а ждать
+     * в проверке настоящие двадцать секунд нечем.
+     */
+    private val currencyReadTimeoutMs: Long = CURRENCY_READ_TIMEOUT_MS
 ) {
     // Внутренние потоки данных (StateFlow)
     private val _chats = MutableStateFlow<List<Chat>>(emptyList())
@@ -1096,16 +1113,28 @@ class ChatRepository(
      * читает этот метод монитор, и его удар должен пропуститься тихо. Строка ошибки
      * в ленте курсов была бы сообщением, которого человек не просил: лента показывает
      * курсы, а не разбор сбоев, и повторись сбой — она бы заполнилась ошибками.
+     *
+     * У чтения есть срок ([CURRENCY_READ_TIMEOUT_MS]), короче минуты: без него зависший
+     * сервер останавливал бы ленту насовсем — удар ждёт ответа и не возвращается, а значит
+     * не наступает и следующий. Замерено на стенде: пока сервер поднимал свой процесс
+     * инструментов, ответа не было вовсе. Сроком плата за отказ — пропущенная минута,
+     * а не остановка ленты.
      */
     suspend fun loadCurrencySnapshot(): CurrencySnapshot? {
         return try {
-            val response = client.get("$baseUrl/v1/currency")
+            val response = withTimeout(currencyReadTimeoutMs) { client.get("$baseUrl/v1/currency") }
             if (response.status.isSuccess()) {
                 response.body()
             } else {
                 platformLog("agent", "[agent] Курсы не прочитаны: сервер ответил ${response.status.value}")
                 null
             }
+        } catch (expired: TimeoutCancellationException) {
+            // Молчание сервера не объявляется потерей связи: застрять мог инструмент службы
+            // курсов, а сам сервер приложения при этом отвечает — состояние связи ведёт
+            // проверка связи ([checkHealth]), и подменять её вывод отсюда нечем
+            platformLog("agent", "[agent] Курсы не прочитаны: сервер не ответил за ${currencyReadTimeoutMs / 1000} с")
+            null
         } catch (e: Exception) {
             _isServerOnline.value = false
             platformLog("agent", "[agent] Курсы не прочитаны: ${e.message ?: "нет соединения"}")
@@ -1154,12 +1183,26 @@ class ChatRepository(
     }
 
     /**
-     * Монитор курсов: удар сразу при запуске, дальше — раз в [CURRENCY_TICK_MS].
+     * Монитор курсов: удар сразу при запуске, дальше — раз в [CURRENCY_TICK_MS] по минутной
+     * сетке, начало которой — запуск цикла.
      *
      * Цикл бесконечный и рассчитан на то, что живёт в области видимости приложения
      * ([ChatViewModel.startCurrencyMonitor]): приложение открыто — лента наполняется,
      * закрыто — цикл умирает вместе со своей областью. Это и есть требуемая частота
      * без будильников и фоновых служб: пока приложение живо, минута тикает.
+     *
+     * Пауза считается до следующей точки сетки ([pauseToNextTick]), а не выжидается
+     * минутой после удара: удар сам занимает время (чтение курсов по сети), и «минута
+     * после работы» отодвигала бы каждый следующий удар на это время. Замер на стенде
+     * дал 120–480 мс на удар: сетка уезжала вправо на полминуты за час и проходила через
+     * моменты сбора службы — строка с уже показанной минутой шла второй раз, а следующая
+     * минута пропускалась. Сетка держит удар на своём месте, и метка службы в строке идёт
+     * по минуте на строку.
+     *
+     * Отброшены две другие правки: не печатать строку, если метка службы не сменилась
+     * (пропуск минуты вместо повтора — лента стала бы реже обещанного), и печатать время
+     * удара вместо метки службы (был бы виден момент печати, а не момент, на который
+     * посчитаны курсы).
      *
      * Обе зависимости цикла — момент времени и пауза — берутся параметрами: в тесте
      * так задаётся своё время и свой шаг, а приложение зовёт метод без аргументов
@@ -1168,17 +1211,33 @@ class ChatRepository(
      * без ожидания настоящей минуты.
      *
      * @param now Момент удара в миллисекундах UTC.
-     * @param wait Пауза между ударами.
+     * @param wait Пауза до следующего удара в миллисекундах.
      */
     suspend fun runCurrencyMonitor(
         now: () -> Long = { System.currentTimeMillis() },
-        wait: suspend () -> Unit = { delay(CURRENCY_TICK_MS) }
+        wait: suspend (Long) -> Unit = { delay(it) }
     ) {
+        // Начало сетки — запуск цикла: первый удар идёт сразу, остальные — по его точкам
+        val grid = now()
         var hour: Long? = null
         while (true) {
             hour = currencyMonitorTick(now(), hour)
-            wait()
+            wait(pauseToNextTick(grid, now()))
         }
+    }
+
+    /**
+     * Пауза до следующей точки минутной сетки, начавшейся в [grid].
+     *
+     * Точки сетки — [grid] и дальше через [CURRENCY_TICK_MS]. Удар, занявший больше минуты,
+     * пропускает свои точки, а не сдвигает сетку: пауза ведёт к первой точке, которая ещё
+     * не прошла, поэтому долгое чтение не утаскивает за собой расписание и лента не теряет
+     * минуты молча.
+     */
+    private fun pauseToNextTick(grid: Long, moment: Long): Long {
+        val passed = moment - grid
+        val points = if (passed < 0) 1 else passed / CURRENCY_TICK_MS + 1
+        return grid + points * CURRENCY_TICK_MS - moment
     }
 
     /**
@@ -1269,8 +1328,12 @@ class ChatRepository(
      */
     private suspend fun readCurrencyChange(hours: Int): CurrencyChangeFeed? {
         return try {
-            val response = client.get("$baseUrl/v1/currency/change") {
-                parameter("hours", hours)
+            // Срок тот же, что у чтения курсов: этим чтением закрывается час в сводке,
+            // и оно тоже идёт из удара монитора — зависни оно, удар не вернётся
+            val response = withTimeout(currencyReadTimeoutMs) {
+                client.get("$baseUrl/v1/currency/change") {
+                    parameter("hours", hours)
+                }
             }
             if (response.status.isSuccess()) {
                 _currencyChangeError.value = null
@@ -1281,6 +1344,11 @@ class ChatRepository(
                 platformLog("agent", "[agent] Изменение курсов не прочитано: ${response.status.value}")
                 null
             }
+        } catch (expired: TimeoutCancellationException) {
+            val reason = "сервер не ответил за ${currencyReadTimeoutMs / 1000} с"
+            _currencyChangeError.value = "Изменение курсов недоступно: $reason"
+            platformLog("agent", "[agent] Изменение курсов не прочитано: $reason")
+            null
         } catch (e: Exception) {
             _isServerOnline.value = false
             _currencyChangeError.value = e.message ?: "Изменение курсов недоступно: нет соединения"
@@ -1370,6 +1438,19 @@ class ChatRepository(
 
         /** Частота удара монитора курсов: раз в минуту. */
         const val CURRENCY_TICK_MS = 60_000L
+
+        /**
+         * Срок чтения курсов: двадцать секунд.
+         *
+         * Меньше минуты — чтобы зависшее чтение стоило одного удара, а не сетки: удар вернётся
+         * по сроку и пропустит свою минуту, следующая придёт по расписанию. Больше подъёма
+         * процесса инструментов сервера (рукопожатие MCP) — иначе первый удар терялся бы
+         * на каждом холодном запуске.
+         */
+        const val CURRENCY_READ_TIMEOUT_MS = 20_000L
+
+        /** Срок соединения с сервером приложения: сеть в помещении медленной не бывает. */
+        const val CONNECT_TIMEOUT_MS = 10_000L
 
         /** Сколько часов просит шапка закреплённого чата: сутки. */
         const val CURRENCY_DAY_HOURS = 24

@@ -9,8 +9,10 @@ import com.osvin.aichallenge.mcp.agentTools
 import com.osvin.aichallenge.mcp.localMcpServerConfig
 import com.osvin.aichallenge.mcp.openMcpSession
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -84,6 +86,13 @@ class CurrencyTools(
      * отказывает только тогда, когда не может прочитать свою историю: это недоступность службы,
      * и выдавать её за ответ «курсов нет» значило бы показать пустую ленту вместо причины.
      *
+     * У вызова есть срок ([CALL_TIMEOUT_MS]), и по его исходу сессия закрывается. Без срока
+     * зависший процесс инструментов держал бы запрос вечно: маршрут приложения не отвечал бы,
+     * а лента курсов, читающая его раз в минуту, останавливалась бы насовсем — удар не
+     * возвращается, значит и следующего не будет. Закрытие сессии здесь не уборка, а лечение:
+     * молчащий процесс сам не оживёт, а следующее обращение поднимает новый — замер на стенде
+     * показал ровно это: запрос, заставший подъём процесса, не отвечал, а следующий ответил.
+     *
      * @param name Имя инструмента из объявленных сервисом (см. [CurrencyMcpServer]).
      * @param arguments Аргументы вызова: строки, как их объявляет сервис.
      */
@@ -93,7 +102,12 @@ class CurrencyTools(
             if (session?.isRunning != true) return CurrencyCall.Unavailable(NO_SERVICE)
             val tool = modelTools.firstOrNull { it.name == name }
                 ?: return CurrencyCall.Unavailable("инструмент $name не объявлен сервисом курсов")
-            val outcome = tool.call(arguments)
+            val outcome = try {
+                withTimeout(CALL_TIMEOUT_MS) { tool.call(arguments) }
+            } catch (expired: TimeoutCancellationException) {
+                closeSession()
+                return CurrencyCall.Unavailable("сервис курсов не ответил за ${CALL_TIMEOUT_MS / 1000} с")
+            }
             if (outcome.isError) {
                 CurrencyCall.Unavailable(outcome.text)
             } else {
@@ -149,6 +163,16 @@ sealed interface CurrencyCall {
 
 /** Что сказать, когда сессии нет: причина отказа процесса уходит в лог, а не в ответ клиенту. */
 private const val NO_SERVICE = "сервис курсов недоступен: сессия не поднята"
+
+/**
+ * Срок вызова инструмента курсов: двадцать секунд.
+ *
+ * Ответ сервиса — чтение своей истории, а на смене часа ещё и сводка: за двадцать секунд он
+ * укладывается с запасом даже на первом обращении к поднятому процессу. Срок нужен против
+ * молчания, а не против медлительности: молчащий процесс держал бы запрос приложения вечно,
+ * и лента курсов в приложении встала бы вместе с ним.
+ */
+private const val CALL_TIMEOUT_MS = 20_000L
 
 /**
  * Переменная окружения с командой запуска сервиса курсов.
