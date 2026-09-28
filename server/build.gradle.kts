@@ -163,3 +163,25 @@ val pipelineDemo by tasks.registering(Test::class) {
     testLogging { events("standardOut") }
     outputs.upToDateWhen { false }
 }
+
+/**
+ * Демонстрация дня 20: модель проходит длинный workflow через три MCP-сервера.
+ *
+ * Три сервера инструментов поднимаются настоящими процессами (GitHub — с подставным API,
+ * курсы — с временной базой, отчёты — с временным каталогом), модель живая, отчёт пишется
+ * настоящий. Модель получает один список инструментов трёх серверов и по обычной просьбе
+ * сама выбирает шаги; маршрут каждого вызова печатает оркестратор.
+ *
+ * `./gradlew :server:orchestrationDemo -Pdemo.live=1` — живой прогон, ключ из `server/.env`;
+ * без флага задача только напоминает, как её запускать.
+ */
+val orchestrationDemo by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Прогон дня 20: длинная цепочка через три MCP-сервера, собранная моделью"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.osvin.aichallenge.OrchestrationDemoTest") }
+    // Только печать демонстрации: статусы тестов в консоль не нужны.
+    testLogging { events("standardOut") }
+    outputs.upToDateWhen { false }
+}
