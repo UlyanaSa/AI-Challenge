@@ -988,6 +988,7 @@ DeepSeek API error: 400 Bad Request - {"error":{"message":"This model's maximum 
 ```
 $ ./mcp/mcp-server.sh start
 сервер запущен: pid 54723
+  сервер:      project (com.osvin.aichallenge.mcp.ProjectMcpServerKt)
   данные:      …/server/data
   логи:        mcp/build/mcp-server/server.log
   кадры:       mcp/build/mcp-server/frames.log
@@ -1002,7 +1003,7 @@ $ ./mcp/mcp-server.sh stop
 
 ```
 $ ./gradlew :mcp:mcpTools
-ai-challenge-project 1.0.0 — инструменты MCP-сервера проекта
+ai-challenge-project 1.0.0 — инструменты, которые объявляет сервер
 инструментов: 2; список объявлен кодом, поэтому изменения не рассылаются (listChanged = false)
 
 1. list_invariants
@@ -1016,7 +1017,7 @@ ai-challenge-project 1.0.0 — инструменты MCP-сервера про�
      profile_id: string, необязательный — чей набор читать; без него — данные профиля по умолчанию
 ```
 
-То же самое без Gradle — из fat JAR (так эту команду и вызывает сторонний клиент, которому нужен запуск сервера): `./gradlew :mcp:jar && java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt --list-tools`. Без аргументов тот же jar работает сервером на stdio; неизвестный аргумент — отказ с кодом 2, чтобы опечатка не превратилась в молча поднятый сервер. Список берётся из той же спецификации (`ProjectMcpServer.tools`), по которой сервер регистрирует инструменты, поэтому показать одно, а объявить другое он не может.
+То же самое без Gradle — из fat JAR (так эту команду и вызывает сторонний клиент, которому нужен запуск сервера): `./gradlew :mcp:fatJar && java -cp mcp/build/libs/mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt --list-tools`. Без аргументов тот же jar работает сервером на stdio; неизвестный аргумент — отказ с кодом 2, чтобы опечатка не превратилась в молча поднятый сервер. Список берётся из той же спецификации (`ProjectMcpServer.tools`), по которой сервер регистрирует инструменты, поэтому показать одно, а объявить другое он не может. Fat JAR собирается отдельной задачей, а обычный jar модуля остаётся тонким: тонкий jar — это артефакт, который получают зависящие от `:mcp` модули, и вложенные в fat JAR классы ломали бы их сборку (подробнее — `### task-17`).
 
 | Инструмент | Что отдаёт | Аргумент |
 | --- | --- | --- |
@@ -1055,6 +1056,87 @@ ai-challenge-project 1.0.0 — инструменты MCP-сервера про�
 
 Что осталось непроверенным: инструменты не подставляются в запрос к модели (вызовы инструментов моделью — следующий шаг), сторонний сервер проверен на написанном для этого сервере без SDK, а `npx`-серверы — нет: в окружении не установлен `node`; HTTP-транспорт (`StreamableHttpClientTransport`) в этот день не проверялся.
 
+### task-17
+
+День 17. MCP-сервер для GitHub и вызов инструмента самим агентом
+
+День 16 подключил агента к MCP и показал список инструментов — но вызывал их код демонстрации, а не модель. День 17 доводит это до работы: появляется второй MCP-сервер, который ходит в GitHub REST API, и **агент сам** выбирает инструмент по обычной просьбе («покажи мои приватные репозитории»), получает данные и отвечает по ним.
+
+**Результат:** живой прогон `./gradlew :server:githubDemo -Pdemo.live=1` — три просьбы (все репозитории, публичные, приватные) и одна проверка отказа. Модель живая, сервер инструментов — настоящий отдельный процесс по протоколу MCP, GitHub подставной: токена в окружении нет, адрес API подставляется переменной `GITHUB_API_BASE`, а код-путь тот же, что с настоящим GitHub.
+
+**Сервер GitHub — отдельный модуль `:mcp-github`**, но не копия сервера проекта. У сервера проекта данные — правила и профиль, у GitHub — сеть и токен (`GITHUB_TOKEN`), которого у первого нет вовсе; в одном модуле они получили бы один fat JAR и одну точку входа с чужими настройками. Общая часть при этом вынесена в `:mcp` (`DeclaredTool.kt`, `StdioServer.kt`): объявление инструмента, его схема, регистрация и режимы запуска stdio — одни на оба сервера. Объявление одно и на регистрацию, и на консольный список, и на схему для клиента, поэтому «показал одно, объявил другое» невозможно по построению.
+
+Решения вокруг сервера:
+
+- **Токен читается в момент вызова, а не при старте.** Сервер поднимают и для `--list-tools`, где GitHub не нужен; падать из-за отсутствия переменной окружения на старте значило бы запрещать знакомство с инструментом до настройки. Нет токена — инструмент отвечает отказом с причиной («переменная окружения `GITHUB_TOKEN` не задана: …»), и модель говорит об этом человеку.
+- **Адрес API — параметр** (`GITHUB_API_BASE`, по умолчанию `https://api.github.com`). Это не «гибкость на будущее»: токена GitHub здесь нет, и проверка идёт на подставном API на localhost; без параметра её негде было бы провести.
+- **Модель отделена от ответа GitHub.** Публичный `GitHubRepository` — с именами полей из задания (`fullName`, `url`), внутренний `GitHubRepositoryResponse` разбирает ответ GitHub (`full_name`, `html_url`). Аннотации `@SerialName` на самой модели заставили бы её собственный JSON-вывод уехать с именами GitHub — одна аннотация обслуживала бы два разных формата.
+- **Видимость берётся из `visibility`, а если поля нет — из `private`** (так GitHub отвечает не всегда). Фильтровать по флагу `private` в обход видимости не стали: тогда третья видимость GitHub (`internal`) попала бы в «приватные», хотя инструмент обещает только публичные и приватные.
+- **Пагинация по `Link: rel="next"` с пределом в 10 страниц.** Предел защищает от замкнутой ссылки: без него сервер ходил бы в GitHub вечно, а пользователь не дождался бы ответа.
+- **Ошибка GitHub — результат вызова, а не исключение.** 401, 403, прочие не-2xx, сеть, отсутствие токена и неизвестное значение `visibility` (проверяется **до** обращения к API) — всё это `isError` с причиной словами. Исключение ушло бы клиенту отказом инструмента, которого он не вызывал, и до модели не дошло бы вовсе.
+
+**Вызовы инструментов делает агент, а не код вокруг него.** Контракт в `:agent` нейтрален: имя, описание, схема аргументов и функция вызова (`AgentTool`). Ни MCP, ни процессов, ни сессий агент не знает — адаптер `McpSession.agentTools()` живёт в `:mcp`, где видны обе стороны. Цикл в `LlmAgent.run` прост по форме и строг по завершению: объявления уходят в запрос только когда инструменты есть; модель просит вызовы → агент выполняет их и добавляет в переписку сообщение ассистента с вызовами и **ответ на каждый вызов** (`role = "tool"`, `tool_call_id`) → повторяет запрос; когда вызовов нет, приходит текст.
+
+Почему именно так:
+
+- **Раундов конечное число** (`MAX_TOOL_ROUNDS = 3`), после них инструменты не предлагаются. Модель может просить инструмент бесконечно («позови ещё раз, вдруг получится»), и без предела запрос кончился бы не ответом, а расходом. Три, а не один: цель раунда может зависеть от результата предыдущего. Если вызов приходит уже без объявлений, он не выполняется, а работа кончается ответом модели — цикл не зависит от чужого поведения.
+- **Неизвестный и упавший инструмент — ответ модели, а не отказ запроса.** Причина уходит в переписку, и модель отвечает без данных. Так падение внешнего сервиса не отменяет ответ на вопрос, который от него не зависел.
+- **Аргументы разбираются мягко:** пустая строка — «аргументов нет» (у инструмента есть умолчания), а неразобранная — отказ с причиной. Молча звать инструмент с пустыми аргументами значило бы отдать модели выдумку вместо данных.
+- **Переполнение окна проверяется перед каждым раундом**, а расход суммируется по раундам: каждый вызов — это ещё один полный запрос со всей перепиской, и без суммы отчёт показывал бы расход меньше настоящего.
+
+Два нюанса формата пришлось предусмотреть отдельно. У ответа с вызовами `content` приходит `null` — разбор падал бы ровно там, где начинается вызов: поле получило умолчание, а клиентский разбор `coerceInputValues = true`. Поле `type` в объявлении и в вызове помечено `EncodeDefault`: оно совпадает с умолчанием, но провайдер ждёт его всегда, и пропуск — отказ, а не экономия байтов.
+
+**Сервер приложения держит одну долгую сессию инструментов** (`server/.../GitHubTools.kt`): MCP-сервер — отдельный процесс на JVM, и поднимать его на каждый вопрос значило бы платить за запуск и рукопожатие в каждом ответе. Под замком — потому что запросы идут параллельно: без него два одновременных вопроса подняли бы два процесса, и один остался бы сиротой. Недоступный сервер инструментов **не отменяет ответ**: причина уходит в лог, вопрос идёт модели без инструментов, попытка повторяется на следующем запросе. Обратное решение превращало бы недоступность GitHub в недоступность ассистента. Сессия закрывается на `ApplicationStopped`: процесс подняли мы, иначе он пережил бы остановку приложения. Токен при этом уезжает серверу инструментов окружением процесса — сервер приложения его не читает вовсе и потому не может вынести ни в лог, ни в ответ. Отчёт об инструментах возвращается в ответе маршрута (`tokens.tools`) и печатается в клиентском логе рядом со строками про память, задачу и инварианты.
+
+**Fat JAR — не артефакт модуля.** Первая сборка `:mcp-github` упала: `:mcp` собирал fat JAR задачей `jar`, а она и есть основной артефакт модуля, поэтому зависимые модули компилировались против него. Внутри fat JAR лежат классы зависимостей, и компилятор Kotlin, определяя версию `kotlinx-serialization` по классу `Serializable` из первой записи classpath, читал её из манифеста этого jar (1.0.0 — версия проекта) и отказывался собирать: «текущая версия ядра 1.0.0, а плагину нужно не меньше 1.3.0». Классификатор на основном `jar` не помог бы: `jar` остаётся артефактом модуля даже с классификатором. Поэтому в обоих модулях обычный `jar` остался тонким, а выполнимый fat JAR собирает отдельная задача `fatJar` (`:mcp:fatJar`, `:mcp-github:fatJar`).
+
+**Стандартный вывод — это протокол, и забирать его надо раньше, чем что-либо напечатает.** Второй живой прогон показал это ещё раз: сервер печатал в stdout «kotlin-logging: initializing…» и «Adding Tool: …» до того, как вывод был отдан транспорту, — сборка сервера (регистрация инструментов, первые обращения к логгерам SDK) шла раньше захвата вывода. Клиент разбирал эти строки как кадры («Failed to deserialize message from line: … Adding Tool …») и мог потерять ответ. Теперь вывод забирается под протокол **до** сборки сервера, а не после: печатать в канал протокола не может никто, логи сервера идут в поток ошибок.
+
+**Демонстрация** — `GitHubToolsDemoTest` (`./gradlew :server:githubDemo -Pdemo.live=1`). Инструмент на каждом этапе обёрнут записью ответа, поэтому проверяется не красноречие модели, а то, какие данные она получила. Ниже — строки прогона (служебные строки протокола и логи клиента Ktor опущены, у длинных многострочных записей показана первая строка):
+
+```
+[agent] GitHub (подставной): http://127.0.0.1:56083
+[agent] === Инструменты, которые агент получил от MCP-сервера ===
+[agent] github: kotlin-logging: initializing... active logger factory: Slf4jLoggerFactory
+[agent] инструменты GitHub (ai-challenge-github 1.0.0): get_repositories
+[agent] инструмент: get_repositories — Репозитории GitHub, доступные владельцу токена: полное имя, видимость, адрес страницы и описание.
+[agent]   схема аргументов: {"properties":{"visibility":{"type":"string","description":"какие репозитории вернуть: …","enum":["all","public","private"]}},"type":"object"}
+[agent] === Все репозитории ===
+[agent] Вызов инструментов → раунд 1 из 3 …
+[agent] Инструмент get_repositories → ответ; аргументы: {"visibility": "all"}; результат: 3 репозитория …
+[agent] вызовы инструментов: get_repositories
+[agent] раундов с инструментами: 1, их токенов: 890
+[agent] ответ: Вот все ваши репозитории на GitHub (владелец — **ulanocka**), всего 3: … **Итого: 2 приватных, 1 публичный.**
+[agent] === Публичные репозитории ===
+[agent] Инструмент get_repositories → ответ; аргументы: {"visibility": "public"}; результат: репозиторий dotfiles …
+[agent] вызовы инструментов: get_repositories
+[agent] раундов с инструментами: 1, их токенов: 673
+[agent] ответ: У вас **один публичный репозиторий**: … `ulanocka/dotfiles` …
+[agent] === Приватные репозитории ===
+[agent] Инструмент get_repositories → ответ; аргументы: {"visibility": "private"}; результат: ai_challenge_task1 и legacy-tools …
+[agent] вызовы инструментов: get_repositories
+[agent] раундов с инструментами: 1, их токенов: 754
+[agent] ответ: Вот ваши приватные репозитории на GitHub: … Всего найдено **2 приватных репозитория**.
+[agent] обращений к подставному GitHub: 3, все с Bearer-токеном
+[agent] === Отказ инструмента: нет токена ===
+[agent] Инструмент get_repositories → отказ; результат: переменная окружения GITHUB_TOKEN не задана: сходить в GitHub нельзя, положите токен доступа в GITHUB_TOKEN перед запуском сервера
+[agent] вызовы инструментов: get_repositories (отказ)
+[agent] раундов с инструментами: 1, их токенов: 852
+[agent] ответ: Не получилось посчитать: запрос к GitHub не прошёл. Сервер вернул ошибку: … назвать точное число репозиториев я не могу — гадать не буду. … export GITHUB_TOKEN=ghp_ваш_токен …
+[agent] отказ инструмента, дошедший до модели: переменная окружения GITHUB_TOKEN не задана: …
+[agent] сессия инструментов закрыта, подставной GitHub остановлен
+```
+
+В прогоне видно и то, что сервер печатает в поток ошибок: строка `[agent] github: kotlin-logging: …` — это его stderr, подхваченный клиентом, а не мусор в канале протокола (иначе он приехал бы испорченным кадром). При закрытии сессии SDK пишет в лог `java.util.concurrent.CancellationException: Closed` — это его внутреннее сообщение о нормальной остановке транспорта, а не сбой: тест зелёный.
+
+Демонстрация не смотрит на это глазами: она утверждает, что вызван ровно тот инструмент и хотя бы один раз, что расход инструментов не нулевой, что в публичные не попал приватный репозиторий и наоборот, что все обращения к GitHub ушли с `Bearer`-токеном, а отказ без токена имеет `isError` и не пустой ответ модели.
+
+**Служба теперь обслуживает оба сервера:** `mcp/mcp-server.sh start --server github` — тот же запуск, `status` (проверка по протоколу), `tools`, `logs`, `frames`, `stop`. Механика у серверов одна, поэтому второй сервер не отдельный скрипт, а выбор модуля, точки входа и каталога состояния; `--data-dir` у GitHub-сервера отклоняется: своих файлов данных у него нет, и делать вид, что опция что-то меняет, было бы хуже отказа.
+
+**Проверка.** `:agent:test` — 102 теста (плюс 12 новых: восемь на цикл вызовов, четыре на формат запроса), `:mcp:test` — 5 (+1 на адаптер инструментов), `:mcp-github:test` — 20 (новый модуль), `:server:test` — 7 (+1: демонстрация дня, без ключа пропускает себя), `:app:shared:testAndroidHostTest` — 19, APK собирается: 153 проверки, падений нет. Живые прогоны: демонстрация `:server:githubDemo` (четыре запроса к модели) и `:mcp:mcpDemo`, `:mcp:mcpTools`, `:mcp-github:mcpTools`.
+
+Что осталось непроверенным: настоящий `https://api.github.com` не вызывался ни разу (нет токена и `gh`), поэтому живые лимиты, 403 с `X-RateLimit-*` и пагинация на настоящем `Link` не проверены — проверено тем же кодом на подставном API; `:server:run` не поднимался (порт 8080 занят чужим процессом), поэтому демонстрация вызывает тот же `GitHubTools` напрямую, а не через HTTP-маршрут (маршрут отличается двумя строками и покрыт компиляцией и `:server:test`); на устройстве экран не проверялся — только host-тесты `app/shared` и сборка APK; выбор моделью между несколькими инструментами (сервер проекта и сервер GitHub одновременно) не проверялся: сегодня сервер подключает только инструменты GitHub.
+
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 
@@ -1084,18 +1166,30 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
   and the DeepSeek API DTOs. The server depends on it and only adapts HTTP. It also holds the state
   stores: the `InvariantStore`/`ProfileStore`/`MemoryStore` contracts with their in-memory and
   file-backed implementations (`agent/.../{invariants,profile,memory}/JsonFile*Store.kt`), because
-  both the app server and the MCP server read them. It knows nothing about MCP: the protocol lives in
-  `:mcp`.
+  both the app server and the MCP server read them. It knows nothing about MCP: tools reach it as a
+  plain contract (name, description, argument schema, call), so the protocol and the transport stay
+  outside the agent.
 
 * [/mcp](./mcp/src/main/kotlin) is the MCP layer of the project, a separate module on purpose —
   neither the agent nor the app server owns it. It holds the client (`McpClient.kt`): it starts an MCP
   server as a child process, speaks stdio JSON-RPC to it and returns the tools that server declares;
-  and the local MCP server (`ProjectMcpServer.kt`): the project data declared as read-only MCP tools.
-  It depends on `:agent` for those data types; `:server` does not depend on it at all.
+  the local MCP server (`ProjectMcpServer.kt`): the project data declared as read-only MCP tools;
+  and the part both servers share (`DeclaredTool.kt`, `StdioServer.kt`, `McpAgentTools.kt`): tool
+  declarations with their schemas, the stdio server loop and the adapter that turns MCP tools into
+  agent tools. It depends on `:agent` for those data types; `:server` does not depend on it at all.
+
+* [/mcp-github](./mcp-github/src/main/kotlin) is the second MCP server: the GitHub tools. One tool,
+  `get_repositories` (`visibility` = `all`/`public`/`private`), reading `GET /user/repos` with the
+  token from `GITHUB_TOKEN` (the API base is `GITHUB_API_BASE`, so tests point it at a stub). The
+  token is read when the tool is called, GitHub errors come back as `isError` results, and the
+  server never crashes. It shares the `:mcp` part and does not depend on `:server`.
 
 * [/server](./server/src/main/kotlin) is for the Ktor server application: HTTP routes, server plugins
   and the client-facing request/response models. It stays a plain HTTP app: MCP did not replace it,
-  and they serve different consumers (HTTP — the app and the human, MCP — the agent).
+  and they serve different consumers (HTTP — the app and the human, MCP — the agent). It is also the
+  one place that attaches MCP tools to chat requests (`GitHubTools.kt`): it keeps one long-lived
+  session with the GitHub MCP server and hands the tools to the agent, so the model can call them on
+  its own.
 
 ### Running the apps
 
@@ -1105,8 +1199,9 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Server: `./gradlew :server:run`
 - MCP connection demo (the client connects to the project MCP server, prints its tools): `./gradlew :mcp:mcpDemo`
 - MCP server tools, no connection (the server process prints what it declares and exits): `./gradlew :mcp:mcpTools`
-- MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`
-- MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:jar` then `java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (add `--list-tools` to print the tools instead of serving)
+- MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`, and `--server project|github` to pick which server the script owns (`github` takes `GITHUB_TOKEN`/`GITHUB_API_BASE` from the environment)
+- MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:fatJar` then `java -cp mcp/build/libs/mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (add `--list-tools` to print the tools instead of serving)
+- GitHub tools demo (the agent picks the MCP tool by a plain request; live model, stub GitHub API): `./gradlew :server:githubDemo -Pdemo.live=1`
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
   - JS target (slower, supports older browsers): `./gradlew :app:webApp:jsBrowserDevelopmentRun`

@@ -5,6 +5,9 @@ import kotlinx.serialization.Serializable
 
 /**
  * Запрос, отправляемый напрямую в DeepSeek API.
+ *
+ * @param tools Инструменты, которые предлагаются модели: пустой список и `null` —
+ *        одно и то же, ключа `tools` в запросе нет (значение по умолчанию не пишется).
  */
 @Serializable
 data class DeepSeekRequest(
@@ -13,5 +16,6 @@ data class DeepSeekRequest(
     @SerialName("max_tokens") val maxTokens: Int? = null,
     val temperature: Double? = null,
     val stop: List<String>? = null,
-    val stream: Boolean = false
+    val stream: Boolean = false,
+    val tools: List<ToolDeclaration>? = null
 )

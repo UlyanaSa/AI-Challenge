@@ -3,8 +3,14 @@ package com.osvin.aichallenge.agent
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.DialogBranch
+import com.osvin.aichallenge.models.ToolCall
+import com.osvin.aichallenge.models.ToolDeclaration
+import com.osvin.aichallenge.models.ToolFunction
 import com.osvin.aichallenge.models.config.AppConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import java.util.Locale
 
 /**
@@ -28,6 +34,10 @@ import java.util.Locale
  *        «скользящее окно» и «память агента»; null — значение по умолчанию.
  * @param branches Ветки диалога: структура и точки ветвления (стратегия «ветки диалога»).
  * @param activeBranchId Активная ветка, чей путь уходит в модель; null — основная линия.
+ * @param tools Инструменты, доступные модели в этом запросе: чем она может дополнить ответ
+ *        данными, которых у агента нет. Пустой список — инструментов нет, и запрос уходит
+ *        без них, как до этого дня: объявления в теле запроса стоят токенов и меняют
+ *        поведение модели, поэтому появляются только тогда, когда инструменты есть.
  */
 data class AgentOptions(
     val model: String? = null,
@@ -41,7 +51,8 @@ data class AgentOptions(
     val strategy: ContextStrategy = ContextStrategy.FULL,
     val windowMessages: Int? = null,
     val branches: List<DialogBranch> = emptyList(),
-    val activeBranchId: String? = null
+    val activeBranchId: String? = null,
+    val tools: List<AgentTool> = emptyList()
 )
 
 /**
@@ -162,6 +173,15 @@ class LlmAgent(
     private val invariantStore: InvariantStore = InMemoryInvariantStore(),
     private val invariantGuard: InvariantGuard = InvariantGuard()
 ) {
+
+    /**
+     * Разбор аргументов вызова: правила мягкие, потому что аргументы составляет модель,
+     * а не наша сериализация, — лишнее поле в них не повод отказать в вызове.
+     */
+    private val toolJson = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
 
     /**
      * Отправляет запрос пользователя в LLM и возвращает ответ модели.
@@ -298,55 +318,127 @@ class LlmAgent(
             ).joinToString("\n")
         )
 
-        // Контекст ограничен суммой запроса и бюджета ответа — проверяем до
-        // отправки, чтобы не платить за заведомо неуспешный запрос.
-        if (promptEstimate + maxTokens > spec.contextWindow) {
+        // Инструменты: их объявления уходят в запрос только тогда, когда инструменты есть.
+        // Пустой список в теле запроса — обещание, которого не будет, и плата токенами
+        // за пустое поле.
+        val declarations = options.tools
+            .map { it.declaration() }
+            .takeIf { it.isNotEmpty() }
+
+        // Переписка раунда: первый запрос — собранный контекст, дальше к нему добавляются
+        // вызов, который попросила модель, и ответ инструмента на него.
+        var pending = messages
+        var round = 0
+        var promptTokens = 0
+        var replyTokens = 0
+        var reasoningTokens = 0
+        var firstRoundTokens = 0
+        var reply = ""
+        var finishReason: String? = null
+        val toolCalls = mutableListOf<ToolCallRecord>()
+
+        while (true) {
+            // Инструменты предлагаются до исчерпания раундов, а затем пропадают из запроса:
+            // модель, которая просит инструмент и не может остановиться, иначе не дала бы
+            // ответа вовсе. Без объявлений она отвечает текстом — это и есть конец работы.
+            val offered = declarations?.takeIf { round < AppConfig.MAX_TOOL_ROUNDS }
+            val estimate = tokenCounter.countPrompt(pending)
+
+            // Контекст ограничен суммой запроса и бюджета ответа — проверяем перед каждым
+            // раундом, чтобы не платить за заведомо неуспешный запрос: ответы инструментов
+            // удлиняют переписку, и переполниться она может уже после первого обмена.
+            if (estimate + maxTokens > spec.contextWindow) {
+                logger.log(
+                    listOf(
+                        "Переполнение контекста",
+                        "оценка запроса: $estimate ток.",
+                        "бюджет ответа: $maxTokens ток.",
+                        "окно модели: ${spec.contextWindow} ток.",
+                        "раунд: $round из ${AppConfig.MAX_TOOL_ROUNDS}",
+                        "запрос не отправлен в API"
+                    ).joinToString("\n")
+                )
+                throw ContextOverflowException(estimate, maxTokens, spec.contextWindow)
+            }
+
+            val response = try {
+                llm.complete(
+                    DeepSeekRequest(
+                        model = model,
+                        messages = pending,
+                        maxTokens = maxTokens,
+                        temperature = temperature,
+                        stop = stopSequences,
+                        tools = offered
+                    )
+                )
+            } catch (apiError: LlmApiException) {
+                // Печатаем ответ провайдера как есть: по нему видно, чего именно не хватило
+                logger.log("Ошибка API (HTTP ${apiError.status})\n${apiError.message}")
+                throw apiError
+            }
+
+            val choice = response.choices.first()
+            val usage = response.usage
+            // Токены раунда складываются в общие: вызов инструмента — это ещё один полный
+            // запрос со всей перепиской, и без суммы отчёт показывал бы расход меньше настоящего.
+            val roundPrompt = usage?.promptTokens ?: estimate
+            val roundReply = usage?.completionTokens ?: tokenCounter.count(choice.message.content)
+            promptTokens += roundPrompt
+            replyTokens += roundReply
+            reasoningTokens += usage?.completionTokensDetails?.reasoningTokens ?: 0
+            if (round == 0) firstRoundTokens = roundPrompt + roundReply
+            finishReason = choice.finishReason
+
+            val requested = choice.message.toolCalls.orEmpty()
+            // Последний раунд заканчивается ответом модели в любом случае: инструментов ей
+            // уже не предлагали, и повторный вызов в ответе выполнять нечем — иначе цикл
+            // зависел бы от поведения модели и мог не кончиться.
+            if (requested.isEmpty() || offered == null) {
+                if (requested.isNotEmpty()) {
+                    logger.log(
+                        "Вызовы без инструментов: модель просит " +
+                            requested.joinToString { it.function.name } +
+                            ", но раунды исчерпаны — вызовы пропущены"
+                    )
+                }
+                reply = choice.message.content
+                break
+            }
+
+            round++
             logger.log(
                 listOf(
-                    "Переполнение контекста",
-                    "оценка запроса: $promptEstimate ток.",
-                    "бюджет ответа: $maxTokens ток.",
-                    "окно модели: ${spec.contextWindow} ток.",
-                    "запрос не отправлен в API"
+                    "Вызов инструментов → раунд $round из ${AppConfig.MAX_TOOL_ROUNDS}",
+                    "модель просит: ${requested.joinToString { it.function.name }}",
+                    "токенов запроса: $roundPrompt, токенов ответа: $roundReply"
                 ).joinToString("\n")
             )
-            throw ContextOverflowException(promptEstimate, maxTokens, spec.contextWindow)
+
+            val answers = requested.map { call -> call to performTool(call, options.tools, toolCalls) }
+            // Сообщение ассистента с вызовами остаётся в переписке как есть, а результат
+            // закрывает конкретный вызов (`tool_call_id`): без пары «вызов — результат»
+            // API отклонит следующий запрос.
+            pending = pending + choice.message + answers.map { (call, outcome) ->
+                ChatMessage(TOOL_ROLE, outcome.text, toolCallId = call.id)
+            }
         }
 
-        val response = try {
-            llm.complete(
-                DeepSeekRequest(
-                    model = model,
-                    messages = messages,
-                    maxTokens = maxTokens,
-                    temperature = temperature,
-                    stop = stopSequences
-                )
-            )
-        } catch (apiError: LlmApiException) {
-            // Печатаем ответ провайдера как есть: по нему видно, чего именно не хватило
-            logger.log("Ошибка API (HTTP ${apiError.status})\n${apiError.message}")
-            throw apiError
-        }
-
-        val choice = response.choices.first()
-        val reply = choice.message.content
-        val usage = response.usage
-        val promptTokens = usage?.promptTokens ?: promptEstimate
-        val replyTokens = usage?.completionTokens ?: tokenCounter.count(reply)
-        val reasoningTokens = usage?.completionTokensDetails?.reasoningTokens ?: 0
         val windowShare = promptTokens.toDouble() / spec.contextWindow
         val cost = spec.cost(promptTokens, replyTokens)
 
         logger.log(
-            listOf(
-                "Ответ ← $model",
-                "токенов запроса: $promptTokens (факт), $promptEstimate (оценка)",
-                "токенов ответа: $replyTokens (рассуждения: $reasoningTokens)",
-                "finish: ${choice.finishReason}",
-                "окно занято: ${percent(windowShare)}%",
-                "цена: ${costUsd(cost)}"
-            ).joinToString("\n")
+            buildList {
+                add("Ответ ← $model")
+                add("токенов запроса: $promptTokens (факт), $promptEstimate (оценка)")
+                add("токенов ответа: $replyTokens (рассуждения: $reasoningTokens)")
+                if (round > 0) {
+                    add("вызовов инструментов: ${toolCalls.size} в $round раунд(ах)")
+                }
+                add("finish: $finishReason")
+                add("окно занято: ${percent(windowShare)}%")
+                add("цена: ${costUsd(cost)}")
+            }.joinToString("\n")
         )
         logger.log(
             if (reply.isBlank()) {
@@ -358,8 +450,10 @@ class LlmAgent(
 
         // Пустой ответ — не успех: в чате он выглядит пузырём без текста, и причину
         // не видно. Отдаём наверх исключение с числами, клиент показывает его текст.
+        // Проверка только для последнего текста: у раунда с вызовом текста нет по правилам
+        // протокола, и пустота там — не ошибка.
         if (reply.isBlank()) {
-            throw EmptyReplyException(replyTokens, reasoningTokens, choice.finishReason)
+            throw EmptyReplyException(replyTokens, reasoningTokens, finishReason)
         }
 
         return AgentResult(
@@ -379,7 +473,7 @@ class LlmAgent(
                 contextWindow = spec.contextWindow,
                 maxOutputTokens = spec.maxOutputTokens,
                 promptWindowShare = windowShare,
-                replyFinishReason = choice.finishReason,
+                replyFinishReason = finishReason,
                 costUsd = cost,
                 historyRawTokens = historyRawTokens,
                 strategy = strategy.wire,
@@ -427,9 +521,110 @@ class LlmAgent(
                         ?.takeIf { it.isNotEmpty() },
                     updateTokens = context.invariants.call?.totalTokens ?: 0,
                     updateCostUsd = context.invariants.call?.costUsd
+                ),
+                // Инструменты: что вызывалось, сколько раундов это заняло и чего стоило.
+                // Токены — всех раундов, кроме первого: первый раунд состоялся бы и без
+                // инструментов, а остальные запросы появились из-за вызовов.
+                tools = ToolsReport(
+                    calls = toolCalls,
+                    rounds = round,
+                    tokens = promptTokens + replyTokens - firstRoundTokens
                 )
             )
         )
+    }
+
+    /**
+     * Объявление инструмента для запроса: то, из чего модель выбирает, что ей доступно.
+     *
+     * Схема аргументов уезжает как есть: её составил владелец инструмента
+     * ([AgentTool.parameters]), и агент её не переписывает — переписанная схема разошлась бы
+     * с тем, что инструмент умеет читать.
+     */
+    private fun AgentTool.declaration(): ToolDeclaration = ToolDeclaration(
+        function = ToolFunction(name = name, description = description, parameters = parameters)
+    )
+
+    /**
+     * Выполняет вызов, который попросила модель, и записывает его в отчёт.
+     *
+     * Неизвестный инструмент и упавший инструмент — тоже ответ модели, а не отказ запроса:
+     * она получает причину и либо отвечает без данных, либо исправляет вызов. Так падение
+     * внешнего сервиса не отменяет ответ на вопрос, который от него не зависел.
+     */
+    private suspend fun performTool(
+        call: ToolCall,
+        tools: List<AgentTool>,
+        records: MutableList<ToolCallRecord>
+    ): ToolOutcome {
+        val tool = tools.firstOrNull { it.name == call.function.name }
+        val outcome = when {
+            tool == null -> ToolOutcome(
+                "инструмент ${call.function.name} не объявлен: доступны " +
+                    tools.joinToString(", ") { it.name },
+                isError = true
+            )
+
+            else -> when (val arguments = call.arguments()) {
+                null -> ToolOutcome(
+                    "аргументы вызова ${call.function.name} не разобрались: ${call.function.arguments}",
+                    isError = true
+                )
+
+                else -> try {
+                    tool.call(arguments)
+                } catch (cancelled: CancellationException) {
+                    // Отмена не становится ответом модели: иначе оборванный запрос
+                    // продолжился бы ещё одним обращением к API.
+                    throw cancelled
+                } catch (error: Exception) {
+                    ToolOutcome(
+                        "инструмент ${call.function.name} не смог ответить: ${error.message}",
+                        isError = true
+                    )
+                }
+            }
+        }
+
+        records += ToolCallRecord(name = call.function.name, failed = outcome.isError)
+        logger.log(
+            listOf(
+                "Инструмент ${call.function.name} → ${if (outcome.isError) "отказ" else "ответ"}",
+                "аргументы: ${call.function.arguments}",
+                "результат: ${outcome.text.forLog()}"
+            ).joinToString("\n")
+        )
+        return outcome
+    }
+
+    /**
+     * Аргументы вызова из ответа модели: пустая строка — их нет, мусор — не разобрались.
+     *
+     * Модель отдаёт аргументы строкой JSON, и строка может прийти пустой (инструменту нужны
+     * только его умолчания) — это «аргументов нет». А вот неразобранную строку истолковать
+     * нельзя: вызов без нужного аргумента инструмент поймёт по-своему, поэтому о ней
+     * сообщается отказом, и модель может исправить вызов.
+     */
+    private fun ToolCall.arguments(): JsonObject? {
+        if (function.arguments.isBlank()) return JsonObject(emptyMap())
+        return try {
+            toolJson.parseToJsonElement(function.arguments) as? JsonObject
+        } catch (notJson: SerializationException) {
+            null
+        }
+    }
+
+    /**
+     * Результат инструмента для лога: длинный ответ обрезается.
+     *
+     * Список репозиториев на сто записей — это десятки тысяч символов, и в консоли он
+     * не читается, хотя модели уходит целиком. Обрезка помечена, поэтому по логу видно,
+     * что ответ был больше.
+     */
+    private fun String.forLog(): String = if (length <= TOOL_LOG_LIMIT) {
+        this
+    } else {
+        take(TOOL_LOG_LIMIT) + "… (обрезано, всего $length симв.)"
     }
 
     /**
@@ -952,6 +1147,15 @@ class LlmAgent(
         /** Роли сообщений в запросе к модели. */
         const val SYSTEM_ROLE = "system"
         const val USER_ROLE = "user"
+
+        /** Роль ответа инструмента: так модель узнаёт, что это результат её вызова. */
+        const val TOOL_ROLE = "tool"
+
+        /**
+         * Сколько символов результата инструмента пишется в лог: ответ на сто репозиториев —
+         * это десятки тысяч символов, и в консоли он не читается, хотя модели уходит целиком.
+         */
+        const val TOOL_LOG_LIMIT = 2_000
 
         /** Окно по умолчанию: столько последних сообщений отправляют стратегии окна и памяти. */
         const val DEFAULT_WINDOW_MESSAGES = 10

@@ -18,9 +18,15 @@
 #
 # Чего это не даёт: сторонний клиент к такому серверу не подключится. Клиенты MCP сами
 # поднимают процесс сервера и говорят с ним по своим каналам, а не по чужим (§5.2 в
-# docs/task-16-mcp.md). Для клиента команда запуска та же, что была: `java -cp mcp-1.0.0.jar
-# com.osvin.aichallenge.mcp.ProjectMcpServerKt` (без аргументов — сервер на stdio,
-# `--list-tools` — инструменты и выход).
+# docs/task-16-mcp.md). Для клиента команда запуска та же, что была: `java -cp
+# mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (без аргументов — сервер
+# на stdio, `--list-tools` — инструменты и выход). Запускается fat JAR, а не обычный jar
+# модуля: обычный — тонкий, и его берут те, кто зависит от модуля при компиляции.
+#
+# Серверов теперь два, и обслуживает их один скрипт: флаг `--server` выбирает, чей процесс
+# поднимать (`project` — данные проекта, `github` — инструмент get_repositories к GitHub API).
+# Механика у них одна — канал ввода, кадры, логи, остановка, — поэтому второй сервер здесь
+# не отдельный скрипт, а выбор модуля, точки входа и каталога состояния.
 #
 # Запускать сервер через Gradle нельзя, и это не забывчивость: Gradle пишет в стандартный
 # вывод процесса свои строки, а там кадры протокола. Поэтому инструмент — скрипт.
@@ -30,17 +36,44 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-JAR="$HERE/build/libs/mcp-1.0.0.jar"
-MAIN="com.osvin.aichallenge.mcp.ProjectMcpServerKt"
+# Какой сервер обслуживаем. У каждого своя точка входа, свой JAR и своё состояние, а
+# механика одна: процесс, канал ввода, кадры, логи. Второй сервер (GitHub) появился
+# после первого, и копия скрипта разошлась бы с этой — правки в запуске и остановке
+# пришлось бы повторять дважды.
+SERVER="project"
 
-# Состояние службы — рядом со сборкой этого модуля: каталог `build` уже не попадает в git,
-# а значит pid, канал и логи не надо никуда добавлять в .gitignore.
-STATE="$HERE/build/mcp-server"
-PID_FILE="$STATE/server.pid"
-KEEPER_FILE="$STATE/keeper.pid"
-FIFO="$STATE/stdin.fifo"
-LOG_FILE="$STATE/server.log"
-FRAMES_FILE="$STATE/frames.log"
+# Что зависит от выбранного сервера: модуль сборки, JAR, класс точки входа и каталог
+# состояния. Состояние — рядом со сборкой своего модуля: каталог `build` уже не попадает
+# в git, поэтому pid, канал и логи не надо никуда добавлять в .gitignore.
+select_server() {
+    case "$SERVER" in
+        project)
+            MODULE=":mcp"
+            JAR="$HERE/build/libs/mcp-1.0.0-all.jar"
+            MAIN="com.osvin.aichallenge.mcp.ProjectMcpServerKt"
+            STATE="$HERE/build/mcp-server"
+            ;;
+        github)
+            MODULE=":mcp-github"
+            GITHUB_DIR="$ROOT/mcp-github"
+            JAR="$GITHUB_DIR/build/libs/mcp-github-1.0.0-all.jar"
+            MAIN="com.osvin.aichallenge.mcp.github.GitHubMcpServerKt"
+            STATE="$GITHUB_DIR/build/mcp-server"
+            ;;
+        *)
+            fail "неизвестный сервер: $SERVER (ожидается project или github)"
+            ;;
+    esac
+    # Собирается именно fat JAR: для запуска процессом нужен один файл со всеми
+    # зависимостями, а обычный jar модуля остаётся тонким — его берут те, кто зависит
+    # от модуля при компиляции (см. комментарий у fatJar в build.gradle.kts модуля).
+    BUILD_TASK="$MODULE:fatJar"
+    PID_FILE="$STATE/server.pid"
+    KEEPER_FILE="$STATE/keeper.pid"
+    FIFO="$STATE/stdin.fifo"
+    LOG_FILE="$STATE/server.log"
+    FRAMES_FILE="$STATE/frames.log"
+}
 
 # Сколько ждать остановки сервера, прежде чем снимать силой.
 STOP_TIMEOUT="${MCP_STOP_TIMEOUT:-10}"
@@ -61,31 +94,40 @@ TOOLS_LIST_FRAME='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 
 usage() {
     cat <<'USAGE'
-Локальный MCP-сервер проекта: запуск и остановка.
+Локальные MCP-серверы проекта: запуск и остановка.
 
-  ./mcp/mcp-server.sh start [--no-build] [--data-dir DIR]
-  ./mcp/mcp-server.sh stop
-  ./mcp/mcp-server.sh restart [--no-build] [--data-dir DIR]
-  ./mcp/mcp-server.sh status
-  ./mcp/mcp-server.sh tools
-  ./mcp/mcp-server.sh logs
-  ./mcp/mcp-server.sh frames
+  ./mcp/mcp-server.sh start [--server project|github] [--no-build] [--data-dir DIR]
+  ./mcp/mcp-server.sh stop [--server project|github]
+  ./mcp/mcp-server.sh restart [--server project|github] [--no-build] [--data-dir DIR]
+  ./mcp/mcp-server.sh status [--server project|github]
+  ./mcp/mcp-server.sh tools [--server project|github]
+  ./mcp/mcp-server.sh logs [--server project|github]
+  ./mcp/mcp-server.sh frames [--server project|github]
 
   start    поднять сервер фоном: pid, канал, кадры и логи — в build/mcp-server модуля
   stop     остановить: SIGTERM, ожидание выхода, при упорстве SIGKILL
   restart  остановить и поднять снова
   status   работает ли и отвечает ли на tools/list (код возврата 1, если не запущен)
-  tools    что сервер объявляет клиенту (то же, что ./gradlew :mcp:mcpTools)
+  tools    что сервер объявляет клиенту (для project — то же, что ./gradlew :mcp:mcpTools,
+           для github — :mcp-github:mcpTools)
   logs     логи сервера — поток ошибок текущего запуска
   frames   кадры протокола — поток вывода текущего запуска
 
+Какой сервер обслуживается (по умолчанию project):
+
+  project  данные проекта: инварианты и профиль (:mcp)
+  github   инструмент get_repositories к GitHub API (:mcp-github). Токен и адрес API
+           берутся из окружения самого скрипта (GITHUB_TOKEN, GITHUB_API_BASE) и
+           передаются процессу сервера как есть; без токена сервер отвечает отказом
+           на вызов инструмента, а не падает при запуске
+
 Опции start/restart:
   --no-build       не собирать fat JAR перед запуском (по умолчанию собирается)
-  --data-dir DIR   каталог данных с invariants.json и profile.json
-                   (по умолчанию server/data в корне репозитория — те же файлы,
+  --data-dir DIR   каталог данных с invariants.json и profile.json — только для сервера
+                   project (по умолчанию server/data в корне репозитория — те же файлы,
                    что читает сервер приложения)
 
-Состояние службы: mcp/build/mcp-server (server.pid, server.log, frames.log, stdin.fifo).
+Состояние службы: <модуль>/build/mcp-server (server.pid, server.log, frames.log, stdin.fifo).
 Кадр в сервер можно положить руками: printf '%s\n' '{"jsonrpc":"2.0","id":9,"method":"tools/list"}' > <FIFO>
 USAGE
 }
@@ -130,11 +172,11 @@ file_age() {
 
 build_jar() {
     if [ "$NO_BUILD" = "1" ]; then
-        [ -f "$JAR" ] || fail "нет $JAR, а сборка отключена (--no-build): соберите его через ./gradlew :mcp:jar"
+        [ -f "$JAR" ] || fail "нет $JAR, а сборка отключена (--no-build): соберите его через ./gradlew $BUILD_TASK"
         return 0
     fi
-    say "сборка: ./gradlew :mcp:jar"
-    (cd "$ROOT" && ./gradlew :mcp:jar --console=plain -q)
+    say "сборка: ./gradlew $BUILD_TASK"
+    (cd "$ROOT" && ./gradlew "$BUILD_TASK" --console=plain -q)
     [ -f "$JAR" ] || fail "после сборки нет $JAR"
 }
 
@@ -168,11 +210,20 @@ start() {
     : >"$FRAMES_FILE"
 
     start_keeper
-    # Инструменты читают те же файлы, что сервер приложения, поэтому путь к данным
-    # задаётся явно: иначе сервер читал бы data/ относительно текущего каталога, и
-    # «правила проекта» зависели бы от того, откуда его запустили.
-    INVARIANT_FILE="$DATA_DIR/invariants.json" \
-        PROFILE_FILE="$DATA_DIR/profile.json" \
+    # Инструменты сервера проекта читают те же файлы, что сервер приложения, поэтому путь
+    # к данным задаётся явно: иначе они читались бы относительно текущего каталога, и
+    # «правила проекта» зависели бы от того, откуда запустили скрипт. Серверу GitHub
+    # добавлять нечего: токен и адрес API он наследует из окружения скрипта.
+    local launch_env=()
+    if [ "$SERVER" = "project" ]; then
+        launch_env+=(
+            "INVARIANT_FILE=$DATA_DIR/invariants.json"
+            "PROFILE_FILE=$DATA_DIR/profile.json"
+        )
+    fi
+    # `${…[@]+…}` — совместимость с bash 3.2 в macOS: пустой массив под `set -u`
+    # иначе считается необъявленной переменной.
+    env ${launch_env[@]+"${launch_env[@]}"} \
         nohup "$JAVA" -cp "$JAR" "$MAIN" <"$FIFO" >"$FRAMES_FILE" 2>>"$LOG_FILE" &
     local server=$!
     echo "$server" >"$PID_FILE"
@@ -187,7 +238,10 @@ start() {
     fi
 
     say "сервер запущен: pid $server"
-    say "  данные:      $DATA_DIR"
+    say "  сервер:      $SERVER ($MAIN)"
+    if [ "$SERVER" = "project" ]; then
+        say "  данные:      $DATA_DIR"
+    fi
     say "  логи:        $LOG_FILE"
     say "  кадры:       $FRAMES_FILE"
     say "  остановить:  $0 stop"
@@ -280,17 +334,24 @@ show_file() {
 
 NO_BUILD=0
 DATA_DIR="$ROOT/server/data"
+DATA_DIR_GIVEN=0
 
 command="${1:-help}"
 if [ $# -gt 0 ]; then shift; fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --server)
+            shift
+            [ $# -gt 0 ] || fail "--server требует имя: project или github"
+            SERVER="$1"
+            ;;
         --no-build) NO_BUILD=1 ;;
         --data-dir)
             shift
             [ $# -gt 0 ] || fail "--data-dir требует каталог"
             DATA_DIR="$1"
+            DATA_DIR_GIVEN=1
             ;;
         -h | --help)
             usage
@@ -303,6 +364,15 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+select_server
+
+# У сервера GitHub нет своих файлов данных: инструменты читают GitHub по токену, и
+# каталог данных к ним не относится. Молча принять опцию значило бы сделать вид, что
+# она что-то меняет.
+if [ "$SERVER" != "project" ] && [ "$DATA_DIR_GIVEN" = "1" ]; then
+    fail "--data-dir относится к серверу project: у сервера $SERVER своих файлов данных нет"
+fi
 
 case "$DATA_DIR" in
     /*) ;;

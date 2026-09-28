@@ -51,6 +51,9 @@ internal fun liveClient(): LlmClient = DeepSeekClient(
             json(Json {
                 ignoreUnknownKeys = true
                 isLenient = true
+                // У ответа с вызовом инструмента `content` приходит null: без этого разбор
+                // падал бы на пустом тексте, то есть ровно там, где начинается вызов инструмента.
+                coerceInputValues = true
             })
         }
         install(HttpTimeout) {

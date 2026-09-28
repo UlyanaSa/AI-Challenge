@@ -39,6 +39,7 @@ import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -55,6 +56,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import java.io.File
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
@@ -70,6 +72,9 @@ val client = HttpClient(CIO) {
         json(Json {
             ignoreUnknownKeys = true
             isLenient = true
+            // У ответа с вызовом инструмента `content` приходит null: без этого разбор
+            // падал бы на пустом тексте, то есть ровно там, где начинается вызов инструмента.
+            coerceInputValues = true
         })
     }
     install(HttpTimeout) {
@@ -157,6 +162,16 @@ val profileStore = JsonFileProfileStore(JsonFileProfileStore.defaultFile())
  * с первого запуска.
  */
 val invariantStore = JsonFileInvariantStore(JsonFileInvariantStore.defaultFile())
+
+/**
+ * Инструменты, которые сервер даёт модели: доступ к GitHub по протоколу MCP.
+ *
+ * Живёт рядом со сторами, потому что устроен так же — общее на все запросы состояние,
+ * которое переживает запрос (агент создаётся на каждый запрос, а сессия инструментов
+ * одна). Отличие в том, что это состояние чужого процесса: сервер инструментов — 
+ * отдельная программа, и она поднимается при первом запросе, которому нужны инструменты.
+ */
+val githubTools = GitHubTools()
 
 /**
  * Профиль, который уходит в запрос к модели и показывается клиенту: пусто в сторе —
@@ -309,6 +324,13 @@ fun Application.module() {
         }
     }
 
+    // Остановка сервера гасит и сервер инструментов: он поднят нашим процессом, поэтому
+    // его завершение — наша забота, иначе после остановки приложения в системе остался бы
+    // висеть чужой процесс, которому больше некому отвечать.
+    monitor.subscribe(ApplicationStopped) {
+        runBlocking { githubTools.close() }
+    }
+
     routing {
         /**
          * Проверка состояния сервера и API ключа.
@@ -384,7 +406,11 @@ fun Application.module() {
             )
             val result = agent.run(
                 userMessage = request.message,
+                // Инструменты спрашиваются на каждый запрос: их даёт чужой процесс, и он
+                // мог не подняться в прошлый раз. Список при живом соединении не стоит
+                // ничего — соединение уже есть.
                 options = request.toAgentOptions(profile = profileStore.profileOrDefault())
+                    .copy(tools = githubTools.available())
             )
 
             call.respond(

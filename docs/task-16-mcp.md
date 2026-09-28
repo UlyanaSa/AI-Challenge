@@ -265,7 +265,7 @@ Gradle разрешил бы конфликт сам, а каталог объя
 
 ```
 $ ./gradlew :mcp:mcpTools
-ai-challenge-project 1.0.0 — инструменты MCP-сервера проекта
+ai-challenge-project 1.0.0 — инструменты, которые объявляет сервер
 инструментов: 2; список объявлен кодом, поэтому изменения не рассылаются (listChanged = false)
 
 1. list_invariants
@@ -304,9 +304,13 @@ ai-challenge-project 1.0.0 — инструменты MCP-сервера про�
 `mcp/mcp-server.sh` — запуск, остановка и наблюдение за локальным MCP-сервером:
 
 ```
-./mcp/mcp-server.sh start [--no-build] [--data-dir DIR]
-./mcp/mcp-server.sh stop | restart | status | tools | logs | frames
+./mcp/mcp-server.sh start [--server project|github] [--no-build] [--data-dir DIR]
+./mcp/mcp-server.sh stop | restart | status | tools | logs | frames [--server project|github]
 ```
+
+День 17 добавил второй сервер (GitHub) и флаг `--server` в этом же скрипте — механика у
+серверов одна, поэтому второй сервер не отдельный скрипт (см. `### task-17` в README и
+`docs/task-17-github-mcp.md`).
 
 **Зачем это нужно, если клиент поднимает сервер сам.** MCP на stdio — процесс, которым
 владеет подключившийся: сервер живёт ровно столько, сколько живёт клиент, и «оставить его

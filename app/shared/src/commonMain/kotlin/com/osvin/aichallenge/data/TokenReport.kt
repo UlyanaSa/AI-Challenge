@@ -38,6 +38,8 @@ import kotlin.math.roundToLong
  *        не отчитывался, и состояние полосы задачи остаётся прежним.
  * @param invariants Отчёт по инвариантам: правила в запросе и вердикт проверки
  *        на конфликт с ними. Вердикт `violated` объясняет отказ ассистента.
+ * @param tools Отчёт по инструментам: что модель вызывала и чего это стоило.
+ *        Пустой отчёт — вызовов не было.
  */
 @Serializable
 data class TokenReport(
@@ -64,7 +66,8 @@ data class TokenReport(
     @SerialName("branch_id") val branchId: String? = null,
     @SerialName("memory") val memory: MemoryReport = MemoryReport(),
     @SerialName("task") val task: TaskReport? = null,
-    @SerialName("invariants") val invariants: InvariantReport = InvariantReport()
+    @SerialName("invariants") val invariants: InvariantReport = InvariantReport(),
+    @SerialName("tools") val tools: ToolsReport = ToolsReport()
 ) {
     /**
      * Одна запись лога на весь отчёт: характеристики идут отдельными строками,
@@ -101,6 +104,17 @@ data class TokenReport(
         add("[agent] Ответ ← $model")
         add("[agent] токенов запроса: $promptTokens (факт), $promptEstimate (оценка)")
         add("[agent] токенов ответа: $replyTokens (рассуждения: $replyReasoningTokens)")
+        // Вызовы инструментов печатаются по одному: по строкам видно, чем агент добывал
+        // данные и где инструмент отказал, — иначе рост расхода остался бы без объяснения
+        if (tools.calls.isNotEmpty()) {
+            add(
+                "[agent] вызовов инструментов: ${tools.calls.size} в ${tools.rounds} раунд(ах), " +
+                    "${tools.tokens} ток."
+            )
+            tools.calls.forEach { call ->
+                add("[agent] - ${call.name}${if (call.failed) " | отказ" else ""}")
+            }
+        }
         add("[agent] finish: ${replyFinishReason ?: "неизвестно"}")
         add("[agent] окно занято: ${fixed(promptWindowShare * 100, 4)}%")
         add("[agent] цена: ${costUsd?.let { "$" + fixed(it, 6) } ?: "тариф не опубликован"}")

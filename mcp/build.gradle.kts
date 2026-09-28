@@ -37,13 +37,26 @@ dependencies {
  * Сервер MCP запускают процессом, а не задачей Gradle.
  *
  * Поэтому у модуля есть fat JAR с точкой входа сервера: клиент поднимает
- * `java -cp mcp/build/libs/mcp-1.0.0.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt`.
+ * `java -cp mcp/build/libs/mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt`.
  * Задача Gradle для запуска сервера не заводится намеренно: Gradle пишет свои строки
  * в стандартный вывод процесса, а вывод MCP-сервера — это канал протокола, и чужая
  * строка ломает кадр. Тот же jar годится для конфига стороннего клиента (Claude Desktop
  * и подобных), которому нужна команда запуска.
+ *
+ * Fat JAR — отдельная задача ([fatJar]), а обычный [Jar] остаётся тонким. Это не
+ * украшение: тонкий jar — основной артефакт модуля, и его получают те, кто зависит от
+ * `:mcp` при компиляции. Собранный fat JAR в этой роли ломает сборку потребителя: внутри
+ * него лежат классы зависимостей, и компилятор Kotlin, ища версию kotlinx-serialization
+ * по классу `Serializable` из первой записи classpath, читает версию из манифеста этого
+ * jar (1.0.0 — версия проекта) и отказывается собирать: «текущая версия ядра 1.0.0,
+ * а плагину нужно не меньше 1.3.0». Именно так и случилось, когда от `:mcp` начал
+ * зависеть `:mcp-github`.
  */
-tasks.jar {
+val fatJar by tasks.registering(Jar::class) {
+    group = "build"
+    description = "Тонкий jar модуля не нужен для запуска: собирает выполнимый fat JAR сервера"
+    archiveClassifier.set("all")
+
     manifest {
         attributes(
             "Main-Class" to "com.osvin.aichallenge.mcp.ProjectMcpServerKt",
@@ -51,6 +64,7 @@ tasks.jar {
         )
     }
 
+    from(sourceSets["main"].output)
     from(configurations.runtimeClasspath.get().map {
         if (it.isDirectory) it else zipTree(it)
     })

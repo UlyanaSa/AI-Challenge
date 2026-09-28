@@ -45,6 +45,8 @@ import kotlinx.serialization.Serializable
  * @param invariants Инварианты проекта: правила, которые ушли в запрос системным сообщением,
  *        вердикт проверки на конфликт с ними и цена этой проверки. Пустой отчёт — правил нет
  *        (человек убрал их все), и тогда ни блока в запросе, ни служебного вызова не было.
+ * @param tools Инструменты, которые вызывала модель, и цена этих вызовов. Пустой отчёт —
+ *        вызовов не было: либо инструменты не предлагались, либо модель ответила сама.
  */
 @Serializable
 data class TokenReport(
@@ -74,7 +76,8 @@ data class TokenReport(
     @SerialName("branch_id") val branchId: String? = null,
     @SerialName("memory") val memory: MemoryReport = MemoryReport(),
     @SerialName("task") val task: TaskReport = TaskReport(),
-    @SerialName("invariants") val invariants: InvariantReport = InvariantReport()
+    @SerialName("invariants") val invariants: InvariantReport = InvariantReport(),
+    @SerialName("tools") val tools: ToolsReport = ToolsReport()
 )
 
 /**
