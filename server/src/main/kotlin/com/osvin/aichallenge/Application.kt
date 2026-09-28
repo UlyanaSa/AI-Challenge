@@ -263,10 +263,15 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
  *        так же, с одним отличием: сессию открывает первый запрос к модели, а не человек
  *        кнопкой, потому что у сервиса курсов нет ни доступа, который надо настроить, ни
  *        состояния, которое надо показать (см. [CurrencyTools]).
+ * @param pipelineTools Инструменты пайплайна — три шага цепочки «курсы → сводка → файл».
+ *        Поднимаются тем же ленивым путём, что и курсы: сервер пайплайна не спрашивает
+ *        ни ключей, ни разрешений, а цепочку собирает модель по описаниям инструментов
+ *        (см. [PipelineTools]).
  */
 fun Application.module(
     githubTools: GitHubTools = GitHubTools(),
-    currencyTools: CurrencyTools = CurrencyTools()
+    currencyTools: CurrencyTools = CurrencyTools(),
+    pipelineTools: PipelineTools = PipelineTools()
 ) {
     // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
@@ -343,6 +348,7 @@ fun Application.module(
         runBlocking {
             githubTools.close()
             currencyTools.close()
+            pipelineTools.close()
         }
     }
 
@@ -567,11 +573,12 @@ fun Application.module(
             )
             val result = agent.run(
                 userMessage = request.message,
-                // Инструменты — из двух серверов: GitHub (сессию открывает человек кнопкой)
-                // и сервиса курсов (сессию открывает первый запрос). Недоступный сервер даёт
-                // пустой список, и это не отменяет ответ: модель отвечает без инструментов.
+                // Инструменты — из трёх серверов: GitHub (сессию открывает человек кнопкой),
+                // сервиса курсов (сессию открывает первый запрос) и пайплайна (три шага цепочки,
+                // порядок вызовов выбирает модель). Недоступный сервер даёт пустой список,
+                // и это не отменяет ответ: модель отвечает без инструментов.
                 options = request.toAgentOptions(profile = profileStore.profileOrDefault())
-                    .copy(tools = githubTools.tools() + currencyTools.tools())
+                    .copy(tools = githubTools.tools() + currencyTools.tools() + pipelineTools.tools())
             )
 
             call.respond(

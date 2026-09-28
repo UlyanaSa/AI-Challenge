@@ -200,10 +200,9 @@ const val CURRENCY_MCP_COMMAND_ENV = "CURRENCY_MCP_COMMAND"
  * до сервиса сами — иначе их пришлось бы повторять в двух местах и однажды забыть.
  */
 internal fun currencyMcpServerConfig(env: Map<String, String> = System.getenv()): McpServerConfig =
-    env[CURRENCY_MCP_COMMAND_ENV]?.takeIf { it.isNotBlank() }?.let { command ->
-        val parts = command.trim().split(WHITESPACE)
-        McpServerConfig(command = parts.first(), args = parts.drop(1))
-    } ?: localMcpServerConfig(CurrencyMcpServer.MAIN_CLASS, args = listOf(MCP_FLAG))
-
-/** Разделитель частей команды запуска: пробелы и переводы строк из окружения. */
-private val WHITESPACE = Regex("\\s+")
+    mcpServerConfigFromEnvironment(
+        env = env,
+        variable = CURRENCY_MCP_COMMAND_ENV,
+        mainClass = CurrencyMcpServer.MAIN_CLASS,
+        args = listOf(MCP_FLAG)
+    )

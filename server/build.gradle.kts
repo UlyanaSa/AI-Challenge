@@ -24,6 +24,9 @@ dependencies {
     // зависимости (драйвер SQLite, HTTP-клиент) приходят вместе с ним: процесс сервиса
     // работает на том же classpath, что и сервер приложения.
     implementation(project(":currency-monitor"))
+    // Сервер пайплайна поднимается так же — из своего classpath: модуль нужен и как зависимость
+    // (имя точки входа), и как классы процесса, который читает базу службы курсов и пишет отчёты.
+    implementation(project(":mcp-pipeline"))
     implementation(libs.bundles.ktor.server)
     implementation(libs.bundles.ktor.client)
     implementation(libs.ktor.serialization.kotlinx.json)
@@ -132,6 +135,28 @@ val githubDemo by tasks.registering(Test::class) {
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
     filter { includeTestsMatching("com.osvin.aichallenge.GitHubToolsDemoTest") }
+    // Только печать демонстрации: статусы тестов в консоль не нужны.
+    testLogging { events("standardOut") }
+    outputs.upToDateWhen { false }
+}
+
+/**
+ * Демонстрация дня 19: модель сама собирает цепочку из трёх серверов инструментов пайплайна.
+ *
+ * Сервер инструментов — тот же, что у приложения ([PipelineTools]): процесс поднимается
+ * по протоколу MCP, история курсов — временная база с одной вставкой, файл пишется настоящий.
+ * Цепочку собирает модель по описаниям инструментов: в просьбе нет ни их имён, ни порядка,
+ * а проверяется и порядок вызовов, и то, что данные дошли между шагами до файла.
+ *
+ * `./gradlew :server:pipelineDemo -Pdemo.live=1` — живой прогон, ключ из `server/.env`;
+ * без флага задача только напоминает, как её запускать.
+ */
+val pipelineDemo by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Прогон демонстрации пайплайна: цепочку «курсы → сводка → файл» собирает модель"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.osvin.aichallenge.PipelineDemoTest") }
     // Только печать демонстрации: статусы тестов в консоль не нужны.
     testLogging { events("standardOut") }
     outputs.upToDateWhen { false }

@@ -1284,6 +1284,58 @@ GitHub: одна долгая сессия, лениво на первом за�
 карточка показала изменение, посчитанное сервисом по сохранённым сводкам (EUR 95,0 → 96,0,
 +1,0526%), и «сохранено 2 ч из 24». Подробности — `docs/task-18-currency-monitor.md`, §17–§21.
 
+### task-19
+
+День 19. Композиция MCP-инструментов: цепочку «курсы → сводка → файл» собирает модель
+
+День 18 дал агенту третий MCP-сервер (курсы валют) — и один инструмент. День 19 проверяет
+другое: сервер объявляет **три независимых инструмента**, а нужную последовательность из них
+собирает **модель** по обычной просьбе, без зашитого порядка и без кода, который знал бы про
+все три шага сразу.
+
+**Новый модуль `:mcp-pipeline`** — четвёртый сервер инструментов и второй, который читает базу
+службы курсов (только на чтение, через `SqliteCurrencyRateRepository`). Он не внутри
+`:currency-monitor` (тот собирает данные и живёт на ВМ службой, этот пишет отчёты на машине
+человека) и не внутри `:mcp` (там общая часть объявления инструментов — ею новый модуль
+пользуется, а не заменяет её). Флага `--mcp` у точки входа нет: работы без клиента у пайплайна
+не существует, поэтому запуск без аргументов и есть сервер, а база открывается лениво — в режиме
+`--list-tools` список берётся из объявлений.
+
+**Три инструмента — три отдельных объявления:**
+
+- `getExchangeRates(base?, currencies?)` — последние курсы из истории, ответ JSON целиком:
+  `base`, `updatedAt` (момент самого свежего значения, а не время ответа), `rates`, `missing`
+  (валюты, о которых спросили, а истории у них нет). База — аргумент: история хранится к рублю,
+  но вопрос «сколько долларов стоит евро» законен, и пересчёт делается там, где есть оба курса
+  (шесть знаков, `HALF_UP`; курс базы к самой себе — ровно единица, а не `1.000000`). Валюта без
+  истории в курсы не попадает: ноль был бы утверждением о курсе, которого в данных нет.
+- `summarizeRates(rates)` — принимает документ первого шага целиком и отдаёт текст: момент, база,
+  число валют, размах и по строке на валюту с пометками «дороже всех» / «дешевле всех». Порядок
+  валют — как в документе, числа — как пришли (с запятой в дробной части), размах печатается без
+  хвостовых нулей. Строка принимается наравне с числом: документ может составить и модель.
+- `saveToFile(name?, content)` — пишет текст в каталог отчётов и отвечает путём, размером и
+  SHA-256. Имя от модели проверяется (разделители каталогов, абсолютный путь, `..` и пустое имя —
+  отказ, а не укорочение до имени файла), каталог создаётся записью, файл перезаписывается, имя
+  по умолчанию — `rates-ГГГГ-ММ-ДД-ЧЧММ.md`.
+
+**Порядок не зашит нарочно.** Один инструмент «сделай отчёт» не проверял бы ничего: передача
+данных между инструментами существует ровно там, где их вызывают по отдельности. В описаниях
+сказано, чей ответ принимает следующий шаг, — этого хватает, чтобы цепочка собралась, и мало,
+чтобы собраться без модели. Отказы инструментов — результат с `isError` и причиной словами
+(недопустимая база, незнакомая валюта, пустая история, неразобранный документ, имя с каталогом),
+потому что причина уходит модели и она может исправить вызов.
+
+**Проверка.** `:mcp-pipeline:test` — 20 проверок: инструменты по отдельности (курсы и пересчёт,
+разбор документа и отказы, запись файла и проверка имени) и цепочка на настоящем процессе MCP
+с временной базой (три инструмента объявлены; документ первого шага уходит второму, текст
+второго — третьему, файл на диске равен сводке). Живая демонстрация `./gradlew
+:server:pipelineDemo -Pdemo.live=1`: модель `deepseek-v4-flash` по просьбе «получи текущие курсы
+USD, EUR и GEL относительно рубля, сформируй краткую сводку и сохрани её в файл» позвала
+инструменты в порядке `getExchangeRates` → `summarizeRates` → `saveToFile` (три раунда,
+3247 токенов); в сводку ушёл документ первого шага (155 знаков), в файл — сводка второго
+(149 знаков), в файле те же 149 знаков, ответ — «Готово. Курсы получены, сводка сформирована
+и сохранена.». Подробности — `docs/task-19-mcp-pipeline.md`.
+
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 
@@ -1387,6 +1439,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Currency service tools, no connection: `./gradlew :currency-monitor:mcpTools` (prints all three tools; `period` is required with `DAY | WEEK | MONTH`, `hours` is required as a whole number of hours from 1 to 720)
 - One currency update and exit (`CURRENCY_API_BASE`, `CURRENCY_DB`, `CURRENCY_INTERVAL` come from the environment; exit code 1 if nothing was saved): `./gradlew :currency-monitor:currencyOnce`
 - Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: minute collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
+- Pipeline tools (chain of three: rates → summary → file), no connection: `./gradlew :mcp-pipeline:mcpTools`; the chain itself on a live model: `./gradlew :server:pipelineDemo -Pdemo.live=1`; as a standalone process (`PIPELINE_OUTPUT_DIR`, `CURRENCY_DB` from the environment): `./gradlew :mcp-pipeline:fatJar` then `java -jar mcp-pipeline/build/libs/mcp-pipeline-1.0.0-all.jar`
 - Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps sudo -n -u currency env CURRENCY_DB=/var/lib/currency-monitor/currency.db java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run` (the database belongs to the service user and the default path is relative, so both the user and the path are named in the command; otherwise the child creates an empty database of its own)
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
