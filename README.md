@@ -1201,15 +1201,24 @@ JSON не отдаёт, `open.er-api.com` считает обратные кур
 GitHub: одна долгая сессия, лениво на первом запросе, закрытие на `ApplicationStopped`.
 Кнопки и шторки в интерфейсе у курсов нет — настраиваемого доступа и состояния для показа тоже
 нет, поэтому инструменты просто доступны модели. Команду запуска можно задать переменной
-`CURRENCY_MCP_COMMAND` (например, `ssh vps java -jar /opt/currency-monitor/currency-monitor.jar --mcp`);
+`CURRENCY_MCP_COMMAND` (например, `ssh vps sudo -n -u currency env CURRENCY_DB=/var/lib/currency-monitor/currency.db java -jar /opt/currency-monitor/currency-monitor.jar --mcp`);
 недоступный процесс инструментов **не отменяет ответ** — вопрос идёт модели без
 инструментов, причина в логе, попытка повторяется на следующем запросе.
 
-**Развёртывание на VPS — артефакты, а не запуск с этой машины:** `:currency-monitor:fatJar`
+**Развёртывание на VPS — не только артефакты, но и живой запуск:** `:currency-monitor:fatJar`
 даёт `currency-monitor-1.0.0-all.jar` с манифестом (запуск ровно такой, как в задании),
 а `currency-monitor/deploy/currency-monitor.service` — unit-файл с `CURRENCY_DB`,
-`CURRENCY_INTERVAL=PT1M` и `Restart=on-failure` вместе с инструкцией установки. Запуска на
-настоящем VPS не было: SSH-доступа с этой машины нет, и ОС машины — macOS, а не сервер.
+`CURRENCY_INTERVAL=PT1M` и `Restart=on-failure` вместе с инструкцией установки. Сервис развёрнут
+на виртуальной машине (Ubuntu 25.10, OpenJDK 21, systemd) и работает службой: `active` и
+`enabled`, `User=currency`, без перезапусков; в логе видно, что он ходит к настоящему ЦБ, пишет
+историю в `/var/lib/currency-monitor/currency.db` и обновляется по минутному расписанию, а после
+`systemctl reboot` поднимается сам и продолжает сбор с той же историей. Проверено и то, чем
+служба полезна клиенту: кадры MCP к развёрнутому jar вернули три инструмента и курсы из базы
+службы, а локальный `:server:run` с `CURRENCY_MCP_COMMAND`, указывающим на машину, ответил
+на `GET /v1/currency` теми же курсами. Попутно выяснилось то, чего не видно в unit-файле:
+процесс клиента нужно запускать пользователем службы и с явным `CURRENCY_DB`
+(`ssh vps sudo -n -u currency env CURRENCY_DB=/var/lib/currency-monitor/currency.db java -jar …`),
+иначе он создаст себе пустую базу рядом с собой.
 
 **Проверка.** `:currency-monitor:test` — 57 проверок (разбор ответа ЦБ с номиналом и не-2xx,
 хранилище на настоящем SQLite, границы окна сводки, поведение при отсутствии предыдущего курса
@@ -1378,7 +1387,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Currency service tools, no connection: `./gradlew :currency-monitor:mcpTools` (prints all three tools; `period` is required with `DAY | WEEK | MONTH`, `hours` is required as a whole number of hours from 1 to 720)
 - One currency update and exit (`CURRENCY_API_BASE`, `CURRENCY_DB`, `CURRENCY_INTERVAL` come from the environment; exit code 1 if nothing was saved): `./gradlew :currency-monitor:currencyOnce`
 - Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: minute collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
-- Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run`
+- Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps sudo -n -u currency env CURRENCY_DB=/var/lib/currency-monitor/currency.db java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run` (the database belongs to the service user and the default path is relative, so both the user and the path are named in the command; otherwise the child creates an empty database of its own)
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
   - JS target (slower, supports older browsers): `./gradlew :app:webApp:jsBrowserDevelopmentRun`
