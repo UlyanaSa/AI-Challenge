@@ -17,7 +17,8 @@ class RoomChatStore(context: Context) : ChatStore {
             ChatDatabase.MIGRATION_1_2,
             ChatDatabase.MIGRATION_2_3,
             ChatDatabase.MIGRATION_3_4,
-            ChatDatabase.MIGRATION_4_5
+            ChatDatabase.MIGRATION_4_5,
+            ChatDatabase.MIGRATION_5_6
         )
         .build()
 
@@ -39,7 +40,8 @@ class RoomChatStore(context: Context) : ChatStore {
                 createdAt = chat.createdAt,
                 updatedAt = chat.updatedAt,
                 activeBranchId = chat.activeBranchId,
-                strategy = chat.strategy
+                strategy = chat.strategy,
+                pinned = chat.pinned
             )
         )
     }
@@ -59,6 +61,10 @@ class RoomChatStore(context: Context) : ChatStore {
                 toolCalls = message.tools.toJsonColumn()
             )
         )
+    }
+
+    override suspend fun trimMessages(chatId: String, keep: Int) {
+        messageDao.trimOfChat(chatId, keep)
     }
 
     override suspend fun retitle(chatId: String, title: String) {
@@ -101,7 +107,8 @@ private fun ChatEntity.toChat(): Chat = Chat(
     createdAt = createdAt,
     updatedAt = updatedAt,
     activeBranchId = activeBranchId,
-    strategy = strategy
+    strategy = strategy,
+    pinned = pinned
 )
 
 private fun ChatMessageEntity.toMessage(): ChatMessage = ChatMessage(

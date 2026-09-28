@@ -19,6 +19,13 @@ import kotlinx.serialization.Serializable
  *        приложения или открытия соседнего чата чат должен читать те записи памяти,
  *        что сделаны в нём, — иначе выбранная стратегия терялась бы, и записанное
  *        в шторке памяти не уходило бы в модель.
+ * @param pinned Закреплён ли чат. Закреплённые идут первыми в списке и не удаляются:
+ *        так помечен чат, который приложение ведёт само (лента курсов,
+ *        [CurrencyChat]) — его нельзя ни потерять среди диалогов, ни удалить,
+ *        потому что второго такого чата никто не заведёт. Признак лежит у чата,
+ *        а не вычисляется сравнением с [CurrencyChat.ID]: закрепление — свойство
+ *        списка, а не одного служебного чата, и второму закреплённому чату
+ *        не пришлось бы для этого переписывать правила сортировки и удаления.
  */
 @Serializable
 data class Chat(
@@ -27,5 +34,6 @@ data class Chat(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = createdAt,
     val activeBranchId: String? = null,
-    val strategy: String = ContextStrategy.MEMORY.wire
+    val strategy: String = ContextStrategy.MEMORY.wire,
+    val pinned: Boolean = false
 )

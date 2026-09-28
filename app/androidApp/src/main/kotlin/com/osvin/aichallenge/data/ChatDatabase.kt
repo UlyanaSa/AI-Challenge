@@ -27,7 +27,13 @@ data class ChatEntity(
     /** Активная ветка диалога; null — основная линия. */
     val activeBranchId: String? = null,
     /** Стратегия управления контекстом чата ([Chat.strategy]): wire-значение [ContextStrategy.wire]. */
-    val strategy: String
+    val strategy: String,
+    /**
+     * Закреплён ли чат ([Chat.pinned]): закреплённые идут первыми в списке и не удаляются.
+     * Хранится числом 0/1, как и все булевы колонки SQLite; значение по умолчанию —
+     * «не закреплён», поэтому записи, сделанные до схемы 6, читаются как обычные чаты.
+     */
+    val pinned: Boolean = false
 )
 
 /**
@@ -80,7 +86,7 @@ data class DialogBranchEntity(
  */
 @Dao
 abstract class ChatDao(private val db: ChatDatabase) {
-    @Query("SELECT * FROM chats ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM chats ORDER BY pinned DESC, updatedAt DESC")
     abstract suspend fun all(): List<ChatEntity>
 
     @Query("SELECT * FROM chats WHERE id = :chatId")
@@ -139,6 +145,19 @@ abstract class ChatMessageDao {
     @Query("DELETE FROM chat_messages WHERE chatId = :chatId")
     abstract suspend fun deleteOfChat(chatId: String)
 
+    /**
+     * Оставляет [keep] последних сообщений чата, более старые удаляет.
+     *
+     * Список оставляемых берётся подзапросом, а не `DELETE ... LIMIT`: предел у удаления
+     * в SQLite доступен только со специальной сборкой, а подзапрос работает везде.
+     * Порядок по `id` — порядок добавления: он же порядок ленты ([ChatMessageDao.ofChat]).
+     */
+    @Query(
+        "DELETE FROM chat_messages WHERE chatId = :chatId AND id NOT IN " +
+            "(SELECT id FROM chat_messages WHERE chatId = :chatId ORDER BY id DESC LIMIT :keep)"
+    )
+    abstract suspend fun trimOfChat(chatId: String, keep: Int)
+
     @Query("UPDATE chats SET updatedAt = :at WHERE id = :chatId")
     abstract suspend fun touchChat(chatId: String, at: Long)
 
@@ -155,7 +174,7 @@ abstract class ChatMessageDao {
  */
 @Database(
     entities = [ChatEntity::class, ChatMessageEntity::class, DialogBranchEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -261,6 +280,21 @@ abstract class ChatDatabase : RoomDatabase() {
         val MIGRATION_4_5: Migration = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE chat_messages ADD COLUMN toolCalls TEXT")
+            }
+        }
+
+        /**
+         * Переход со схемы 5 на схему 6: у чата появился признак закрепления.
+         *
+         * Данные не теряются: колонка добавляется аддитивно, и у старых чатов она равна
+         * 0 — «не закреплён». Это и нужно: закреплённым чат делает приложение, когда
+         * заводит свою ленту курсов, а чаты, заведённые человеком до обновления, ею
+         * не являются. Проставить закрепление у них задним числом значило бы решить
+         * за пользователя, какой из его диалогов всегда первый.
+         */
+        val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             }
         }
 

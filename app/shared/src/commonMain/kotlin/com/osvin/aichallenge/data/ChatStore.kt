@@ -15,7 +15,12 @@ package com.osvin.aichallenge.data
  * на остальных таргетах — [InMemoryChatStore].
  */
 interface ChatStore {
-    /** Все чаты: свежие сверху (по времени последнего сообщения). */
+    /**
+     * Все чаты: закреплённые первыми, дальше свежие сверху (по времени последнего
+     * сообщения). Закрепление важнее свежести намеренно: закреплённый чат ведёт
+     * само приложение (лента курсов), и его место в списке не должно зависеть
+     * от того, писали ли в соседний диалог только что.
+     */
     suspend fun chats(): List<Chat>
 
     /** Чат по идентификатору; null — такого чата нет. */
@@ -29,6 +34,17 @@ interface ChatStore {
 
     /** Дописывает сообщение в конец чата и обновляет время последнего сообщения. */
     suspend fun append(chatId: String, message: ChatMessage)
+
+    /**
+     * Оставляет в чате не больше [keep] последних сообщений, более старые удаляются.
+     *
+     * Нужна лентам, которые живут сами: в закреплённый чат строка приходит по расписанию,
+     * и без обрезки он дорос бы до размера, при котором его чтение стало бы заметным
+     * на каждом открытии. Предел задаёт вызывающий, а не хранилище: сколько хранить —
+     * решение того, кто пишет в чат, и вторая копия этого числа в каждом хранилище
+     * разошлась бы с первой.
+     */
+    suspend fun trimMessages(chatId: String, keep: Int)
 
     /** Меняет заголовок чата. */
     suspend fun retitle(chatId: String, title: String)
@@ -61,7 +77,7 @@ class InMemoryChatStore : ChatStore {
     private val messages = mutableMapOf<String, MutableList<ChatMessage>>()
     private val branches = mutableMapOf<String, MutableList<DialogBranch>>()
 
-    override suspend fun chats(): List<Chat> = chats.values.sortedByDescending { it.updatedAt }
+    override suspend fun chats(): List<Chat> = chats.values.sortedWith(CHAT_ORDER)
 
     override suspend fun chat(id: String): Chat? = chats[id]
 
@@ -74,6 +90,14 @@ class InMemoryChatStore : ChatStore {
     override suspend fun append(chatId: String, message: ChatMessage) {
         messages.getOrPut(chatId) { mutableListOf() } += message
         chats[chatId]?.let { chats[chatId] = it.copy(updatedAt = message.timestamp) }
+    }
+
+    override suspend fun trimMessages(chatId: String, keep: Int) {
+        val stored = messages[chatId] ?: return
+        // takeLast, а не drop: у ленты ценны последние строки, а не первые
+        if (stored.size > keep) {
+            messages[chatId] = stored.takeLast(keep).toMutableList()
+        }
     }
 
     override suspend fun retitle(chatId: String, title: String) {
@@ -102,3 +126,14 @@ class InMemoryChatStore : ChatStore {
         chats[chatId]?.let { chats[chatId] = it.copy(strategy = strategy) }
     }
 }
+
+/**
+ * Порядок чатов в списке: закреплённые первыми, внутри — свежие сверху.
+ *
+ * Тот же порядок задаёт запрос к таблице чатов на Android ([ChatDao.all]): сравниватель
+ * здесь нужен потому, что в памяти сортировать приходится самому, и держать этот
+ * порядок в одном месте важнее, чем сэкономить три строки: иначе список на разных
+ * платформах показывал бы чаты по-разному.
+ */
+private val CHAT_ORDER: Comparator<Chat> =
+    compareByDescending<Chat> { it.pinned }.thenByDescending { it.updatedAt }

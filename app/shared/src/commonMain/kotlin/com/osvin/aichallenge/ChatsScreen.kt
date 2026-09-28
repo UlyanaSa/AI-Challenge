@@ -39,11 +39,16 @@ import com.osvin.aichallenge.data.Chat
 /**
  * Экран списка чатов: каждый чат — отдельный диалог со своей сессией агента.
  *
- * @param chats Сохранённые чаты, свежие сверху.
+ * Первыми идут закреплённые чаты: такой чат ведёт само приложение (лента курсов
+ * валют), поэтому он не должен теряться среди диалогов и не удаляется — кнопки
+ * удаления у него нет.
+ *
+ * @param chats Сохранённые чаты: закреплённые первыми, дальше свежие сверху.
  * @param loaded Загружен ли список из БД: до этого показывать нечего.
  * @param onOpen Открыть чат и продолжить его диалог.
  * @param onNew Перейти к настройке агента для нового чата.
- * @param onDelete Удалить чат вместе с его историей и сессией.
+ * @param onDelete Удалить чат вместе с его историей и сессией; у закреплённых чатов
+ *        кнопки удаления нет, и сюда они не попадают.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -153,6 +158,10 @@ fun ChatsScreen(
 /**
  * Строка списка чатов: заголовок, идентификатор сессии агента и когда в чате
  * писали последний раз.
+ *
+ * У закреплённого чата видно пометку и нет кнопки удаления: такой чат ведёт
+ * приложение (лента курсов), и предлагать удалить то, чего репозиторий всё равно
+ * не удалит, значило бы показать кнопку, которая молча ничего не делает.
  */
 @Composable
 private fun ChatRow(
@@ -181,7 +190,11 @@ private fun ChatRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "сессия ${chat.id.take(8)}… · ${lastActivity(chat.updatedAt)}",
+                    // Пометка идёт перед временем: по ней понятно, почему чат стоит
+                    // первым и почему его нельзя убрать — иначе строка списка молчала бы
+                    // о том, чем этот чат отличается от соседних
+                    text = (if (chat.pinned) "закреплён · " else "") +
+                        "сессия ${chat.id.take(8)}… · ${lastActivity(chat.updatedAt)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -189,8 +202,10 @@ private fun ChatRow(
                 )
             }
 
-            IconButton(onClick = onDelete) {
-                Text("✕", fontSize = 18.sp, color = MaterialTheme.colorScheme.error)
+            if (!chat.pinned) {
+                IconButton(onClick = onDelete) {
+                    Text("✕", fontSize = 18.sp, color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }

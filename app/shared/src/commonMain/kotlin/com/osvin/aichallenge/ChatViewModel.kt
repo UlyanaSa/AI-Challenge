@@ -6,6 +6,7 @@ import com.osvin.aichallenge.data.Chat
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.ContextStrategy
+import com.osvin.aichallenge.data.CurrencyChangeFeed
 import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.data.GitHubConnection
@@ -15,6 +16,7 @@ import com.osvin.aichallenge.data.MemoryReport
 import com.osvin.aichallenge.data.TaskSnapshot
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.repository.ChatRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,6 +67,12 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val github: StateFlow<GitHubConnection?> = repository.github
     val githubError: StateFlow<String?> = repository.githubError
 
+    // Изменение курсов за сутки — шапка закреплённого чата, и причина последнего отказа:
+    // считается на сервере, клиент только показывает то, что пришло. Это ни память,
+    // ни задача: курсы не часть диалога, а показание прибора со своим расписанием
+    val currencyChange: StateFlow<CurrencyChangeFeed?> = repository.currencyChange
+    val currencyChangeError: StateFlow<String?> = repository.currencyChangeError
+
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
 
@@ -76,13 +84,56 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     private val _chatsLoaded = MutableStateFlow(false)
     val chatsLoaded: StateFlow<Boolean> = _chatsLoaded.asStateFlow()
 
+    // Цикл монитора курсов: нужен, чтобы повторный запуск не завёл второй цикл
+    private var currencyMonitorJob: Job? = null
+
     init {
         // Восстанавливаем чаты, затем проверяем связь
         viewModelScope.launch {
             repository.loadChats()
+            // Закреплённый чат курсов заводится до того, как список показан: иначе
+            // на первом запуске список успел бы мигнуть пустым, а чат появился бы
+            // только с первого удара монитора. Заведение идемпотентно, поэтому
+            // второй вызов из самого монитора ничего не меняет
+            repository.ensureCurrencyChat()
             _chatsLoaded.value = true
+            // Монитор курсов стартует после чтения списка чатов: закреплённый чат он
+            // заводит сам, и два обновления списка наперегонки показали бы список
+            // без закреплённого чата — тот появился бы только со следующего удара
+            startCurrencyMonitor()
         }
         checkHealth()
+    }
+
+    /**
+     * Запуск монитора курсов валют: строка с курсами приходит в закреплённый чат
+     * сразу и дальше раз в минуту, а на смене часа — сводка прошедшего часа.
+     *
+     * Цикл живёт в области видимости модели ([viewModelScope]): приложение открыто —
+     * лента наполняется, экран уничтожен — цикл умирает вместе с моделью, и никакой
+     * фоновой службы, которая будила бы устройство ради ленты, не заводится.
+     *
+     * Повторный вызов второй цикл не заводит: два цикла печатали бы по строке каждый
+     * и лента получала бы по две строки за минуту, поэтому запуск идемпотентен — как
+     * и заведение самого чата ([ChatRepository.ensureCurrencyChat]).
+     */
+    fun startCurrencyMonitor() {
+        if (currencyMonitorJob?.isActive == true) return
+        currencyMonitorJob = viewModelScope.launch {
+            repository.runCurrencyMonitor()
+        }
+    }
+
+    /**
+     * Чтение изменения курсов за [hours] часов для шапки закреплённого чата.
+     * Умолчание — сутки: шапка показывает суточную картину; сама лента сводку часа
+     * читает своим чтением, и сюда оно не заходит — иначе в шапке оказался бы час
+     * под заголовком «за сутки».
+     */
+    fun loadCurrencyChange(hours: Int = 24) {
+        viewModelScope.launch {
+            repository.loadCurrencyChange(hours)
+        }
     }
 
     /**

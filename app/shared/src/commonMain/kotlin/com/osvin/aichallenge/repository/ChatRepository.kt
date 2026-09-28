@@ -16,6 +16,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,6 +72,14 @@ import kotlin.random.Random
  * и место, откуда доступ взят. Вызов инструмента ([callGitHubTool]) остаётся
  * в ленте служебной записью ([MessageRole.TOOL]) с командой и результатом, но в модель
  * не уезжает: это след работы для человека, а не реплика диалога.
+ *
+ * Курсы валют ([CurrencyChat]) — единственное, что репозиторий ведёт сам, без человека:
+ * монитор ([runCurrencyMonitor]) раз в минуту кладёт в закреплённый чат строку
+ * с текущими курсами и на смене часа — сводку прошедшего часа. Пишет он их ролью
+ * [MessageRole.MONITOR], поэтому лента их показывает, а модель не получает: это
+ * показание прибора, а не реплика диалога. Оба окна изменения читаются одним маршрутом
+ * ([loadCurrencyChange] для суток в шапке и чтение часа для сводки): считает изменение
+ * сервер, а клиент только печатает цифры, что пришли.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -167,6 +176,20 @@ class ChatRepository(
     // и причина отказа инструмента не должна теряться среди ошибок диалога.
     private val _githubError = MutableStateFlow<String?>(null)
     val githubError: StateFlow<String?> = _githubError.asStateFlow()
+
+    // Изменение курсов за сутки для шапки закреплённого чата; null — ещё не читали
+    // или прочитать не удалось. Это снимок, а не вывод клиента: первое и последнее
+    // значение курса за окно считает сервер, и вторая копия этих подсчётов на клиенте
+    // разошлась бы с серверной — тем более что делить и вычитать деньги клиенту нечем.
+    private val _currencyChange = MutableStateFlow<CurrencyChangeFeed?>(null)
+    val currencyChange: StateFlow<CurrencyChangeFeed?> = _currencyChange.asStateFlow()
+
+    // Отказ сервера на чтение изменения курсов; null — отказа не было. Это своя ошибка,
+    // а не [memoryError]: сбой курсов не должен выглядеть как сбой памяти. Снимок при
+    // отказе не стирается: показать «изменения нет» там, где оно уже прочитано, значило
+    // бы соврать — причина остаётся строкой рядом со снимком.
+    private val _currencyChangeError = MutableStateFlow<String?>(null)
+    val currencyChangeError: StateFlow<String?> = _currencyChangeError.asStateFlow()
 
     // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
     // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
@@ -312,8 +335,14 @@ class ChatRepository(
      * и остаются на месте, поэтому удаление диалога не стирает рабочую память
      * задачи, записанную из любого чата. Если сервер недоступен, чат на устройстве
      * всё равно удалён.
+     *
+     * Закреплённый чат не удаляется: это лента, которую приложение ведёт само
+     * ([CurrencyChat]), и кнопки удаления у неё на экране нет. Сторож нужен и здесь:
+     * удали чат — монитор на следующем ударе завёл бы новый пустой, и вся лента
+     * потерялась бы вместе с чатом, а сессия на сервере осталась бы висеть.
      */
     suspend fun deleteChat(id: String) {
+        if (store.chat(id)?.pinned == true) return
         store.delete(id)
         if (_activeChat.value?.id == id) {
             _activeChat.value = null
@@ -397,6 +426,11 @@ class ChatRepository(
      * работы агента для человека, а не реплика диалога. Модель не должна видеть команды,
      * которых не было в переписке с ней, — иначе вызов выглядел бы уже сделанным, и она
      * повторила бы его или сослалась на данные, которых в её ответе не было.
+     *
+     * Строки монитора ([MessageRole.MONITOR]) не включаются по той же причине: курсы
+     * валют называло приложение, а не человек, и в истории модели они читались бы как
+     * реплика пользователя. В закреплённом чате-ленте вопросов не бывает вовсе — его
+     * поле ввода скрыто, и запрос туда не уходит ([Chat.pinned]).
      */
     suspend fun sendMessage(message: String, settings: GenerationSettings = GenerationSettings()) {
         if (message.isBlank()) return
@@ -406,6 +440,10 @@ class ChatRepository(
             _state.value = ChatUiState.Error("Чат не выбран")
             return
         }
+        // Лента монитора — не диалог: писать в неё нечем (поле ввода скрыто), а модель
+        // здесь отвечать не на что. Сторож нужен и в репозитории, а не только на экране:
+        // иначе прямой вызов отправил бы на сервер вопрос, которого человек не задавал.
+        if (chat.pinned) return
 
         _state.value = ChatUiState.Loading
 
@@ -416,8 +454,10 @@ class ChatRepository(
         // История чата до этого вопроса: все ветки вместе, у каждой своя метка.
         // Записи о вызовах инструментов отсеиваются: это след работы для человека
         // ([MessageRole.TOOL]), а не реплика диалога, и модель не должна видеть команды,
-        // которых не было в переписке с ней.
-        val history = store.messages(chat.id).filter { it.role != MessageRole.TOOL }
+        // которых не было в переписке с ней. Строки монитора — там же ([MessageRole.MONITOR]):
+        // их писало приложение, и в истории модели они выглядели бы словами пользователя.
+        val history = store.messages(chat.id)
+            .filter { it.role != MessageRole.TOOL && it.role != MessageRole.MONITOR }
 
         try {
             val response = client.post("$baseUrl/v1/chat/completions") {
@@ -1022,6 +1062,264 @@ class ChatRepository(
     }
 
     /**
+     * Закреплённый чат курсов валют: находит его в хранилище, а если такого чата ещё
+     * нет — заводит.
+     *
+     * Идентификатор у чата постоянный ([CurrencyChat.ID]), поэтому поиск по нему
+     * и есть проверка «чат уже есть»: второй такой чат не появится, сколько бы раз
+     * метод ни вызвали (монитор зовёт его на каждом ударе). Заголовок берётся из
+     * постоянной, а не из первого сообщения: сообщений у ленты ещё нет, а в списке
+     * чатов она должна называться сразу. Чат закреплён ([Chat.pinned]) — список
+     * показывает его первым, а удалить его нельзя; стратегия — та же, что у нового
+     * чата по умолчанию: модель в ленте не участвует, но настройка чата не должна
+     * оказаться пустой, если шторку памяти в нём откроют.
+     */
+    suspend fun ensureCurrencyChat(): Chat {
+        store.chat(CurrencyChat.ID)?.let { return it }
+        val chat = Chat(
+            id = CurrencyChat.ID,
+            title = CurrencyChat.TITLE,
+            pinned = true,
+            strategy = ContextStrategy.MEMORY.wire
+        )
+        store.create(chat)
+        _chats.value = store.chats()
+        return chat
+    }
+
+    /**
+     * Текущие курсы: `GET /v1/currency`. Отдаёт снимок как есть — в том числе пустой:
+     * сервер вправе ответить без курсов, объяснившись словами в `note`, и это не сбой
+     * запроса, а состояние данных.
+     *
+     * Отказ и сбой сети исключением не бросают, а возвращают null и остаются в логе:
+     * читает этот метод монитор, и его удар должен пропуститься тихо. Строка ошибки
+     * в ленте курсов была бы сообщением, которого человек не просил: лента показывает
+     * курсы, а не разбор сбоев, и повторись сбой — она бы заполнилась ошибками.
+     */
+    suspend fun loadCurrencySnapshot(): CurrencySnapshot? {
+        return try {
+            val response = client.get("$baseUrl/v1/currency")
+            if (response.status.isSuccess()) {
+                response.body()
+            } else {
+                platformLog("agent", "[agent] Курсы не прочитаны: сервер ответил ${response.status.value}")
+                null
+            }
+        } catch (e: Exception) {
+            _isServerOnline.value = false
+            platformLog("agent", "[agent] Курсы не прочитаны: ${e.message ?: "нет соединения"}")
+            null
+        }
+    }
+
+    /**
+     * Изменение курсов за [hours] часов для шапки закреплённого чата:
+     * `GET /v1/currency/change?hours=N`.
+     *
+     * Ответ кладётся в состояние только целиком ([currencyChange]): частичного снимка
+     * не бывает — изменение по валютам считает сервер одним ответом, и дорисовать
+     * недостающую валюту на клиенте нечем. Прежний снимок при отказе остаётся
+     * на месте, а причина ложится строкой ([currencyChangeError]).
+     */
+    suspend fun loadCurrencyChange(hours: Int = CURRENCY_DAY_HOURS) {
+        readCurrencyChange(hours)?.let { _currencyChange.value = it }
+    }
+
+    /**
+     * Дописывает строку монитора в ленту чата и держит её длину в пределе
+     * ([CURRENCY_FEED_LIMIT]).
+     *
+     * Роль у сообщения служебная ([MessageRole.MONITOR]): строку напечатало приложение,
+     * поэтому лента рисует её карточкой, а в историю для модели она не попадает
+     * ([sendMessage]). Ветки у такой строки нет: лента курсов линейна, ветвить её нечем.
+     *
+     * Чат, который открыт на экране, обновляется сразу: лента цены в том, что видно
+     * без переоткрытия чата, — а строка приходит раз в минуту, и ждать её появления
+     * до следующего открытия было бы странно. Про закрытый чат ничего не делается:
+     * его лента читается из хранилища при открытии.
+     */
+    suspend fun appendMonitorMessage(chatId: String, text: String) {
+        val message = ChatMessage(role = MessageRole.MONITOR, content = text)
+        store.append(chatId, message)
+        store.trimMessages(chatId, CURRENCY_FEED_LIMIT)
+        _chats.value = store.chats()
+        if (_activeChat.value?.id == chatId) {
+            _messages.value = DialogBranches.activePath(
+                history = store.messages(chatId),
+                branches = store.branches(chatId),
+                activeBranchId = _activeBranchId.value
+            )
+        }
+    }
+
+    /**
+     * Монитор курсов: удар сразу при запуске, дальше — раз в [CURRENCY_TICK_MS].
+     *
+     * Цикл бесконечный и рассчитан на то, что живёт в области видимости приложения
+     * ([ChatViewModel.startCurrencyMonitor]): приложение открыто — лента наполняется,
+     * закрыто — цикл умирает вместе со своей областью. Это и есть требуемая частота
+     * без будильников и фоновых служб: пока приложение живо, минута тикает.
+     *
+     * Обе зависимости цикла — момент времени и пауза — берутся параметрами: в тесте
+     * так задаётся своё время и свой шаг, а приложение зовёт метод без аргументов
+     * и получает системные часы и настоящую минутную паузу. Это тот же приём, что
+     * и подставной транспорт в конструкторе ([client]): с ним цикл проверяется
+     * без ожидания настоящей минуты.
+     *
+     * @param now Момент удара в миллисекундах UTC.
+     * @param wait Пауза между ударами.
+     */
+    suspend fun runCurrencyMonitor(
+        now: () -> Long = { System.currentTimeMillis() },
+        wait: suspend () -> Unit = { delay(CURRENCY_TICK_MS) }
+    ) {
+        var hour: Long? = null
+        while (true) {
+            hour = currencyMonitorTick(now(), hour)
+            wait()
+        }
+    }
+
+    /**
+     * Один удар монитора за момент [moment].
+     *
+     * Удар читает курсы и, если они пришли, дописывает минутную строку в закреплённый
+     * чат. Сводка добавляется только тогда, когда сменился час: на первом ударе час
+     * лишь запоминается. Так перезапуск приложения не плодит сводки — он ведь не видел
+     * прошедшего часа, и «сводка» за него была бы пересказом того, чего монитор не
+     * наблюдал. Неудачное чтение сводки удар не повторяет: час уже сменился, и вторая
+     * попытка через минуту назвала бы тем же именем следующий час. Причина уходит в лог.
+     *
+     * @param lastHour Номер часа предыдущего удара (UTC, от начала эпохи); null — ударов
+     *        ещё не было.
+     * @return Номер текущего часа — его запоминает цикл ([runCurrencyMonitor]).
+     */
+    private suspend fun currencyMonitorTick(moment: Long, lastHour: Long?): Long {
+        val chat = ensureCurrencyChat()
+        val hour = moment / HOUR_MS
+
+        val snapshot = loadCurrencySnapshot()
+        if (snapshot != null) {
+            if (snapshot.rates.isNullOrEmpty()) {
+                // Курсов нет, но сервер сказал почему — в ленту это не печатается:
+                // там расписание, а не разбор сбоев; строку видно в логе
+                platformLog("agent", "[agent] Курсы без значений: ${snapshot.note ?: "причина не названа"}")
+            } else {
+                appendMonitorMessage(chat.id, minuteLine(snapshot, moment))
+            }
+        }
+
+        if (lastHour != null && lastHour != hour) {
+            val feed = readCurrencyChange(CURRENCY_HOUR_HOURS)
+            if (feed != null && feed.currencies.isNotEmpty()) {
+                appendMonitorMessage(chat.id, hourSummary(hour, feed))
+            }
+        }
+        return hour
+    }
+
+    /**
+     * Текст минутной строки: `12:05 · EUR 95,8709 · USD 84,3414 · GEL 32,1693`.
+     *
+     * Время берётся из метки сервера, а не из удара монитора: по ней видно, когда курсы
+     * посчитал сервер, — удар же мог запоздать. Метка не разобралась или не пришла —
+     * печатается время удара, и строка остаётся со временем, а не без него. Числа идут
+     * как их послал сервер, меняется только разделитель ([decimalComma]): округлить
+     * их значило бы показать курс, которого сервер не называл.
+     */
+    private fun minuteLine(snapshot: CurrencySnapshot, moment: Long): String {
+        val time = snapshot.updatedAt?.let(::utcTimeFromMark) ?: utcTime(moment)
+        val rates = snapshot.rates.orEmpty()
+            .entries
+            .joinToString(" · ") { (currency, rate) -> "$currency ${rate.decimalComma()}" }
+        return "$time · $rates"
+    }
+
+    /**
+     * Текст сводки часа: первой строкой интервал, дальше по строке на валюту
+     * ([CurrencyChangeItem.line]).
+     *
+     * Интервал — прошедший час до текущего ([hour] — номер часа удара): сервер считает
+     * изменение за окно, закончившееся на границе часа, поэтому прошедший час и есть
+     * то окно, данные которого пришли. Если приложение не тикало дольше часа, сводка
+     * всё равно описывает последний полный час — тот, что покрыт данными, — а не весь
+     * пропущенный промежуток, о котором наблюдений нет.
+     */
+    private fun hourSummary(hour: Long, feed: CurrencyChangeFeed): String = buildString {
+        append("Сводка за час ")
+        append(utcTime((hour - 1) * HOUR_MS))
+        append('–')
+        append(utcTime(hour * HOUR_MS))
+        append(':')
+        feed.currencies.forEach { item ->
+            append('\n')
+            append(item.line())
+        }
+    }
+
+    /**
+     * Чтение изменения курсов за [hours] часов без записи в состояние шапки.
+     *
+     * Отдельно от [loadCurrencyChange] потому, что этим чтением пользуются оба окна:
+     * шапка спрашивает сутки и показывает снимок на экране, а сводке часа нужен час,
+     * и подменять им суточный снимок шапки нельзя — на экране оказалось бы изменение
+     * за час под заголовком «за сутки». Причина отказа — одна на оба окна
+     * ([currencyChangeError]): маршрут один, и сбой у него общий.
+     */
+    private suspend fun readCurrencyChange(hours: Int): CurrencyChangeFeed? {
+        return try {
+            val response = client.get("$baseUrl/v1/currency/change") {
+                parameter("hours", hours)
+            }
+            if (response.status.isSuccess()) {
+                _currencyChangeError.value = null
+                response.body()
+            } else {
+                _currencyChangeError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Изменение курсов недоступно: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] Изменение курсов не прочитано: ${response.status.value}")
+                null
+            }
+        } catch (e: Exception) {
+            _isServerOnline.value = false
+            _currencyChangeError.value = e.message ?: "Изменение курсов недоступно: нет соединения"
+            platformLog("agent", "[agent] Изменение курсов не прочитано: ${e.message ?: "нет соединения"}")
+            null
+        }
+    }
+
+    /**
+     * Время «ЧЧ:мм» по UTC из момента в миллисекундах.
+     *
+     * Часы и минуты считаются делением от начала эпохи, а не календарём: в ленте нужно
+     * только время суток по UTC, а часового пояса у клиента для этого хватать не должно —
+     * курсы обновляет сервер по своему расписанию, и в ленте видно его время, одно
+     * на всех устройствах. Остаток берётся с двойным знаком деления: так время остаётся
+     * верным и для моментов до начала эпохи (нулевые и отрицательные метки), где обычный
+     * остаток дал бы отрицательные часы.
+     */
+    private fun utcTime(epochMs: Long): String {
+        val minutes = epochMs / 60_000
+        val hour = ((minutes / 60) % 24 + 24) % 24
+        val minute = (minutes % 60 + 60) % 60
+        return "${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}"
+    }
+
+    /**
+     * Время «ЧЧ:мм» из метки сервера вида `2026-09-28T15:04:00Z`; null — метка
+     * не похожа на ISO-8601 с временем, и брать из неё нечего.
+     *
+     * Разбора даты здесь нет намеренно: нужны только часы и минуты, а они в этой метке
+     * уже стоят подряд после `T`. Разбирать метку календарём значило бы тянуть
+     * в общий код библиотеку дат ради подстроки из пяти символов.
+     */
+    private fun utcTimeFromMark(mark: String): String? {
+        val time = mark.substringAfter('T', "")
+        return if (time.length >= 5 && time[2] == ':') time.take(5) else null
+    }
+
+    /**
      * Убирает сессию чата на сервере: сама история лежит на устройстве, а на
      * сервере по сессии хранится только сводка, и после удаления чата она не нужна.
      */
@@ -1069,5 +1367,27 @@ class ChatRepository(
 
         /** Сколько символов первого сообщения попадает в заголовок списка. */
         const val TITLE_LIMIT = 40
+
+        /** Частота удара монитора курсов: раз в минуту. */
+        const val CURRENCY_TICK_MS = 60_000L
+
+        /** Сколько часов просит шапка закреплённого чата: сутки. */
+        const val CURRENCY_DAY_HOURS = 24
+
+        /** Сколько часов просит сводка часа: прошедший час. */
+        const val CURRENCY_HOUR_HOURS = 1
+
+        /**
+         * Сколько последних сообщений хранит лента закреплённого чата: строки приходят
+         * раз в минуту, и без предела лента росла бы без конца. Предел задан контрактом
+         * (240) и держит примерно четыре последних часа минутных строк вместе со сводками
+         * этих часов. За сутки в ленте помещается не всё, и это выбор в пользу размера
+         * хранилища: суточную картину показывает шапка чата ([CurrencyChangeFeed]),
+         * а не вся лента — ради неё одной хранить сутки строк незачем.
+         */
+        const val CURRENCY_FEED_LIMIT = 240
+
+        /** Миллисекунд в часе: по нему считается номер часа UTC. */
+        const val HOUR_MS = 3_600_000L
     }
 }

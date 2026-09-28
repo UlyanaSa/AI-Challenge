@@ -23,6 +23,11 @@ import com.osvin.aichallenge.data.ToolCallRecord
  * инструмента текста нет вовсе ([MessageRole.TOOL] приходит с пустым `content`), и пузырь
  * на его месте был бы пустым. Заодно видно, откуда взяты данные ответа ассистента.
  *
+ * Строки монитора ([MessageRole.MONITOR]) печатаются той же служебной карточкой: их тоже
+ * писало приложение, а не человек, и пузырь пользователя на их месте приписал бы курс
+ * человеку. Свой стиль у них разошёлся бы с соседними служебными блоками на первой же
+ * правке оформления.
+ *
  * @param message Данные сообщения.
  * @param choice Варианты продолжения после этого сообщения: null или один вариант —
  *        переключать нечего.
@@ -70,6 +75,16 @@ fun ChatBubble(
             message.tools.forEach { call ->
                 ToolCallCard(call)
             }
+            return@Column
+        }
+
+        // Строка монитора — тоже не речь участника, а показание прибора: её напечатало
+        // приложение по расписанию ([MessageRole.MONITOR]). Печатается она служебной
+        // карточкой, а не пузырём: человек её не писал, и пузырь пользователя приписал бы
+        // ему чужие слова. Дальше ход не идёт и по той же причине, что у записи о вызове:
+        // ветвить ленту курсов нечем — она линейна
+        if (message.role == MessageRole.MONITOR) {
+            MonitorCard(message.content)
             return@Column
         }
 
@@ -187,5 +202,36 @@ private fun ToolCallCard(call: ToolCallRecord, modifier: Modifier = Modifier) {
                 )
             }
         }
+    }
+}
+
+/**
+ * Карточка строки монитора: курсы валют, напечатанные приложением по расписанию.
+ *
+ * Тот же служебный блок, что у записи о вызове инструмента ([ToolCallCard]): лента курсов
+ * состоит из таких строк, и свой стиль разошёлся бы с соседними служебными блоками
+ * на первой же правке оформления.
+ *
+ * Текст приходит готовым и многострочным у сводки часа: собирает его тот, кто знает
+ * формат ленты ([com.osvin.aichallenge.repository.ChatRepository]), а карточка только
+ * печатает. Разбирать текст по строкам здесь значило бы держать второй разборщик того же
+ * формата — и он разошёлся бы с первым.
+ *
+ * @param text Строка ленты: время с курсами или сводка прошедшего часа.
+ */
+@Composable
+private fun MonitorCard(text: String, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 1.dp,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }

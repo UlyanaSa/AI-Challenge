@@ -38,8 +38,15 @@ import com.osvin.aichallenge.ui.components.*
  * шторка показывает одно соединение и даёт вызвать инструмент руками.
  *
  * Задача чата видна полосой над полем ввода: состояние работы адресуется сессией
- * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставят на паузу
+ * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставя на паузу
  * и забывают (см. [com.osvin.aichallenge.ui.components.TaskStateBar]).
+ *
+ * Если открыт закреплённый чат ([com.osvin.aichallenge.data.CurrencyChat]), экран
+ * показывает ленту, а не диалог: поля ввода и полосы задачи в нём нет — писать в ленту
+ * нечем, — а первой строкой стоит [CurrencyChangeCard] с изменением курсов за сутки.
+ * Карточка читается при открытии чата: суточное изменение считает сервер, и по минутам
+ * оно не меняется. Лента при этом наполняется сама: строки печатает монитор
+ * ([com.osvin.aichallenge.repository.ChatRepository.runCurrencyMonitor]).
  *
  * @param title Заголовок активного чата для верхней панели.
  * @param onBack Возврат к списку чатов.
@@ -78,6 +85,16 @@ fun ChatScreen(
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // Активный чат: по его закреплению видно, что открыта лента курсов, а не диалог
+    val activeChat by viewModel.activeChat.collectAsStateWithLifecycle()
+    // Изменение курсов за сутки для шапки ленты и причина последнего отказа
+    val currencyChange by viewModel.currencyChange.collectAsStateWithLifecycle()
+    val currencyChangeError by viewModel.currencyChangeError.collectAsStateWithLifecycle()
+    // Открыта лента курсов: она закреплена, поэтому полем ввода в ней писать нечем,
+    // а сверху видно, как курсы изменились за сутки. Признак берётся у самого чата,
+    // а не сравнением с идентификатором ленты: закрепление — свойство списка чатов,
+    // и второму такому чату не пришлось бы добавлять сюда второе условие
+    val isCurrencyChat = activeChat?.pinned == true
 
     // Локальное состояние ввода
     var inputText by remember { mutableStateOf("") }
@@ -116,6 +133,16 @@ fun ChatScreen(
     // там, где инструменты уже работают
     LaunchedEffect(Unit) {
         viewModel.loadGitHub()
+    }
+
+    // Шапка ленты курсов читается при открытии закреплённого чата, а не при каждом
+    // ударе монитора: изменение за сутки считается на сервере и за минуту не меняется
+    // заметно, а лишний запрос на каждый удар был бы платой ни за что. Переход
+    // из обычного чата в ленту снова поднимает чтение — ключ эффекта меняется
+    LaunchedEffect(isCurrencyChat) {
+        if (isCurrencyChat) {
+            viewModel.loadCurrencyChange()
+        }
     }
 
     // Шторка открывается с тем, что лежит на сервере, а не с прошлыми правками;
@@ -170,28 +197,33 @@ fun ChatScreen(
             )
         },
         bottomBar = {
-            // Полоса задачи встаёт над полем ввода: состояние работы видно рядом
-            // с тем, чем её продолжают, и не занимает места в ленте сообщений
-            Column {
-                TaskStateBar(
-                    task = task,
-                    error = taskError,
-                    onStart = { viewModel.startTask() },
-                    // Действие одно, а значение — обратное текущему: на паузе кнопка
-                    // продолжает, а идущую задачу останавливает
-                    onTogglePause = { viewModel.setTaskPaused(task?.task?.paused != true) },
-                    onForget = { viewModel.forgetTask() }
-                )
-                ChatInputBar(
-                    text = inputText,
-                    onTextChange = { inputText = it },
-                    onSend = {
-                        viewModel.sendMessage(inputText)
-                        inputText = ""
-                    },
-                    isLoading = uiState is ChatUiState.Loading,
-                    enabled = isOnline == true
-                )
+            // В закреплённом чате-ленте поля ввода нет: писать в него нечем — курсы
+            // приходят по расписанию, а модель в нём не вызывается. Полосы задачи там
+            // тоже нет: задача принадлежит диалогу, а не ленте показаний
+            if (!isCurrencyChat) {
+                // Полоса задачи встаёт над полем ввода: состояние работы видно рядом
+                // с тем, чем её продолжают, и не занимает места в ленте сообщений
+                Column {
+                    TaskStateBar(
+                        task = task,
+                        error = taskError,
+                        onStart = { viewModel.startTask() },
+                        // Действие одно, а значение — обратное текущему: на паузе кнопка
+                        // продолжает, а идущую задачу останавливает
+                        onTogglePause = { viewModel.setTaskPaused(task?.task?.paused != true) },
+                        onForget = { viewModel.forgetTask() }
+                    )
+                    ChatInputBar(
+                        text = inputText,
+                        onTextChange = { inputText = it },
+                        onSend = {
+                            viewModel.sendMessage(inputText)
+                            inputText = ""
+                        },
+                        isLoading = uiState is ChatUiState.Loading,
+                        enabled = isOnline == true
+                    )
+                }
             }
         }
     ) { padding ->
@@ -207,8 +239,18 @@ fun ChatScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Пустой чат: подсказка вместо пустого экрана
-                if (messages.isEmpty() && uiState !is ChatUiState.Loading) {
+                // Шапка ленты курсов: в неё смотрят раньше самих наблюдений — она
+                // отвечает, что стало с курсами за сутки. Стоит первой строкой списка,
+                // поэтому прокручивается вместе с лентой и не занимает экран вечно
+                if (isCurrencyChat) {
+                    item {
+                        CurrencyChangeCard(feed = currencyChange, error = currencyChangeError)
+                    }
+                }
+
+                // Пустой чат: подсказка вместо пустого экрана. В ленте курсов её нет:
+                // писать в неё нечего, и совет «напишите первое сообщение» был бы ложью
+                if (messages.isEmpty() && uiState !is ChatUiState.Loading && !isCurrencyChat) {
                     item {
                         Text(
                             text = "Напишите первое сообщение — у этого чата своя история " +
