@@ -322,7 +322,8 @@ fun ChatScreen(
 
     // Шторка GitHub: подключение к MCP-серверу инструментов и их вызов. Снимок приходит
     // с сервера, поэтому и после подключения, и после отказа видно то, что он ответил;
-    // токен в состояние экрана не попадает вовсе — его держит сама шторка
+    // токена на клиенте нет вовсе — доступ сервер берёт с машины, где запущен, а шторка
+    // показывает только его результат: логин, права и место, откуда доступ взят
     if (githubOpen) {
         ModalBottomSheet(
             onDismissRequest = { githubOpen = false },
@@ -331,7 +332,7 @@ fun ChatScreen(
             GitHubSheet(
                 connection = github,
                 error = githubError,
-                onConnect = { viewModel.connectGitHub(it) },
+                onConnect = { viewModel.connectGitHub() },
                 onDisconnect = { viewModel.disconnectGitHub() },
                 onCall = { name, arguments -> viewModel.callGitHubTool(name, arguments) }
             )

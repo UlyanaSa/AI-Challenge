@@ -9,27 +9,29 @@ import java.net.InetSocketAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
 /**
- * Демонстрация дня 17: агент подключается к MCP-серверу GitHub и получает от него репозитории.
+ * Демонстрация дня 18: доступа к GitHub хватает с машины, и сервер сам о нём докладывает.
  *
- * GitHub подменён настоящим локальным HTTP-сервером (`com.sun.net.httpserver`): клиент
- * поднимает процесс сервера, тот ходит по реальному localhost на подставные ответы — сеть
- * не нужна, а путь «MCP → HTTP → JSON» проходит целиком, включая токен из окружения.
+ * GitHub подменён настоящим локальным HTTP-сервером (`com.sun.net.httpserver`): клиент поднимает
+ * процесс сервера, тот ходит по реальному localhost на подставные ответы — сеть не нужна, а путь
+ * «MCP → HTTP → JSON» проходит целиком, включая токен, взятый из окружения цепочкой источников.
  *
- * Проверяется не «мы умеем вызывать свою функцию», а протокол и фильтр: агент видит
- * объявленный инструмент, вызывает его с `visibility`, и в ответе остаются только те
- * репозитории, о которых спросили. Ожидаемое объявление берётся из [GitHubMcpServer.tools] —
- * той же спецификации, по которой сервер регистрирует инструмент.
+ * Проверяется не «мы умеем вызывать свою функцию», а два обещания дня: инструмент
+ * `get_repositories` отдаёт только те репозитории, о которых спросили, а инструмент
+ * `github_access` называет вход, права и источник токена — и при этом не отвечает ошибкой.
+ * Ожидаемые объявления берутся из [GitHubMcpServer.tools] — той же спецификации, по которой
+ * сервер регистрирует инструменты.
  */
 class GitHubMcpProtocolTest {
 
     @Test
-    fun `агент получает из GitHub-сервера только нужные репозитории`() = runBlocking {
+    fun `агент получает из GitHub-сервера репозитории и отчёт о доступе`() = runBlocking {
         val paths = mutableListOf<String>()
         val authorizations = mutableListOf<String?>()
         val gitHub = mockGitHub(paths, authorizations)
@@ -55,9 +57,9 @@ class GitHubMcpProtocolTest {
             log("получено инструментов: ${tools.size}")
             tools.forEach { tool -> log("инструмент: ${tool.name}; аргументы: ${tool.arguments.joinToString { it.name }}") }
 
-            val declared = GitHubMcpServer.tools(aStub()).single()
-            assertEquals(listOf(declared.name), tools.map { it.name }, "список инструментов у клиента")
-            assertEquals(declared.description, tools.single().description, "описание инструмента")
+            val declared = GitHubMcpServer.tools(aStub())
+            assertEquals(declared.map { it.name }, tools.map { it.name }, "список инструментов у клиента")
+            assertEquals(declared.map { it.description }, tools.map { it.description }, "описания инструментов")
 
             val privateRepos = repositories(session.client.callTool("get_repositories", mapOf("visibility" to "private")))
             log("вызов get_repositories visibility=private: ${privateRepos.map { it.name }}")
@@ -67,6 +69,25 @@ class GitHubMcpProtocolTest {
             log("вызов get_repositories visibility=public: ${publicRepos.map { it.name }}")
             assertEquals(listOf("public-repo", "legacy-repo"), publicRepos.map { it.name })
 
+            val accessCall = session.client.callTool("github_access", emptyMap())
+            val access = access(accessCall)
+            log(
+                "вызов github_access: доступ ${if (access.authorized) "есть" else "не найден"}; " +
+                    "вход ${access.login}; источник ${access.source}"
+            )
+            assertFalse(accessCall.isError == true, "отчёт о доступе пришёл ошибкой вызова")
+            assertTrue(access.authorized, "токен из окружения не признан: ${access.hint}")
+            assertEquals("ulanocka", access.login)
+            assertEquals(listOf("repo", "read:user"), access.scopes)
+            assertTrue(access.scopesReported, "права из заголовка не доехали до клиента")
+            assertTrue(
+                "GITHUB_TOKEN" in access.source.orEmpty(),
+                "источник токена назван не тот: ${access.source}"
+            )
+            assertNull(access.hint, "у найденного доступа не должно быть подсказки")
+            assertTrue(TEST_TOKEN !in accessCall.text(), "значение токена попало в ответ инструмента")
+            log("в ответе нет значения токена — только место, откуда он взят")
+
             tools
         } finally {
             session.close()
@@ -74,26 +95,32 @@ class GitHubMcpProtocolTest {
         }
 
         assertFalse(session.isRunning, "серверный процесс остался работать после закрытия сессии")
-        assertTrue(paths.isNotEmpty() && paths.all { it == "/user/repos" }, "сервер ходил не в /user/repos: $paths")
+        assertTrue(
+            paths.isNotEmpty() && paths.all { it == "/user/repos" || it == "/user" },
+            "сервер ходил не туда: $paths"
+        )
         assertTrue(authorizations.all { it == "Bearer $TEST_TOKEN" }, "сервер ходил без токена: $authorizations")
-        assertEquals(1, listed.size, "инструмент потерялся")
+        assertEquals(2, listed.size, "инструмент потерялся")
         log("сессия закрыта: серверный процесс остановлен, токен дошёл до GitHub")
     }
 
     /**
      * Подставной GitHub: отдаёт детерминированный ответ и запоминает, о чём его спросили.
      *
-     * Ответ содержит все три случая видимости — явные `private`/`public` и репозиторий вовсе
-     * без поля `visibility`: фильтр должен работать и на последнем, иначе проверка обошла бы
-     * обходной путь, ради которого он и написан.
+     * Ответ репозиториев содержит все три случая видимости — явные `private`/`public` и
+     * репозиторий вовсе без поля `visibility`: фильтр должен работать и на последнем, иначе
+     * проверка обошла бы обходной путь, ради которого он и написан. На `/user` приходит профиль
+     * и заголовок с правами — именно так GitHub отвечает на вопрос о доступе.
      */
     private fun mockGitHub(paths: MutableList<String>, authorizations: MutableList<String?>): HttpServer {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
             paths += exchange.requestURI.path
             authorizations += exchange.requestHeaders.getFirst("Authorization")
-            val body = ANSWER.toByteArray(Charsets.UTF_8)
+            val profile = exchange.requestURI.path == "/user"
+            val body = (if (profile) PROFILE else ANSWER).toByteArray(Charsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+            if (profile) exchange.responseHeaders.add("X-OAuth-Scopes", SCOPES)
             exchange.sendResponseHeaders(200, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }
@@ -105,12 +132,21 @@ class GitHubMcpProtocolTest {
     private fun repositories(result: CallToolResult): List<GitHubRepository> =
         Json.decodeFromString<List<GitHubRepository>>(result.text())
 
+    /** Отчёт о доступе: разбирается той же формой, которой его читает клиент. */
+    private fun access(result: CallToolResult): GitHubAccessReport =
+        Json { ignoreUnknownKeys = true }.decodeFromString<GitHubAccessReport>(result.text())
+
     private fun CallToolResult.text(): String =
         content.filterIsInstance<TextContent>().joinToString("\n") { it.text }
 
-    /** Источник репозиториев, нужный только чтобы получить объявление инструмента. */
+    /** Источник данных, нужный только чтобы получить объявления инструментов. */
     private fun aStub(): GitHubApi = object : GitHubApi {
         override suspend fun repositories(): List<GitHubRepository> = emptyList()
+
+        override suspend fun account(): GitHubAccount =
+            GitHubAccount(login = null, scopes = emptyList(), scopesReported = false)
+
+        override suspend fun access(): GitHubAccessReport = GitHubAccessReport.unavailable(hint = null)
     }
 
     /** Строка демонстрации — в том же виде, что у прочих демонстраций проекта. */
@@ -121,7 +157,11 @@ class GitHubMcpProtocolTest {
 
     private companion object {
 
-        const val TEST_TOKEN = "test-token"
+        /** Права, которые подставной GitHub сообщает заголовком. */
+        const val SCOPES = "repo, read:user"
+
+        /** Профиль владельца токена: так GitHub отвечает на `GET /user`. */
+        const val PROFILE = """{"login":"ulanocka"}"""
 
         val ANSWER = """
             [

@@ -5,7 +5,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Снимок работы с GitHub: подключён ли сервер инструментов, кто он и что умеет.
+ * Снимок работы с GitHub: подключён ли сервер инструментов, кто он, что умеет и есть ли
+ * у него доступ к GitHub.
  *
  * Клиент сам GitHub не знает и знать не должен: инструменты живут на сервере в отдельном
  * MCP-процессе, а клиенту достаётся только этот снимок — кнопка подключения, список
@@ -13,10 +14,26 @@ import kotlinx.serialization.json.JsonObject
  * подключение переживает перезапуск приложения и может быть отозвано с другого устройства,
  * поэтому «правда» приходит только ответом сервера, а не выводится из локальных флагов.
  *
- * Токен в снимке не появляется ни в каком виде — сервер не возвращает то, что ему прислали
- * ([GitHubConnectRequest]): иначе он попал бы в хранилище устройства и в логи экрана.
+ * Доступ к GitHub сервер ищет сам на той машине, где запущен, — в окружении, файле,
+ * связке ключей, `gh` и `git credential`. Клиент в этом поиске не участвует и токена
+ * не видит вовсе: поля ввода ему нечего показывать, а поля доступа в снимке описывают
+ * лишь результат поиска. Самого секрета в снимке нет и быть не может — [source] называет
+ * только место, откуда доступ взят: по этой пометке человек проверяет, тем ли доступом
+ * он ходит, и она уезжает в интерфейс вместо токена.
  *
  * @param connected Сервер инструментов готов к работе: подключение выполнено и не оборвалось.
+ * @param authorized Доступ к GitHub найден: инструменты смогут ходить в API от имени его
+ *        владельца. false — доступа нет, и причина с подсказкой лежат в [hint].
+ * @param login Имя владельца доступа из GitHub; null — доступа нет или GitHub имени не назвал.
+ * @param scopes Права токена, как их перечислил заголовок `X-OAuth-Scopes`. Пустой список
+ *        читается вместе с [scopesReported]: это либо «прав нет», либо «права не сообщены».
+ * @param scopesReported GitHub назвал права заголовком. false — заголовка не было (так ведут
+ *        себя fine-grained токены), и выводить «прав нет» из пустого [scopes] нельзя.
+ * @param source Откуда сервер взял доступ, словами для человека (например,
+ *        «файл ~/.config/ai-challenge/github.token»); null — доступа нет. Токена здесь
+ *        нет и не должно быть: пометка нужна, чтобы отличить один доступ от другого,
+ *        а не чтобы его повторить.
+ * @param hint Что сделать, чтобы доступ появился; null — доступ есть, подсказывать нечего.
  * @param server Имя MCP-сервера из рукопожатия; null — ещё не подключено, и имени нет.
  * @param version Версия MCP-сервера из рукопожатия; null — ещё не подключено.
  * @param tools Инструменты, которые сервер объявил при подключении. Пустой список —
@@ -26,6 +43,12 @@ import kotlinx.serialization.json.JsonObject
 @Serializable
 data class GitHubConnection(
     @SerialName("connected") val connected: Boolean = false,
+    @SerialName("authorized") val authorized: Boolean = false,
+    @SerialName("login") val login: String? = null,
+    @SerialName("scopes") val scopes: List<String> = emptyList(),
+    @SerialName("scopesReported") val scopesReported: Boolean = false,
+    @SerialName("source") val source: String? = null,
+    @SerialName("hint") val hint: String? = null,
     @SerialName("server") val server: String? = null,
     @SerialName("version") val version: String? = null,
     @SerialName("tools") val tools: List<GitHubTool> = emptyList()
@@ -73,20 +96,6 @@ data class GitHubToolArgument(
     @SerialName("type") val type: String? = null,
     @SerialName("required") val required: Boolean = false,
     @SerialName("values") val values: List<String> = emptyList()
-)
-
-/**
- * Запрос на подключение к серверу инструментов GitHub.
- *
- * @param token Токен GitHub или null, если брать его из окружения сервера (`GITHUB_TOKEN`).
- *        Пустая строка означает то же, что null: в поле ввода её легко оставить, а «пустой
- *        токен» уехал бы в GitHub заголовком `Bearer ` и вернулся невнятным отказом.
- *        Клиент токен не хранит — он уходит телом этого запроса и больше нигде на клиенте
- *        не оседает: ни в снимке ([GitHubConnection]), ни в логах, ни в хранилище.
- */
-@Serializable
-data class GitHubConnectRequest(
-    @SerialName("token") val token: String? = null
 )
 
 /**

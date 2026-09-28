@@ -8,6 +8,7 @@ import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.ToolOutcome
 import com.osvin.aichallenge.mcp.localMcpServerConfig
+import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -16,7 +17,9 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import java.io.File
 import java.net.InetSocketAddress
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -26,18 +29,26 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
- * Демонстрация дня 17: агент сам вызывает инструмент MCP-сервера GitHub по обычной просьбе.
+ * Демонстрация дня 18: агент сам вызывает инструмент MCP-сервера GitHub по обычной просьбе,
+ * а доступ к GitHub сервер приложения берёт готовым с машины.
  *
  * Прогон живой целиком, кроме самого GitHub: модель настоящая, сервер инструментов —
  * настоящий отдельный процесс по протоколу MCP, а GitHub подставной (HTTP-сервер в этом же
- * тесте), потому что токена GitHub в окружении нет. Код-путь от подстановки не меняется:
- * сервер инструментов берёт адрес API из переменной окружения `GITHUB_API_BASE` и ходит по
- * нему так же, как ходил бы в `https://api.github.com`.
+ * тесте). Код-путь от подстановки не меняется: сервер инструментов берёт адрес API из
+ * переменной окружения `GITHUB_API_BASE` и ходит по нему так же, как ходил бы
+ * в `https://api.github.com`.
  *
- * Что проверяется. Инструмент выбирает модель по фразе — вызывающего кода про GitHub в тесте
- * нет; ответ опирается на данные инструмента — в нём есть имена репозиториев, которых в
- * просьбе не было; фильтр виден по тому, что именно ушло модели (инструмент на этапе
- * обёрнут записью), а не по формулировке ответа, которая у модели свободная.
+ * Доступ подкладывается окружением дочернего процесса, как он приходит и на машине человека:
+ * `GITHUB_TOKEN` задан процессу инструментов, а сам сервер приложения токена не знает — он
+ * только читает отчёт инструмента `github_access` и показывает его состояние. Ввод токена
+ * в интерфейсе убран вместе с этим.
+ *
+ * Что проверяется. Подключение без доступа в коде проходит и называет владельца и его права;
+ * инструмент выбирает модель по фразе — вызывающего кода про GitHub в тесте нет; ответ
+ * опирается на данные инструмента — в нём есть имена репозиториев, которых в просьбе не было;
+ * фильтр виден по тому, что именно ушло модели (инструмент на этапе обёрнут записью), а не по
+ * формулировке ответа, которая у модели свободная. Последний этап — тот же вопрос без доступа:
+ * инструмент отказывает, а модель отвечает человеку по причине отказа.
  *
  * Без живого ключа прогон ничего не проверяет, поэтому он выключен по умолчанию:
  * `./gradlew :server:githubDemo -Pdemo.live=1` (ключ берётся из `server/.env` или окружения).
@@ -60,18 +71,29 @@ class GitHubToolsDemoTest {
             log("GitHub (подставной): ${github.baseUrl}")
             stage("Подключение к серверу инструментов")
             val connection = assertIs<GitHubConnect.Connected>(
-                tools.connect("test-token"),
+                tools.connect(),
                 "сервер инструментов не подключился: соединение теперь открывается явно"
             ).connection
             assertTrue(connection.connected, "снимок подключения должен быть подключённым")
             log("подключено: ${connection.server} ${connection.version}")
+            // Доступ приезжает вместе с подключением: его нашёл сам сервер инструментов по
+            // источникам машины (в прогоне — переменная окружения) и рассказал о нём отчётом.
+            assertTrue(connection.authorized, "доступа нет: ${connection.hint}")
+            assertEquals("ulanocka", connection.login)
+            log(
+                "доступ: ${connection.login}, права ${connection.scopes}, " +
+                    "источник — ${connection.source}"
+            )
 
             stage("Инструменты, которые агент получил от MCP-сервера")
             val available = tools.tools()
-            assertEquals(
-                listOf("get_repositories"),
-                available.map { it.name },
-                "сервер инструментов объявил не то, что ожидалось"
+            assertTrue(
+                available.any { it.name == REPOSITORIES_TOOL },
+                "сервер инструментов объявил не то, что ожидалось: ${available.map { it.name }}"
+            )
+            assertTrue(
+                available.any { it.name == GitHubTools.GITHUB_ACCESS_TOOL },
+                "сервер инструментов не объявил инструмент о доступе: ${available.map { it.name }}"
             )
             available.forEach { tool ->
                 log("инструмент: ${tool.name} — ${tool.description}")
@@ -123,13 +145,16 @@ class GitHubToolsDemoTest {
             )
             log("обращений к подставному GitHub: ${github.requests.size}, все с Bearer-токеном")
 
-            stage("Отказ инструмента: нет токена")
-            val tokenless = githubTools(github)
+            stage("Отказ инструмента: доступа нет")
+            val empty = Files.createTempDirectory("github-demo-access-less").toFile()
+            val tokenless = githubToolsWithoutAccess(github, empty)
             try {
-                assertIs<GitHubConnect.Connected>(
-                    tokenless.connect(null),
-                    "без токена само подключение проходит: токен читается только на вызове"
-                )
+                val state = assertIs<GitHubConnect.Connected>(
+                    tokenless.connect(),
+                    "без доступа само подключение проходит: доступ ищется на вызове инструмента"
+                ).connection
+                assertFalse(state.authorized, "источники отсечены окружением: ${state.hint}")
+                log("подсказка при отсутствии доступа: ${state.hint}")
                 val refusal = recorded(tokenless.tools())
                 val refusalReply = answers(agent, refusal, "Сколько у меня репозиториев на GitHub?")
                 val refusalAnswer = refusal.answers.single()
@@ -141,6 +166,7 @@ class GitHubToolsDemoTest {
                 )
             } finally {
                 tokenless.close()
+                empty.deleteRecursively()
             }
         } finally {
             tools.close()
@@ -152,20 +178,48 @@ class GitHubToolsDemoTest {
 
     /**
      * Инструменты GitHub как у сервера приложения: тот же модуль на своём classpath, тот же
-     * класс точки входа, а адрес API уезжает процессу окружением. Токен здесь не подставляется
-     * в конфиг: его называет явное подключение ([GitHubTools.connect]) — так же, как это делает
-     * сервер приложения, когда человек нажимает кнопку.
+     * класс точки входа, а адрес API и доступ уезжают процессу окружением — ровно так, как
+     * они приходят на машине человека. Токен здесь не называет ни код теста, ни сервер
+     * приложения: его находит сам сервер инструментов по переменной окружения.
      */
     private fun githubTools(github: StubGitHub) = GitHubTools(
         config = localMcpServerConfig(
             GitHubTools.GITHUB_SERVER_MAIN,
-            env = mapOf("GITHUB_API_BASE" to github.baseUrl)
+            env = mapOf("GITHUB_API_BASE" to github.baseUrl, "GITHUB_TOKEN" to "test-token")
         ),
         onLog = { log(it) }
     )
 
-    /** Инструмент с записью ответа: по нему видно, какие данные получила модель. */
-    private fun recorded(tools: List<AgentTool>): RecordedTool = RecordedTool(tools.single())
+    /**
+     * Инструменты без доступа: те же, но окружение процесса отсекает все источники — пустые
+     * переменные доступа, пустой `PATH` (не найдутся `security`, `gh` и `git`) и пустой `HOME`
+     * (не найдётся файл доступа по умолчанию). Без этого отказ инструмента зависел бы от того,
+     * настроен ли GitHub на машине прогона.
+     */
+    private fun githubToolsWithoutAccess(github: StubGitHub, empty: File) = GitHubTools(
+        config = localMcpServerConfig(
+            GitHubTools.GITHUB_SERVER_MAIN,
+            env = mapOf(
+                "GITHUB_API_BASE" to github.baseUrl,
+                "GITHUB_TOKEN" to "",
+                "GITHUB_TOKEN_FILE" to "",
+                "PATH" to empty.absolutePath,
+                "HOME" to empty.absolutePath
+            )
+        ),
+        onLog = { log(it) }
+    )
+
+    /**
+     * Инструмент с записью ответа: по нему видно, какие данные получила модель.
+     *
+     * Берётся по имени, а не единственным в списке: сервер инструментов объявляет ещё и
+     * `github_access`, которым сервер приложения узнаёт о доступе. Демонстрация — про
+     * инструмент репозиториев, поэтому агенту отдаётся только он, и вызов одного инструмента
+     * остаётся тем, что здесь проверяется.
+     */
+    private fun recorded(tools: List<AgentTool>): RecordedTool =
+        RecordedTool(tools.single { it.name == REPOSITORIES_TOOL })
 
     /** Живой транспорт: тот же клиент, что у сервера, — отличаются только таймауты теста. */
     private fun demoHttpClient(): HttpClient = HttpClient(CIO) {
@@ -220,6 +274,14 @@ private class RecordedTool(delegate: AgentTool) {
     )
 }
 
+/**
+ * Имя инструмента репозиториев — того, ради которого идёт демонстрация.
+ *
+ * Литерал, как и в объявлении сервера инструментов: это имя провода, и взять его оттуда
+ * здесь нечем — в модуле инструментов имя живёт в объявлении, а не в константе.
+ */
+private const val REPOSITORIES_TOOL = "get_repositories"
+
 /** Строка демонстрации — в том же виде, что у прочих демонстраций проекта. */
 private fun log(line: String) = println("[agent] $line")
 
@@ -239,12 +301,15 @@ private val demoApiKey: String? =
 private val demoOnLiveApi: Boolean = demoLive && demoApiKey != null
 
 /**
- * Подставной GitHub: один маршрут `GET /user/repos` с тем же JSON, что отдаёт настоящий API.
+ * Подставной GitHub: маршруты `GET /user` и `GET /user/repos` с тем же JSON, что отдаёт
+ * настоящий API.
  *
- * Набор нарочно неоднородный: приватный, публичный и запись без поля `visibility` — так
- * видно и фильтр, и вывод видимости из признака приватности. Адрес подставляется серверу
- * инструментов переменной окружения: настоящего токена в окружении нет, но код-путь — тот
- * же, что с настоящим.
+ * `/user` нужен, чтобы у доступа был владелец, а заголовок `X-OAuth-Scopes` — чтобы у него
+ * были права: сервер инструментов рассказывает о доступе, сходив в GitHub, и подставлять
+ * этот отчёт кодом значило бы проверять подстановку, а не работу сервера. Набор репозиториев
+ * нарочно неоднородный: приватный, публичный и запись без поля `visibility` — так видно и
+ * фильтр, и вывод видимости из признака приватности. Адрес подставляется серверу инструментов
+ * переменной окружения: настоящего GitHub здесь нет, но код-путь — тот же, что с настоящим.
  *
  * Запросы записываются: по ним видно, что сервер инструментов ходит в API от имени
  * пользователя (с Bearer-токеном), а не анонимно.
@@ -258,20 +323,33 @@ private class StubGitHub {
     val baseUrl: String get() = "http://127.0.0.1:${server.address.port}"
 
     init {
+        server.createContext("/user") { exchange ->
+            respond(exchange, USER, scopes = "repo, read:user")
+        }
         server.createContext("/user/repos") { exchange ->
-            requests += "${exchange.requestMethod} ${exchange.requestURI} | " +
-                "Authorization: ${exchange.requestHeaders.getFirst("Authorization") ?: "нет"}"
-            val body = REPOSITORIES.toByteArray()
-            exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
-            exchange.sendResponseHeaders(200, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+            respond(exchange, REPOSITORIES)
         }
         server.start()
+    }
+
+    /** Записывает запрос и отвечает телом: заголовок прав — только у владельца доступа. */
+    private fun respond(exchange: HttpExchange, json: String, scopes: String? = null) {
+        requests += "${exchange.requestMethod} ${exchange.requestURI} | " +
+            "Authorization: ${exchange.requestHeaders.getFirst("Authorization") ?: "нет"}"
+        val body = json.toByteArray()
+        exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
+        scopes?.let { exchange.responseHeaders.add("X-OAuth-Scopes", it) }
+        exchange.sendResponseHeaders(200, body.size.toLong())
+        exchange.responseBody.use { it.write(body) }
     }
 
     fun stop() = server.stop(0)
 
     private companion object {
+
+        /** Ответ GitHub REST API на `/user`: владелец доступа. */
+        val USER = """{"login": "ulanocka", "id": 1, "name": "Улан"}"""
+
         /** Ответ GitHub REST API: те же имена полей, что у настоящего. */
         val REPOSITORIES = """
             [

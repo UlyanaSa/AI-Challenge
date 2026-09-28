@@ -25,23 +25,26 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * GitHub на клиенте: снимок подключения, отказ на подключение и вызов инструмента
- * в ленте чата.
+ * GitHub на клиенте: снимок подключения с доступом, отказ на подключение и вызов
+ * инструмента в ленте чата.
  *
  * Сервер подставной ([MockEngine]): тест смотрит, что видно на экране и что уходит
- * на провод, и работает без сети и без настоящего GitHub. Ветка с инструментами
- * проверяется по той же дороге, что и обычный вопрос: клиент сам GitHub не знает,
- * поэтому всё, что он может, — показать снимок и передать вызов.
+ * на провод, и работает без сети и без настоящего GitHub. Токена в этих сценариях нет
+ * вовсе: доступ к GitHub сервер ищет сам на своей машине, а клиент получает готовый
+ * снимок — кто доступен, с какими правами и откуда доступ взят. Ветка с инструментами
+ * проверяется по той же дороге, что и обычный вопрос: клиент сам GitHub не знает, поэтому
+ * всё, что он может, — показать снимок и передать вызов.
  */
 class GitHubToolsClientTest {
 
     /**
-     * Подключение отдаёт то, что ответил сервер: имя и версию MCP-сервера и объявленные
-     * инструменты вместе с их аргументами. Клиент этот список не выдумывает — второго
-     * источника инструментов у него нет.
+     * Подключение отдаёт то, что ответил сервер: доступ к GitHub (кто, с какими правами
+     * и откуда он взят) и объявленные инструменты вместе с их аргументами. Клиент ни
+     * доступа, ни инструментов не выдумывает — второго источника у него нет, — и токена
+     * в запросе не отправляет: доступ лежит на машине сервера, и клиенту его знать нечем.
      */
     @Test
-    fun connectingGivesToolsFromServer() = runBlocking {
+    fun connectingGivesAccessAndToolsFromServer() = runBlocking {
         val requests = mutableListOf<HttpRequestData>()
         val repository = newRepository(requests) { request ->
             when (request.url.encodedPath) {
@@ -50,11 +53,23 @@ class GitHubToolsClientTest {
             }
         }
 
-        // Токена нет: сервер возьмёт GITHUB_TOKEN из своего окружения
-        repository.connectGitHub(null)
+        repository.connectGitHub()
+
+        // Тела у подключения нет: клиенту нечего отправлять — ни токена, ни имени доступа
+        val body = requests.last { it.url.encodedPath == "/v1/github/connect" }.body
+        assertFalse(
+            body is TextContent && body.text.isNotEmpty(),
+            "подключение ушло с телом: клиент отправил серверу то, чего у него нет"
+        )
 
         val connection = assertNotNull(repository.github.value, "снимок подключения не пришёл")
         assertTrue(connection.connected, "подключение не отмечено как выполненное")
+        assertTrue(connection.authorized, "найденный доступ не доехал до снимка")
+        assertEquals("ulanocka", connection.login)
+        assertEquals(listOf("repo", "read:user"), connection.scopes)
+        assertTrue(connection.scopesReported, "права пришли, но помечены несообщёнными")
+        assertEquals("файл ~/.config/ai-challenge/github.token", connection.source)
+        assertNull(connection.hint, "при найденном доступе осталась подсказка, что делать")
         assertEquals("ai-challenge-github", connection.server)
         assertEquals("1.0.0", connection.version)
 
@@ -71,6 +86,39 @@ class GitHubToolsClientTest {
     }
 
     /**
+     * Отсутствие доступа — не отказ подключения: сессия поднимается, и сервер отвечает
+     * снимком с `authorized = false` и подсказкой. Строкой ошибки это не становится
+     * намеренно: «доступа нет» — состояние, которое человек исправляет на машине,
+     * а не сбой запроса, и показать его надо словами, а не красной строкой.
+     */
+    @Test
+    fun missingAccessComesAsSnapshotWithHint() = runBlocking {
+        val requests = mutableListOf<HttpRequestData>()
+        val repository = newRepository(requests) { request ->
+            when (request.url.encodedPath) {
+                "/v1/github/connect" -> NO_ACCESS to HttpStatusCode.OK
+                else -> CHAT_RESPONSE to HttpStatusCode.OK
+            }
+        }
+
+        repository.connectGitHub()
+
+        val connection = assertNotNull(repository.github.value, "снимок подключения не пришёл")
+        assertTrue(connection.connected, "сессия поднялась, но подключение не отмечено")
+        assertFalse(connection.authorized, "доступ найден там, где его нет")
+        assertNull(connection.login, "при отсутствии доступа назван чужой логин")
+        assertTrue(connection.scopes.isEmpty(), "права появились без доступа")
+        assertFalse(connection.scopesReported, "права помечены сообщёнными без доступа")
+        assertNull(connection.source, "назван источник доступа, которого нет")
+        val hint = assertNotNull(connection.hint, "причину отсутствия доступа нечем показать")
+        assertTrue(
+            hint.contains("GITHUB_TOKEN"),
+            "подсказка не объясняет, где искать доступ: $hint"
+        )
+        assertNull(repository.githubError.value, "отсутствие доступа показано как сбой запроса")
+    }
+
+    /**
      * Отказ подключения виден строкой ошибки, а снимок остаётся прежним: состояние
      * подключения держит сервер, и стереть снимок значило бы показать «отключено» там,
      * где подключение, возможно, живо.
@@ -81,7 +129,7 @@ class GitHubToolsClientTest {
         val repository = newRepository(requests) { request ->
             when (request.url.encodedPath) {
                 "/v1/github" -> CONNECTED to HttpStatusCode.OK
-                "/v1/github/connect" -> """{"success":false,"error":"GITHUB_TOKEN не задан"}""" to
+                "/v1/github/connect" -> """{"success":false,"error":"MCP-сервер не запустился"}""" to
                     HttpStatusCode.BadGateway
                 else -> CHAT_RESPONSE to HttpStatusCode.OK
             }
@@ -91,9 +139,9 @@ class GitHubToolsClientTest {
         val before = assertNotNull(repository.github.value)
         assertTrue(before.connected)
 
-        repository.connectGitHub("неверный-токен")
+        repository.connectGitHub()
 
-        assertEquals("GITHUB_TOKEN не задан", repository.githubError.value)
+        assertEquals("MCP-сервер не запустился", repository.githubError.value)
         assertEquals(before, repository.github.value, "отказ подключения подменил снимок")
     }
 
@@ -233,13 +281,29 @@ class GitHubToolsClientTest {
         /** Обычная переписка: вызовов инструментов в этом ответе нет. */
         val CHAT_RESPONSE = """{"success":true,"reply":"$REPLY"}"""
 
-        /** Подключение выполнено: MCP-сервер назвался и объявил инструмент с аргументом. */
+        /**
+         * Подключение выполнено: MCP-сервер назвался, доступ к GitHub найден (логин, права
+         * из заголовка и место, откуда доступ взят) и объявлен инструмент с аргументом.
+         */
         val CONNECTED = """
-            {"connected":true,"server":"ai-challenge-github","version":"1.0.0",
+            {"connected":true,"authorized":true,"login":"ulanocka","scopes":["repo","read:user"],
+             "scopesReported":true,"source":"файл ~/.config/ai-challenge/github.token","hint":null,
+             "server":"ai-challenge-github","version":"1.0.0",
              "tools":[{"name":"get_repositories","description":"Репозитории владельца токена",
                        "arguments":[{"name":"visibility","description":"какие репозитории вернуть",
                                      "type":"string","required":false,
                                      "values":["all","public","private"]}]}]}
+        """.trimIndent()
+
+        /**
+         * Сессия поднялась, но доступа к GitHub нет: снимок несёт причину и подсказку,
+         * где искать доступ, — самого токена в нём нет и быть не может.
+         */
+        val NO_ACCESS = """
+            {"connected":true,"authorized":false,"login":null,"scopes":[],"scopesReported":false,
+             "source":null,
+             "hint":"доступ к GitHub не найден. Проверены: GITHUB_TOKEN, файл ~/.config/ai-challenge/github.token. Задайте GITHUB_TOKEN или положите токен в файл.",
+             "server":"ai-challenge-github","version":"1.0.0","tools":[]}
         """.trimIndent()
 
         /** Подключения нет: сервер инструментов не поднят. */

@@ -291,15 +291,13 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Подключение к серверу инструментов GitHub.
-     *
-     * @param token Токен GitHub; null или пусто — сервер возьмёт `GITHUB_TOKEN`
-     *        из своего окружения. Токен передаётся только в запросе и на клиенте
-     *        не сохраняется: ни в снимке, ни в логах его нет.
+     * Подключение к серверу инструментов GitHub. Аргументов нет: доступ к GitHub сервер
+     * ищет сам на своей машине, а клиент ни токена, ни поля для него не держит —
+     * результат поиска приходит в снимке подключения.
      */
-    fun connectGitHub(token: String?) {
+    fun connectGitHub() {
         viewModelScope.launch {
-            repository.connectGitHub(token)
+            repository.connectGitHub()
         }
     }
 

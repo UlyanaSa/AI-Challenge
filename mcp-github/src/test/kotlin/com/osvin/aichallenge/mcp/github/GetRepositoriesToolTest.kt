@@ -75,14 +75,15 @@ class GetRepositoriesToolTest {
     @Test
     fun `без токена инструмент отвечает ошибкой`() = runBlocking {
         val api = GitHubApiImpl(
-            config = GitHubConfig(apiBase = "http://127.0.0.1:1", token = null),
+            config = GitHubConfig(apiBase = "http://127.0.0.1:1"),
+            credentials = testCredentials(token = null),
             client = HttpClient(MockEngine { respond("[]") })
         )
 
         val result = tool.read(api, request())
 
         assertEquals(true, result.isError)
-        assertTrue(GitHubConfig.TOKEN_ENV in result.text())
+        assertTrue(GitHubConfig.TOKEN_ENV in result.text(), "отказ не перечисляет, где искали доступ")
     }
 
     @Test
@@ -103,7 +104,8 @@ class GetRepositoriesToolTest {
 
     @Test
     fun `схема инструмента перечисляет видимости и не требует аргумент`() {
-        val declared = GitHubMcpServer.tools(FakeGitHubApi(emptyList())).single()
+        val declared = GitHubMcpServer.tools(FakeGitHubApi(emptyList()))
+            .single { it.name == "get_repositories" }
 
         assertEquals("get_repositories", declared.name)
         val schema = declared.inputSchema()
@@ -119,7 +121,8 @@ class GetRepositoriesToolTest {
     /** Реализация на подставном движке: сеть заменена, поведение ошибок — настоящее. */
     private fun apiAnswering(handler: io.ktor.client.engine.mock.MockRequestHandler): GitHubApi =
         GitHubApiImpl(
-            config = GitHubConfig(apiBase = "https://api.github.com", token = "test-token"),
+            config = GitHubConfig(apiBase = "https://api.github.com"),
+            credentials = testCredentials(),
             client = HttpClient(MockEngine(handler))
         )
 
@@ -139,7 +142,13 @@ class GetRepositoriesToolTest {
     private fun CallToolResult.text(): String =
         content.filterIsInstance<TextContent>().joinToString("\n") { it.text }
 
-    /** Источник репозиториев для проверок: считает вызовы, в сеть не ходит. */
+    /**
+     * Источник репозиториев для проверок: считает вызовы, в сеть не ходит.
+     *
+     * Профиль и отчёт о доступе отдаёт-заглушки: инструменту `get_repositories` они не нужны,
+     * но интерфейс обязан их иметь — иначе подставной источник не был бы источником данных
+     * GitHub, и инструмент проверялся бы на другом типе, чем настоящий.
+     */
     private class FakeGitHubApi(private val repositories: List<GitHubRepository>) : GitHubApi {
 
         var calls = 0
@@ -149,6 +158,12 @@ class GetRepositoriesToolTest {
             calls++
             return repositories
         }
+
+        override suspend fun account(): GitHubAccount =
+            GitHubAccount(login = null, scopes = emptyList(), scopesReported = false)
+
+        override suspend fun access(): GitHubAccessReport =
+            GitHubAccessReport.unavailable(hint = null)
     }
 
     private companion object {
