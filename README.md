@@ -1122,6 +1122,97 @@ ai-challenge-project 1.0.0 — инструменты, которые объяв
 
 Что осталось непроверенным: настоящий `https://api.github.com` не вызывался ни разу (в окружении этого проекта токена нет, `gh` не установлен), поэтому живые лимиты, 403 с `X-RateLimit-*` и пагинация на настоящем `Link` не проверены — проверено тем же кодом на подставном API; из цепочки источников живьём проверены переменная окружения и файл с правами 600/644, а связка ключей macOS, `gh auth token` и `git credential fill` — только подделками в тестах (ни записи в связке, ни `gh`, ни сохранённых учётных данных git на этой машине нет); на физическом устройстве и на iOS приложение не запускалось (экран проверен на эмуляторе); JS- и wasm-таргеты `app/shared` не собираются, поэтому браузер как способ проверки интерфейса недоступен; выбор моделью между несколькими инструментами (сервер проекта и сервер GitHub одновременно) не проверялся: сегодня сервер подключает только инструменты GitHub. Живые демонстрации гейтятся флагами `-Pdemo.live=1`/`-Ddemo.live=1` и `DEEPSEEK_API_KEY`; снимки экрана сняты `adb screencap` и в репозиторий не добавлены.
 
+### task-18
+
+День 18. Сервис мониторинга курсов валют, MCP и ответ агента по накопленной истории
+
+День 17 показал, что агент умеет звать чужие инструменты. День 18 даёт ему то, чего у него
+не было, — **свои данные во времени**: сервис раз в час забирает EUR/RUB, USD/RUB и GEL/RUB
+у внешнего источника, складывает историю в SQLite, отдаёт её двумя MCP-инструментами
+(`get_currency_rates`, `get_currency_summary`) и живёт на сервере обычным `java -jar`.
+
+**Источник — ЦБ РФ** (`https://www.cbr-xml-daily.ru/daily_json.js`, по умолчанию): отдаёт
+курсы к рублю файлом, без ключа и без регистрации. Проверено живьём — Frankfurter для рубля
+JSON не отдаёт, `open.er-api.com` считает обратные курсы, поэтому выбор один. ЦБ называет курс
+за `Nominal` единиц (для евро, доллара и лари — за одну), и номинал учитывается в разборе.
+
+**Модуль `:currency-monitor` — третий сервер MCP**, а не папка внутри `:mcp-github`: у сервиса
+курсов своё время жизни (служба на VPS между подключениями клиентов) и своя команда запуска,
+тогда как сервер GitHub бесполезен без аккаунта. Общая часть — объявления инструментов
+и stdio-цикл — берётся из `:mcp`, как и раньше: объявление одно на регистрацию, консольный
+список и схему для клиента, поэтому «показал одно, объявил другое» невозможно по построению.
+Пакеты внутри модуля повторяют слои задания: `remote/` (источник), `storage/` (история),
+`scheduler/` (расписание), `summary/` (агрегация), `mcp/` (инструменты).
+
+Решения вокруг данных:
+
+- **Курс — только `BigDecimal`, и в SQLite он лежит текстом.** `REAL` вернул бы 95.8709 уже
+  другим числом, а курс — деньги; текст хранит ровно то, что пришло. Масштаб — 6 знаков,
+  поэтому значения в базе одной длины.
+- **Момент получения — ISO-8601 UTC с секундной точностью.** Иначе текстовый порядок строк
+  перестал бы совпадать с хронологическим (`…32.9Z` сортировалось бы после `…32.10Z`).
+  И это именно момент, когда сервис узнал курс, а не дата публикации ЦБ: история отвечает
+  на первый вопрос.
+- **Строка на каждое обновление, без дедупликации** — так требует задание. Плата: при дневном
+  курсе ЦБ в истории стоят одинаковые значения за соседние часы, и «за сутки данных нет»
+  остаётся отличимым от «за сутки курс не менялся».
+- **Одно обновление — одна транзакция**: три курса одного обхода попадают в базу вместе или
+  не попадают вовсе, иначе половина обновления выглядела бы записью из другой даты.
+- **«Предыдущий» курс берётся из истории целиком, а не из окна сводки** — иначе у службы,
+  работающей вторые сутки, изменение за сутки всегда было бы неизвестным.
+- **Неопределённое — `null`, а не ноль**: нет истории — нет чисел, нет предыдущего курса — нет
+  изменения. Ноль на месте неизвестного читался бы как «курс равен нулю». Отказ хранилища
+  не глотается: недоступную историю нельзя выдавать за «период без данных».
+
+**Агрегация** (`CurrencySummaryService`) считается по окну `[сейчас − период, сейчас]`, обе
+границы входят в него: `DAY` — 24 часа, `WEEK` — 7 суток, `MONTH` — 30 суток; масштаб ответа
+4 знака. `get_currency_summary` объявляет `period` **обязательным** и с перечислением значений:
+умалчивание читалось бы как «за сутки» там, где человек имел в виду месяц, а свободная строка
+дала бы модели возможность выдумать `MONTHLY`. `get_currency_rates` аргументов не имеет
+и при пустой истории отвечает не отказом, а подсказкой, что данных ещё нет.
+
+**Планировщик** делает первое обновление сразу, а дальше — пауза после конца предыдущего:
+ждать час до первой записи значило бы, что инструмент всё это время отвечает «история пуста».
+Цикл переживает сбой хранилища и разбора (иначе молча прекратил бы сбор), но пробрасывает
+отмену, а ожидание идёт на `delay` — `Thread.sleep` не заметил бы `cancel()` до конца паузы.
+**Сбор не зависит от клиента**: он идёт по расписанию, а не по вызову инструмента.
+
+**Один процесс на всё, четыре режима** (`Application.kt`): без аргументов — служба (сбор,
+протокол, жизнь после конца ввода: на VPS клиента может не быть вовсе); `--mcp` — процесс
+для клиента, который выходит вместе с ним (так его поднимает сервер приложения, локально
+и по ssh); `--once` — одно обновление и код возврата для скриптов; `--list-tools` — объявления
+и выход, без базы и сети. Настройки приходят только из окружения (`CURRENCY_API_BASE`,
+`CURRENCY_DB`, `CURRENCY_INTERVAL`), потому что ребёнку аргументы назначает тот, кто его поднял,
+и настройка жила бы в двух местах. **Планировщик стартует внутри лямбды `runStdioServer`**:
+до неё стандартный вывод ещё не забран под протокол, и первые строки логов уехали бы клиенту
+вместо кадров — тем же уроком, что у сервера GitHub в прошлый день.
+
+**Сервер приложения подключает инструменты курсов** (`CurrencyTools.kt`) так же, как инструменты
+GitHub: одна долгая сессия, лениво на первом запросе, закрытие на `ApplicationStopped`.
+Кнопки и шторки в интерфейсе у курсов нет — настраиваемого доступа и состояния для показа тоже
+нет, поэтому инструменты просто доступны модели. Команду запуска можно задать переменной
+`CURRENCY_MCP_COMMAND` (например, `ssh vps java -jar /opt/currency-monitor/currency-monitor.jar --mcp`);
+недоступный процесс инструментов **не отменяет ответ** — вопрос идёт модели без
+инструментов, причина в логе, попытка повторяется на следующем запросе.
+
+**Развёртывание на VPS — артефакты, а не запуск с этой машины:** `:currency-monitor:fatJar`
+даёт `currency-monitor-1.0.0-all.jar` с манифестом (запуск ровно такой, как в задании),
+а `currency-monitor/deploy/currency-monitor.service` — unit-файл с `CURRENCY_DB`,
+`CURRENCY_INTERVAL=PT1H` и `Restart=on-failure` вместе с инструкцией установки. Запуска на
+настоящем VPS не было: SSH-доступа с этой машины нет, и ОС машины — macOS, а не сервер.
+
+**Проверка.** `:currency-monitor:test` — 42 теста (разбор ответа ЦБ с номиналом и не-2xx,
+хранилище на настоящем SQLite, границы окна сводки, поведение при отсутствии предыдущего курса
+и при нуле в нём, периодичность планировщика на подменных часах, отмена, форма ответов
+инструментов). Весь набор — 253 проверки без дублей (259 записей по XML: в шести файлах
+демонстрационных тестов XML дублируется), падений нет, APK собирается. Живьём: разовое
+обновление сходило к настоящему ЦБ и записало EUR 95.8709, USD 84.3414, GEL 32.1693;
+подставной источник с меняющимся курсом наполнил историю, служба поднялась на fat JAR
+и кадром протокола отдала оба ответа — последние курсы и сводку за `DAY` с текущим, предыдущим,
+изменением, минимумом, максимумом, средним и числом замеров; сервер приложения поднял дочерний
+процесс курсов, и живая модель по обычной просьбе сама запросила `get_currency_summary`,
+затем `get_currency_rates`, и ответила числами из базы, которых не знает иначе.
+
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 
@@ -1181,12 +1272,24 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
   back as `isError` results, and the server never crashes. It shares the `:mcp` part and does not
   depend on `:server`.
 
+* [/currency-monitor](./currency-monitor/src/main/kotlin) is the third MCP server and the only one
+  that owns data over time: it collects EUR/RUB, USD/RUB and GEL/RUB from an external source
+  (`remote/`, the CBR by default), keeps the history in SQLite (`storage/`, one row per update,
+  the rate as text so `BigDecimal` survives), updates it on a schedule (`scheduler/`, an hour apart,
+  the first update immediately) and answers two MCP tools from it (`mcp/`): `get_currency_rates`
+  and `get_currency_summary` with a required `period` of `DAY`/`WEEK`/`MONTH` (`summary/`).
+  `Application.kt` is the entry point and its four modes: no arguments — the service (scheduled
+  collection plus the stdio protocol, alive after stdin ends), `--mcp` — the process a client owns,
+  `--once` — a single update, `--list-tools` — print the declarations without a database or network.
+  It runs on a server as a plain `java -jar` (`deploy/currency-monitor.service`).
+
 * [/server](./server/src/main/kotlin) is for the Ktor server application: HTTP routes, server plugins
   and the client-facing request/response models. It stays a plain HTTP app: MCP did not replace it,
   and they serve different consumers (HTTP — the app and the human, MCP — the agent). It is also the
-  one place that attaches MCP tools to chat requests (`GitHubTools.kt`): it keeps one long-lived
-  session with the GitHub MCP server and hands the tools to the agent, so the model can call them on
-  its own.
+  one place that attaches MCP tools to chat requests (`GitHubTools.kt`, `CurrencyTools.kt`): it keeps
+  one long-lived session with each MCP server and hands the tools to the agent, so the model can call
+  them on its own (the currency session is opened lazily and its command can be pointed elsewhere with
+  `CURRENCY_MCP_COMMAND`).
 
 ### Running the apps
 
@@ -1196,9 +1299,13 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Server: `./gradlew :server:run`
 - MCP connection demo (the client connects to the project MCP server, prints its tools): `./gradlew :mcp:mcpDemo`
 - MCP server tools, no connection (the server process prints what it declares and exits): `./gradlew :mcp:mcpTools`
-- MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`, and `--server project|github` to pick which server the script owns (`github` takes `GITHUB_TOKEN`/`GITHUB_API_BASE` from the environment)
+- MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`, and `--server project|github|currency` to pick which server the script owns (`github` takes `GITHUB_TOKEN`/`GITHUB_API_BASE` from the environment, `currency` builds `:currency-monitor:fatJar` and runs it as the service)
 - MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:fatJar` then `java -cp mcp/build/libs/mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (add `--list-tools` to print the tools instead of serving)
 - GitHub tools demo (the agent picks the MCP tool by a plain request; live model, stub GitHub API): `./gradlew :server:githubDemo -Pdemo.live=1`
+- Currency service tools, no connection: `./gradlew :currency-monitor:mcpTools` (prints both tools, `period` is required with `DAY | WEEK | MONTH`)
+- One currency update and exit (`CURRENCY_API_BASE`, `CURRENCY_DB`, `CURRENCY_INTERVAL` come from the environment; exit code 1 if nothing was saved): `./gradlew :currency-monitor:currencyOnce`
+- Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: hourly collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
+- Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run`
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
   - JS target (slower, supports older browsers): `./gradlew :app:webApp:jsBrowserDevelopmentRun`
@@ -1211,6 +1318,7 @@ Use the run button in your IDE's editor gutter, or run tests using Gradle tasks:
 - Android tests: `./gradlew :app:shared:testAndroidHostTest`
 - Agent tests: `./gradlew :agent:test`
 - Server tests: `./gradlew :server:test`
+- Currency monitor tests: `./gradlew :currency-monitor:test`
 - Web tests:
   - Wasm target: `./gradlew :app:shared:wasmJsTest`
   - JS target: `./gradlew :app:shared:jsTest`

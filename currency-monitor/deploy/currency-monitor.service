@@ -1,0 +1,70 @@
+# Служба сервиса курсов для systemd: /etc/systemd/system/currency-monitor.service
+#
+# Сервис — обычная программа на JVM, и после запуска без аргументов он ведёт себя как служба:
+# планировщик собирает курсы по расписанию и работает, пока процесс не остановят. MCP-сервер
+# в этом же процессе отвечает клиенту, если тот подключится к его вводу, но клиента может
+# не быть вовсе — на VPS его обычно нет, и на сбор это не влияет.
+#
+# systemd здесь, а не `nohup`: сбор идёт круглосуточно, и нужны перезапуск после падения,
+# автозапуск при загрузке и логи в journalctl. Scheduler переживает ошибку одной итерации
+# (см. CurrencyScheduler), поэтому перезапуск — это защита от падения процесса, а не от
+# недоступного поставщика.
+#
+# Установка (пути — пример, подставьте свои):
+#   ./gradlew :currency-monitor:fatJar
+#   scp currency-monitor/build/libs/currency-monitor-1.0.0-all.jar vps:/opt/currency-monitor/currency-monitor.jar
+#   scp currency-monitor/deploy/currency-monitor.service vps:/etc/systemd/system/
+#   ssh vps 'useradd --system --no-create-home --shell /usr/sbin/nologin currency &&
+#            install -d -o currency -g currency /var/lib/currency-monitor &&
+#            systemctl daemon-reload && systemctl enable --now currency-monitor'
+#
+# Проверка после установки:
+#   ssh vps 'systemctl status currency-monitor'          # работает ли
+#   ssh vps 'journalctl -u currency-monitor -n 20'       # строки сбора: курсы, запись, отказ
+#   ssh vps 'sqlite3 /var/lib/currency-monitor/currency.db "select * from currency_rates"'
+#
+# Файл лежит в репозитории, а не только в инструкции: его правят вместе с сервисом, и при
+# переустановке VPS команду запуска не надо вспоминать заново.
+
+[Unit]
+Description=Сервис мониторинга курсов валют (EUR, USD, GEL к рублю)
+Documentation=https://github.com/UlyanaSa/AI-Challenge-Task-1
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=currency
+Group=currency
+WorkingDirectory=/var/lib/currency-monitor
+
+# База лежит рядом с рабочим каталогом службы: путь к ней не задаётся в ExecStart, потому
+# что настройки сервиса читаются из окружения (CurrencyConfig.fromEnvironment).
+Environment=CURRENCY_DB=/var/lib/currency-monitor/currency.db
+Environment=CURRENCY_INTERVAL=PT1H
+# Поставщика можно заменить, не трогая код: адрес API тоже из окружения.
+# Environment=CURRENCY_API_BASE=https://www.cbr-xml-daily.ru
+
+ExecStart=/usr/bin/java -jar /opt/currency-monitor/currency-monitor.jar
+
+# Сбор — работа с сетью: короткие отказы случаются, и поднимать службу заново после каждого
+# не стоит. Отсюда и «on-failure», и пауза: перезапуск нужен для падения процесса, а не для
+# неудачного обращения к поставщику — его переживает сам планировщик.
+Restart=on-failure
+RestartSec=30
+
+# Остановка: сигнал, а не SIGKILL, — JVM успевает закрыть историю (файл SQLite не остаётся
+# с незавершённой записью) и написать в лог строку о конце работы.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Ограничения: служба читает только свой каталог и пишет только в него — ни домашний каталог,
+# ни каталог установки ей не нужны.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/currency-monitor
+
+[Install]
+WantedBy=multi-user.target
