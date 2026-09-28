@@ -22,6 +22,9 @@ import com.osvin.aichallenge.agent.ProfileStore
 import com.osvin.aichallenge.agent.TaskWrite
 import com.osvin.aichallenge.agent.TaskWriter
 import com.osvin.aichallenge.agent.UserProfile
+import com.osvin.aichallenge.currency.mcp.CurrencyMcpServer
+import com.osvin.aichallenge.currency.mcp.MAX_CHANGE_HOURS
+import com.osvin.aichallenge.currency.mcp.MIN_CHANGE_HOURS
 import com.osvin.aichallenge.invariants.JsonFileInvariantStore
 import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
@@ -35,6 +38,7 @@ import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.ContentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -50,6 +54,7 @@ import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -58,6 +63,9 @@ import io.ktor.server.routing.routing
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.time.Duration.Companion.seconds
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
 
@@ -462,6 +470,68 @@ fun Application.module(
 
                 is GitHubCall.Rejected -> call.respond(
                     HttpStatusCode.Conflict,
+                    ErrorResponse(success = false, error = result.reason)
+                )
+            }
+        }
+
+        /**
+         * Текущие курсы для закреплённого чата: то, что чат печатает раз в минуту.
+         *
+         * Тело ответа — ровно ответ инструмента `get_currency_rates`, без пересказа полями
+         * сервера: числа уже посчитаны и описаны на стороне сервиса, и вторая модель тех же
+         * данных разошлась бы с первой молча, а видно это стало бы только по кривой ленте
+         * в приложении. Проверять здесь нечего: у инструмента нет аргументов, а «курсов ещё
+         * нет» — это его ответ с пометкой, а не ошибка запроса.
+         *
+         * 502 — когда сессия сервиса не поднялась: тогда данных нет вовсе, и причина отказа
+         * службы уходит телом [ErrorResponse]. Пустой лентой такой отказ показывать нельзя:
+         * «курсы не менялись» и «служба не отвечает» — разные вещи.
+         */
+        get("/v1/currency") {
+            when (val result = currencyTools.call(CurrencyMcpServer.RATES_TOOL)) {
+                is CurrencyCall.Answered -> call.respondText(result.json, ContentType.Application.Json)
+
+                is CurrencyCall.Unavailable -> call.respond(
+                    HttpStatusCode.BadGateway,
+                    ErrorResponse(success = false, error = result.reason)
+                )
+            }
+        }
+
+        /**
+         * Изменение курсов за окно часов: то, что закреплённый чат показывает при открытии.
+         *
+         * Окно проверяется здесь, а не только инструментом: неверный запрос должен получить
+         * 400, а не 502, — иначе опечатка в клиенте выглядела бы как отказ службы. Границы
+         * берутся те же, которыми объявлен аргумент инструмента: два числа в двух местах
+         * разошлись бы, и отказ на границе окна читался бы как ошибка сервиса.
+         *
+         * Тело ответа — ответ инструмента `get_currency_change`: в нём и изменение по каждой
+         * валюте, и честное покрытие окна (`hoursCovered`), по которому чат говорит, что
+         * сохранено меньше суток.
+         */
+        get("/v1/currency/change") {
+            val asked = call.request.queryParameters["hours"]?.trim()
+            val hours = asked?.toIntOrNull()
+            if (hours == null || hours !in MIN_CHANGE_HOURS..MAX_CHANGE_HOURS) {
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(
+                        success = false,
+                        error = "hours: ожидается целое число часов от $MIN_CHANGE_HOURS " +
+                            "до $MAX_CHANGE_HOURS, а не «${asked ?: "не задан"}»"
+                    )
+                )
+                return@get
+            }
+
+            val arguments = buildJsonObject { put("hours", JsonPrimitive(hours.toString())) }
+            when (val result = currencyTools.call(CurrencyMcpServer.CHANGE_TOOL, arguments)) {
+                is CurrencyCall.Answered -> call.respondText(result.json, ContentType.Application.Json)
+
+                is CurrencyCall.Unavailable -> call.respond(
+                    HttpStatusCode.BadGateway,
                     ErrorResponse(success = false, error = result.reason)
                 )
             }

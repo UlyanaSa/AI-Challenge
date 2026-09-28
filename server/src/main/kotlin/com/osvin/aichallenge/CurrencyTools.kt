@@ -11,6 +11,7 @@ import com.osvin.aichallenge.mcp.openMcpSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Инструменты агента из MCP-сервера курсов: сессия, которую открывает первый запрос к модели.
@@ -71,6 +72,37 @@ class CurrencyTools(
     }
 
     /**
+     * Вызов инструмента курсов по имени: этим путём идут маршруты приложения.
+     *
+     * Сессию открывает [tools] — тем же ленивым путём, что и запрос к модели: у курсов её
+     * не открывает человек, поэтому поднимает тот, кто первым спросил. Так маршрут приложения
+     * и вопрос человека к модели пользуются одним соединением, а не поднимают по процессу
+     * на каждый.
+     *
+     * Отказ инструмента (`isError`) ответом по данным не считается — в отличие от GitHub, где
+     * отказ инструмента законен и показывается человеку как результат вызова. Инструмент курсов
+     * отказывает только тогда, когда не может прочитать свою историю: это недоступность службы,
+     * и выдавать её за ответ «курсов нет» значило бы показать пустую ленту вместо причины.
+     *
+     * @param name Имя инструмента из объявленных сервисом (см. [CurrencyMcpServer]).
+     * @param arguments Аргументы вызова: строки, как их объявляет сервис.
+     */
+    suspend fun call(name: String, arguments: JsonObject = JsonObject(emptyMap())): CurrencyCall {
+        tools()
+        return mutex.withLock {
+            if (session?.isRunning != true) return CurrencyCall.Unavailable(NO_SERVICE)
+            val tool = modelTools.firstOrNull { it.name == name }
+                ?: return CurrencyCall.Unavailable("инструмент $name не объявлен сервисом курсов")
+            val outcome = tool.call(arguments)
+            if (outcome.isError) {
+                CurrencyCall.Unavailable(outcome.text)
+            } else {
+                CurrencyCall.Answered(outcome.text)
+            }
+        }
+    }
+
+    /**
      * Закрывает сессию: сервер приложения останавливается — процесс сервиса гасим сами.
      *
      * Без этого процесс сервиса курсов пережил бы остановку приложения: транспорт закрывается
@@ -94,6 +126,29 @@ class CurrencyTools(
         modelTools = emptyList()
     }
 }
+
+/**
+ * Результат вызова инструмента курсов для маршрутов приложения.
+ *
+ * Два случая, а не три, как у GitHub: у курсов отказ инструмента и недоступность службы — одно
+ * и то же (инструмент отказывает, только когда не может прочитать историю), и маршруту важно
+ * лишь то, есть ли данные. Поэтому `Answered` несёт JSON инструмента как есть — второго
+ * описания тех же чисел на стороне сервера нет: инструмент уже отвечает JSON-ом, и повторять
+ * его поля моделями значило бы держать две правды об одних данных, которые разошлись бы молча.
+ *
+ * @param json Ответ инструмента: тело для клиента, каким его составил сервис.
+ */
+sealed interface CurrencyCall {
+
+    /** Инструмент ответил: [json] — его ответ целиком. */
+    data class Answered(val json: String) : CurrencyCall
+
+    /** Спросить не удалось: нет сессии, нет такого инструмента или служба отказала. */
+    data class Unavailable(val reason: String) : CurrencyCall
+}
+
+/** Что сказать, когда сессии нет: причина отказа процесса уходит в лог, а не в ответ клиенту. */
+private const val NO_SERVICE = "сервис курсов недоступен: сессия не поднята"
 
 /**
  * Переменная окружения с командой запуска сервиса курсов.
