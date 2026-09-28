@@ -1127,9 +1127,12 @@ ai-challenge-project 1.0.0 — инструменты, которые объяв
 День 18. Сервис мониторинга курсов валют, MCP и ответ агента по накопленной истории
 
 День 17 показал, что агент умеет звать чужие инструменты. День 18 даёт ему то, чего у него
-не было, — **свои данные во времени**: сервис раз в час забирает EUR/RUB, USD/RUB и GEL/RUB
-у внешнего источника, складывает историю в SQLite, отдаёт её двумя MCP-инструментами
-(`get_currency_rates`, `get_currency_summary`) и живёт на сервере обычным `java -jar`.
+не было, — **свои данные во времени**: сервис раз в минуту забирает EUR/RUB, USD/RUB и GEL/RUB
+у внешнего источника, складывает историю в SQLite, отдаёт её тремя MCP-инструментами
+(`get_currency_rates`, `get_currency_summary`, `get_currency_change`) и живёт на сервере обычным
+`java -jar`. Вторая часть того же задания — **закреплённый чат** в приложении: лента курсов
+без ввода и без модели, строка на минуту, а при открытии — изменение за сутки, собранное
+из сохранённых часовых сводок.
 
 **Источник — ЦБ РФ** (`https://www.cbr-xml-daily.ru/daily_json.js`, по умолчанию): отдаёт
 курсы к рублю файлом, без ключа и без регистрации. Проверено живьём — Frankfurter для рубля
@@ -1175,7 +1178,14 @@ JSON не отдаёт, `open.er-api.com` считает обратные кур
 ждать час до первой записи значило бы, что инструмент всё это время отвечает «история пуста».
 Цикл переживает сбой хранилища и разбора (иначе молча прекратил бы сбор), но пробрасывает
 отмену, а ожидание идёт на `delay` — `Thread.sleep` не заметил бы `cancel()` до конца паузы.
-**Сбор не зависит от клиента**: он идёт по расписанию, а не по вызову инструмента.
+**Сбор не зависит от клиента**: он идёт по расписанию, а не по вызову инструмента. Интервал —
+настройка (`CURRENCY_INTERVAL`), по умолчанию минута: её требует лента закреплённого чата,
+а дневному курсу ЦБ в unit-файле для VPS оставлена подсказка про `PT1H` — минутный сбор стоит
+до 1440 обращений в сутки ради ряда, который у бесплатного источника почти не меняется.
+После каждого состоявшегося обновления планировщик **закрывает прошедший час часовой сводкой**
+в ту же базу (`currency_hourly_summaries`, ключ «час + валюта», `INSERT OR REPLACE`): суточная
+картина должна быть полной независимо от того, было ли приложение открыто, поэтому считает её
+служба, а не клиент по своей ленте.
 
 **Один процесс на всё, четыре режима** (`Application.kt`): без аргументов — служба (сбор,
 протокол, жизнь после конца ввода: на VPS клиента может не быть вовсе); `--mcp` — процесс
@@ -1198,26 +1208,72 @@ GitHub: одна долгая сессия, лениво на первом за�
 **Развёртывание на VPS — артефакты, а не запуск с этой машины:** `:currency-monitor:fatJar`
 даёт `currency-monitor-1.0.0-all.jar` с манифестом (запуск ровно такой, как в задании),
 а `currency-monitor/deploy/currency-monitor.service` — unit-файл с `CURRENCY_DB`,
-`CURRENCY_INTERVAL=PT1H` и `Restart=on-failure` вместе с инструкцией установки. Запуска на
+`CURRENCY_INTERVAL=PT1M` и `Restart=on-failure` вместе с инструкцией установки. Запуска на
 настоящем VPS не было: SSH-доступа с этой машины нет, и ОС машины — macOS, а не сервер.
 
-**Проверка.** `:currency-monitor:test` — 42 теста (разбор ответа ЦБ с номиналом и не-2xx,
+**Проверка.** `:currency-monitor:test` — 57 проверок (разбор ответа ЦБ с номиналом и не-2xx,
 хранилище на настоящем SQLite, границы окна сводки, поведение при отсутствии предыдущего курса
-и при нуле в нём, периодичность планировщика на подменных часах, отмена, форма ответов
-инструментов). Весь набор — 253 проверки без дублей (259 записей по XML: в шести файлах
-демонстрационных тестов XML дублируется), падений нет, APK собирается. Живьём: разовое
-обновление сходило к настоящему ЦБ и записало EUR 95.8709, USD 84.3414, GEL 32.1693;
-подставной источник с меняющимся курсом наполнил историю, служба поднялась на fat JAR
-и кадром протокола отдала оба ответа — последние курсы и сводку за `DAY` с текущим, предыдущим,
-изменением, минимумом, максимумом, средним и числом замеров; сервер приложения поднял дочерний
-процесс курсов, и живая модель по обычной просьбе сама запросила `get_currency_summary`,
-затем `get_currency_rates`, и ответила числами из базы, которых не знает иначе.
+и при нуле в нём, периодичность планировщика на подменных часах, отмена, часовые сводки
+и суточное изменение по ним, форма ответов инструментов). `:server:test` — 15 (маршруты курсов
+на настоящем MCP-процессе и подставном ЦБ), `:app:shared:testAndroidHostTest` — 36
+(лента закреплённого чата: минутная строка, сводка на смене часа, обрезка, шапка с суточной
+картиной, служебные строки не уходят в историю модели). Весь набор — 278 проверок (284 записи
+по XML: в шести файлах демонстрационных тестов XML дублируется), падений нет, два пропуска
+(живые прогоны `demo.live` в `:agent`), APK собирается. Живьём: разовое обновление сходило
+к настоящему ЦБ и записало EUR 95.8709, USD 84.3414, GEL 32.1693; подставной источник
+с меняющимся курсом наполнил историю, служба поднялась на fat JAR и кадром протокола отдала
+оба ответа — последние курсы и сводку за `DAY` с текущим, предыдущим, изменением, минимумом,
+максимумом, средним и числом замеров; сервер приложения поднял дочерний процесс курсов,
+и живая модель по обычной просьбе сама запросила `get_currency_summary`, затем
+`get_currency_rates`, и ответила числами из базы, которых не знает иначе. Закреплённый чат
+проверен на запущенном эмуляторе: строка на минуту с растущим курсом, а после посева двух
+закрытых часов в базу службы карточка показала суточное изменение, посчитанное сервисом
+по сохранённым сводкам (EUR 95,0 → 96,0, +1,0526%), и честное «сохранено 2 ч из 24».
 
 **Отдельная просьба владельца приложения, выполненная в этот же день:** убрана подпись «Ты молодец»
 в конце каждого ответа. Она жила в поле `sign_off` профиля (день 12) — из профиля по умолчанию
 и из профиля на сервере значение убрано, поле осталось и по-прежнему правится в шторке «Профиль».
 Проверено живьём: `GET /v1/profile` отдаёт профиль без подписи, а ответ живой модели на вопрос
 приходит без концовки.
+
+**Вторая часть задания — закреплённый чат курсов в приложении** (там же, в ветке `task-18`).
+Лента курсов живёт в обычном чате, но закреплена и устроена иначе: писать в неё нельзя, модель
+в ней не отвечает, а строка появляется раз в минуту — значит, и собирать курсы служба должна
+раз в минуту (`CURRENCY_INTERVAL=PT1M`), а не раз в час.
+
+- **Закрепление — признак чата, а не сравнение с его именем:** `Chat.pinned` (миграция 5→6),
+  список сортируется «закреплённые сверху», у такого чата нет поля ввода, полосы задачи
+  и кнопки удаления, а `sendMessage` для него выходит сразу — иначе модель ответила бы в ленте,
+  где нет ни вопроса, ни места для ответа. Строки монитора носят роль `MONITOR` и отсеиваются
+  фильтром истории модели: курс, напечатанный минутой, не становится «репликой» для следующего
+  запроса.
+- **Лента наполняется, пока приложение открыто:** цикл живёт в области видимости приложения
+  и раз в минуту читает `GET /v1/currency`, печатая «время · EUR … · USD … · GEL …» (время —
+  из метки сервера: виден момент, когда курсы посчитал сервис). Лента обрезается до 240 строк,
+  суточную картину показывает шапка, а не вся лента.
+- **Раз в час — сводка, и она хранится.** После каждого состоявшегося обновления служба
+  закрывает прошедший час сводкой в ту же базу (`currency_hourly_summaries`, ключ «час + валюта»,
+  `INSERT OR REPLACE`): суточная картина должна быть полной независимо от того, было ли
+  приложение открыто, поэтому считает её служба, а не клиент по своей ленте. Третий инструмент
+  `get_currency_change(hours)` отдаёт изменение по окну из последних **закрытых** часов,
+  честно сообщая, сколько часов окна действительно наблюдалось (`hoursCovered`, `from`, `to`,
+  `note`), — недобор не выдаётся за сутки. В ленте на смене часа той же сводкой печатается
+  «Сводка за час ЧЧ:00–ЧЧ:00», а при открытии чата карточка-шапка читает сутки и говорит,
+  чего не хватает («сохранено 2 ч из 24»).
+- **Сервер приложения отдаёт тело ответа инструмента как есть** (`GET /v1/currency`,
+  `GET /v1/currency/change?hours=N`; 400 на недопустимый `hours` по публичным границам самого
+  инструмента, 502 при недоступной сессии). Второй модели тех же чисел на сервере нет: она
+  разошлась бы со службой в том, что считать «последним закрытым часом». Клиент изменение
+  не считает и не может — в общем коде KMP нет ни `BigDecimal`, ни библиотеки дат, а `Double`
+  в деньги здесь не заводят; он печатает цифры ровно те, что пришли, меняя только точку
+  на запятую (масштаб с конечными нулями на проводе теряется: `JsonPrimitive` печатает
+  `BigDecimal.toString()`, и это осознано — строка заставила бы модель считать по тексту).
+
+Проверено на запущенном эмуляторе поверх базы прошлых дней (заодно миграция 5→6): «Курсы валют»
+стоит первым с подписью «закреплён», кнопки удаления нет, поля ввода и полосы задачи в чате нет,
+в ленте — по строке на минуту с растущим курсом; после посева двух закрытых часов в базу службы
+карточка показала изменение, посчитанное сервисом по сохранённым сводкам (EUR 95,0 → 96,0,
++1,0526%), и «сохранено 2 ч из 24». Подробности — `docs/task-18-currency-monitor.md`, §17–§21.
 
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
@@ -1239,6 +1295,11 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
   allowed values) and calls one by hand
   (`ui/components/GitHubSheet.kt`), and the card that prints a tool command and its answer in the feed
   (`ui/components/ChatBubble.kt`) — both for a call the human made and for one the model chose.
+  It also holds the pinned currency chat: the feed that prints a rate line every minute and the
+  card above it that shows the change over the day (`ui/components/CurrencyChangeCard.kt`,
+  `data/CurrencyFeed.kt`), the chat that cannot be written to (no input field, no model answer,
+  `data/CurrencyChat.kt`) and the monitor that fills it while the app is open
+  (`repository/ChatRepository.kt`).
   It contains several subfolders:
   - [commonMain](./app/shared/src/commonMain/kotlin) is for code that’s common for all targets.
   - Other folders are for Kotlin code that will be compiled for only the platform indicated in the folder name.
@@ -1281,9 +1342,12 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 * [/currency-monitor](./currency-monitor/src/main/kotlin) is the third MCP server and the only one
   that owns data over time: it collects EUR/RUB, USD/RUB and GEL/RUB from an external source
   (`remote/`, the CBR by default), keeps the history in SQLite (`storage/`, one row per update,
-  the rate as text so `BigDecimal` survives), updates it on a schedule (`scheduler/`, an hour apart,
-  the first update immediately) and answers two MCP tools from it (`mcp/`): `get_currency_rates`
-  and `get_currency_summary` with a required `period` of `DAY`/`WEEK`/`MONTH` (`summary/`).
+  the rate as text so `BigDecimal` survives), updates it on a schedule (`scheduler/`, a minute
+  apart by default, the first update immediately, and every update closes the past hour into a
+  stored hourly summary) and answers three MCP tools from it (`mcp/`): `get_currency_rates`,
+  `get_currency_summary` with a required `period` of `DAY`/`WEEK`/`MONTH` and
+  `get_currency_change` with a required `hours` (`summary/`, the change is built from the stored
+  hourly summaries, so the daily picture is complete whether or not the app was running).
   `Application.kt` is the entry point and its four modes: no arguments — the service (scheduled
   collection plus the stdio protocol, alive after stdin ends), `--mcp` — the process a client owns,
   `--once` — a single update, `--list-tools` — print the declarations without a database or network.
@@ -1295,7 +1359,10 @@ This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
   one place that attaches MCP tools to chat requests (`GitHubTools.kt`, `CurrencyTools.kt`): it keeps
   one long-lived session with each MCP server and hands the tools to the agent, so the model can call
   them on its own (the currency session is opened lazily and its command can be pointed elsewhere with
-  `CURRENCY_MCP_COMMAND`).
+  `CURRENCY_MCP_COMMAND`). Two currency routes hand the app the same numbers the agent sees:
+  `GET /v1/currency` and `GET /v1/currency/change?hours=N` return the tool's answer body as it is
+  (400 for an out-of-range `hours` — the bounds come from the tool itself, 502 when the session
+  cannot be started).
 
 ### Running the apps
 
@@ -1308,9 +1375,9 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - MCP server as a service: `./mcp/mcp-server.sh start` (background, logs and protocol frames in `mcp/build/mcp-server`), `./mcp/mcp-server.sh status` (checks the protocol, not just the process), `./mcp/mcp-server.sh stop`; also `restart`, `logs`, `frames`, `tools`, `--data-dir DIR`, and `--server project|github|currency` to pick which server the script owns (`github` takes `GITHUB_TOKEN`/`GITHUB_API_BASE` from the environment, `currency` builds `:currency-monitor:fatJar` and runs it as the service)
 - MCP server for a third-party client (fat jar, speaks stdio on its own stdout): `./gradlew :mcp:fatJar` then `java -cp mcp/build/libs/mcp-1.0.0-all.jar com.osvin.aichallenge.mcp.ProjectMcpServerKt` (add `--list-tools` to print the tools instead of serving)
 - GitHub tools demo (the agent picks the MCP tool by a plain request; live model, stub GitHub API): `./gradlew :server:githubDemo -Pdemo.live=1`
-- Currency service tools, no connection: `./gradlew :currency-monitor:mcpTools` (prints both tools, `period` is required with `DAY | WEEK | MONTH`)
+- Currency service tools, no connection: `./gradlew :currency-monitor:mcpTools` (prints all three tools; `period` is required with `DAY | WEEK | MONTH`, `hours` is required as a whole number of hours from 1 to 720)
 - One currency update and exit (`CURRENCY_API_BASE`, `CURRENCY_DB`, `CURRENCY_INTERVAL` come from the environment; exit code 1 if nothing was saved): `./gradlew :currency-monitor:currencyOnce`
-- Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: hourly collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
+- Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: minute collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
 - Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run`
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
