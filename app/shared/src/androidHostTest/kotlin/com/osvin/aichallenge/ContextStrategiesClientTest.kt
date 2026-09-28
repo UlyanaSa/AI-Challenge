@@ -620,7 +620,7 @@ class ContextStrategiesClientTest {
          * тоже уходит на сервер. Содержимое здесь не проверяется — важно лишь, чтобы
          * запрос профиля не съел ответ агента из очереди подставного сервера.
          */
-        const val PROFILE_SNAPSHOT = """{"role":"Kotlin Multiplatform разработчик","sign_off":"Ты молодец"}"""
+        const val PROFILE_SNAPSHOT = """{"role":"Kotlin Multiplatform разработчик","sign_off":"С уважением, профиль"}"""
 
         /**
          * Снимок задачи для тестов стратегий: задачи нет, каталог этапов пуст. Содержимое
