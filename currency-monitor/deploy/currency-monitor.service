@@ -22,6 +22,7 @@
 #   ssh vps 'systemctl status currency-monitor'          # работает ли
 #   ssh vps 'journalctl -u currency-monitor -n 20'       # строки сбора: курсы, запись, отказ
 #   ssh vps 'sqlite3 /var/lib/currency-monitor/currency.db "select * from currency_rates"'
+#   ssh vps 'sqlite3 /var/lib/currency-monitor/currency.db "select * from currency_hourly_summaries"'
 #
 # Файл лежит в репозитории, а не только в инструкции: его правят вместе с сервисом, и при
 # переустановке VPS команду запуска не надо вспоминать заново.
@@ -41,7 +42,11 @@ WorkingDirectory=/var/lib/currency-monitor
 # База лежит рядом с рабочим каталогом службы: путь к ней не задаётся в ExecStart, потому
 # что настройки сервиса читаются из окружения (CurrencyConfig.fromEnvironment).
 Environment=CURRENCY_DB=/var/lib/currency-monitor/currency.db
-Environment=CURRENCY_INTERVAL=PT1H
+# Минута — темп ленты закреплённого чата в приложении. У бесплатного источника курс меняется
+# раз в сутки, поэтому минутный сбор — это до 1440 обращений в день ради ряда, который почти
+# не меняется. Если источник чужой и вежливость важнее ленты, поставьте PT1H: лента станет
+# часовой, а нагрузка упадёт в шестьдесят раз — служба и инструменты работают с любым темпом.
+Environment=CURRENCY_INTERVAL=PT1M
 # Поставщика можно заменить, не трогая код: адрес API тоже из окружения.
 # Environment=CURRENCY_API_BASE=https://www.cbr-xml-daily.ru
 

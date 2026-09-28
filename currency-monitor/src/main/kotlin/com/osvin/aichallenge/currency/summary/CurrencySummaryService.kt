@@ -1,10 +1,7 @@
 package com.osvin.aichallenge.currency.summary
 
 import com.osvin.aichallenge.currency.Currency
-import com.osvin.aichallenge.currency.CurrencyRate
 import com.osvin.aichallenge.currency.CurrencyRateRepository
-import java.math.BigDecimal
-import java.math.RoundingMode
 import java.time.Clock
 import java.time.Instant
 
@@ -19,6 +16,10 @@ import java.time.Instant
  * Возврат устроен списком, а не картой по валютам: порядок ответа объявлен один раз —
  * [Currency.entries], и модель видит валюты в том же порядке, в каком их перечисляет домен.
  * Карта этот порядок теряла бы, и ответ инструмента пришлось бы сортировать заново.
+ *
+ * Округление, проценты и среднее берутся из общих помощников файла `SummaryNumbers.kt`: те же
+ * числа считает сводка часа, и правила у них должны быть одни — иначе один и тот же курс в ленте
+ * и в ответе инструмента выглядел бы по-разному.
  *
  * @param repository История, по которой считается сводка.
  * @param clock Часы сервиса: точка «сейчас» для окна.
@@ -70,46 +71,8 @@ class CurrencySummaryService(
             changePercent = previous?.rateToRub?.let { percentOf(it, current.rateToRub) },
             minRate = window.minOf { it.rateToRub }.rounded(),
             maxRate = window.maxOf { it.rateToRub }.rounded(),
-            averageRate = averageOf(window),
+            averageRate = averageOf(window.map { it.rateToRub }),
             samples = window.size
         )
-    }
-
-    /** Среднее окна: сумма на число записей, с масштабом и режимом округления ответа. */
-    private fun averageOf(rates: List<CurrencyRate>): BigDecimal = rates
-        .fold(BigDecimal.ZERO) { sum, rate -> sum.add(rate.rateToRub) }
-        .divide(BigDecimal(rates.size), SUMMARY_SCALE, RoundingMode.HALF_UP)
-
-    /**
-     * Изменение в процентах от [previous] до [current]; null, если процент не определён.
-     *
-     * Проценты считаются от нуля как «бесконечно много», и единственный честный ответ здесь —
-     * «неизвестно»: одна испорченная запись (курс равен нулю) не должна ронять сводку
-     * исключением деления на ноль. Сравнение именно по `signum`, а не по `equals`: знак
-     * различает ноль с любым масштабом и отрицательный курс, который тоже делить нельзя.
-     */
-    private fun percentOf(previous: BigDecimal, current: BigDecimal): BigDecimal? =
-        previous.takeIf { it.signum() != 0 }?.let {
-            current.subtract(previous)
-                .multiply(HUNDRED)
-                .divide(it, SUMMARY_SCALE, RoundingMode.HALF_UP)
-        }
-
-    /**
-     * Число сводки в объявленном масштабе.
-     *
-     * В истории курсы лежат с шестью знаками, и эту точность незачем тащить в ответ: сводка
-     * описывает период, а не повторяет записи. Масштаб и режим задаются явно потому, что
-     * `divide` без них бросает `ArithmeticException` на непредставимой дроби, а `setScale`
-     * без режима — на сужении; умолчания здесь означали бы падение на живых данных.
-     */
-    private fun BigDecimal.rounded(): BigDecimal = setScale(SUMMARY_SCALE, RoundingMode.HALF_UP)
-
-    private companion object {
-        /** Масштаб чисел ответа: четыре знака после запятой. */
-        const val SUMMARY_SCALE = 4
-
-        /** Множитель для перевода доли в проценты. */
-        val HUNDRED: BigDecimal = BigDecimal(100)
     }
 }

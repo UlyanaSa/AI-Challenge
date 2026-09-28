@@ -5,12 +5,17 @@ import com.osvin.aichallenge.currency.CurrencyRate
 import com.osvin.aichallenge.currency.CurrencyRateException
 import com.osvin.aichallenge.currency.CurrencyRateProvider
 import com.osvin.aichallenge.currency.CurrencyService
+import com.osvin.aichallenge.currency.FakeCurrencyHourlySummaryRepository
 import com.osvin.aichallenge.currency.FakeCurrencyRateProvider
 import com.osvin.aichallenge.currency.FakeCurrencyRateRepository
+import com.osvin.aichallenge.currency.summary.CurrencyHourlySummaryService
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import java.time.Clock
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -36,7 +41,12 @@ class CurrencySchedulerTest {
     fun `первое обновление сразу, дальше по интервалу`() = runBlocking {
         val repository = FakeCurrencyRateRepository()
         val provider = FakeCurrencyRateProvider()
-        val scheduler = CurrencyScheduler(CurrencyService(provider, repository), INTERVAL)
+        val summaries = FakeCurrencyHourlySummaryRepository()
+        val scheduler = CurrencyScheduler(
+            CurrencyService(provider, repository),
+            summaryService(repository, summaries),
+            INTERVAL
+        )
 
         val job = scheduler.start(this)
         delay(WINDOW_MS)
@@ -59,13 +69,25 @@ class CurrencySchedulerTest {
             repository.history.size,
             "каждое обновление должно записать по строке на валюту"
         )
+        // Сводка часа — производное от той же истории, и закрывает её тот же цикл: не появись она,
+        // суточное изменение в приложении считать было бы не по чему.
+        assertEquals(
+            Currency.entries.size,
+            summaries.stored.size,
+            "после состоявшихся обновлений прошедший час должен быть закрыт сводками"
+        )
     }
 
     @Test
     fun `отказ поставщика не останавливает сбор`() = runBlocking {
         val repository = FakeCurrencyRateRepository()
         val provider = FailsOnceProvider()
-        val scheduler = CurrencyScheduler(CurrencyService(provider, repository), INTERVAL)
+        val summaries = FakeCurrencyHourlySummaryRepository()
+        val scheduler = CurrencyScheduler(
+            CurrencyService(provider, repository),
+            summaryService(repository, summaries),
+            INTERVAL
+        )
 
         val job = scheduler.start(this)
         delay(WINDOW_MS)
@@ -86,7 +108,12 @@ class CurrencySchedulerTest {
     fun `отмена останавливает сбор`() = runBlocking {
         val repository = FakeCurrencyRateRepository()
         val provider = FakeCurrencyRateProvider()
-        val scheduler = CurrencyScheduler(CurrencyService(provider, repository), INTERVAL)
+        val summaries = FakeCurrencyHourlySummaryRepository()
+        val scheduler = CurrencyScheduler(
+            CurrencyService(provider, repository),
+            summaryService(repository, summaries),
+            INTERVAL
+        )
 
         val job = scheduler.start(this)
         delay(WINDOW_MS)
@@ -102,6 +129,22 @@ class CurrencySchedulerTest {
                 "стало ${provider.calls}"
         )
     }
+
+    /**
+     * Служба сводок с часами, поставленными на середину одиннадцатого.
+     *
+     * Курсы двойника записаны в десять, поэтому закрывается час 10:00–11:00 и сводки выходят
+     * непустыми. Системные часы здесь не годятся: «предыдущий час» зависел бы от времени запуска,
+     * и проверка, запущенная в начале часа, собирала бы сводку по пустому часу.
+     */
+    private fun summaryService(
+        repository: FakeCurrencyRateRepository,
+        summaries: FakeCurrencyHourlySummaryRepository
+    ): CurrencyHourlySummaryService = CurrencyHourlySummaryService(
+        repository,
+        summaries,
+        Clock.fixed(Instant.parse("2026-09-28T11:30:00Z"), ZoneOffset.UTC)
+    )
 
     private companion object {
         /** Интервал проверки: короткий, чтобы окно проверки не удлиняло прогон. */

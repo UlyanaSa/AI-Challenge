@@ -4,7 +4,10 @@ import com.osvin.aichallenge.currency.mcp.CurrencyMcpServer
 import com.osvin.aichallenge.currency.mcp.CurrencyToolsData
 import com.osvin.aichallenge.currency.remote.CbrCurrencyRateProvider
 import com.osvin.aichallenge.currency.scheduler.CurrencyScheduler
+import com.osvin.aichallenge.currency.storage.CurrencyDatabase
+import com.osvin.aichallenge.currency.storage.SqliteCurrencyHourlySummaryRepository
 import com.osvin.aichallenge.currency.storage.SqliteCurrencyRateRepository
+import com.osvin.aichallenge.currency.summary.CurrencyHourlySummaryService
 import com.osvin.aichallenge.currency.summary.CurrencySummaryService
 import com.osvin.aichallenge.mcp.LIST_TOOLS_FLAG
 import com.osvin.aichallenge.mcp.mcpServer
@@ -90,13 +93,19 @@ fun main(args: Array<String>) {
 
     val config = CurrencyConfig.fromEnvironment()
     val log = LoggerFactory.getLogger(SERVICE_LOGGER)
-    val repository = openHistory(config) ?: exitProcess(2)
+    val database = openDatabase(config) ?: exitProcess(2)
+    // Оба хранилища — на одной базе: часовые сводки считаются по минутной истории того же часа,
+    // и два соединения к одному файлу дали бы вопрос «а не отстал ли один из двух» там, где
+    // нужен один согласованный взгляд на данные. Закрывает базу владелец файла — здесь.
+    val repository = SqliteCurrencyRateRepository(database)
+    val summaries = SqliteCurrencyHourlySummaryRepository(database)
     val provider = CbrCurrencyRateProvider(config)
     val service = CurrencyService(provider, repository)
+    val hourly = CurrencyHourlySummaryService(repository, summaries)
 
     try {
         if (mode == ONCE_FLAG) exitProcess(updateOnce(service, log))
-        val data = CurrencyToolsData(service, CurrencySummaryService(repository))
+        val data = CurrencyToolsData(service, CurrencySummaryService(repository), hourly)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
             runStdioServer(
@@ -119,7 +128,7 @@ fun main(args: Array<String>) {
                     config.databasePath,
                     config.interval
                 )
-                CurrencyScheduler(service, config.interval, log).start(scope)
+                CurrencyScheduler(service, hourly, config.interval, log).start(scope)
                 mcpServer(
                     CurrencyMcpServer.NAME,
                     CurrencyMcpServer.VERSION,
@@ -141,20 +150,20 @@ fun main(args: Array<String>) {
         }
     } finally {
         provider.close()
-        repository.close()
+        database.close()
     }
 }
 
 /**
- * Открывает историю курсов или объясняет, почему не вышло.
+ * Открывает базу курсов или объясняет, почему не вышло.
  *
  * Отказ открытия — единственная ошибка запуска, при которой работать нечем: без истории нет
- * ни сбора, ни инструментов. Поэтому сообщение печатается в поток ошибок и процесс завершается
- * кодом 2, а не продолжается с полурабочим сервисом: «сервер поднялся, но ничего не может» —
- * худший исход для того, кто на VPS смотрит на `systemctl status`.
+ * ни сбора, ни инструментов, ни сводок. Поэтому сообщение печатается в поток ошибок и процесс
+ * завершается кодом 2, а не продолжается с полурабочим сервисом: «сервер поднялся, но ничего
+ * не может» — худший исход для того, кто на VPS смотрит на `systemctl status`.
  */
-private fun openHistory(config: CurrencyConfig): CurrencyRateRepository? = try {
-    SqliteCurrencyRateRepository(config.databasePath)
+private fun openDatabase(config: CurrencyConfig): CurrencyDatabase? = try {
+    CurrencyDatabase(config.databasePath)
 } catch (error: CurrencyStorageException) {
     // В поток ошибок, а не логгером: логгер у logback по умолчанию пишет в стандартный вывод,
     // который в рабочем режиме отдан протоколу. Ошибка открытия базы случается до того, как

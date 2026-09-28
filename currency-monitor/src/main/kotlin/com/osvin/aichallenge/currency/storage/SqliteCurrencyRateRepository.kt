@@ -7,8 +7,6 @@ import java.math.BigDecimal
 import java.nio.file.Path
 import java.sql.ResultSet
 import java.time.Instant
-import java.time.format.DateTimeFormatter
-import java.time.temporal.ChronoUnit
 
 /**
  * История курсов в файле SQLite: выборки и вставки на JDBC, без ORM.
@@ -130,16 +128,6 @@ class SqliteCurrencyRateRepository(private val database: CurrencyDatabase) : Cur
                 "WHERE currency = ? AND received_at < ? ORDER BY received_at DESC, id DESC LIMIT 1"
     }
 }
-
-/**
- * Момент в виде текста для базы: ISO-8601 UTC, секунды — тот же предел, что у курса.
- *
- * Усечение здесь, а не только при создании [CurrencyRate], потому что границы окна и «до какого
- * момента» приходят от вызывающего с любым числом знаков: сравнивать их с усечёнными строками
- * можно, лишь приведя к той же точности.
- */
-private fun Instant.stored(): String =
-    DateTimeFormatter.ISO_INSTANT.format(truncatedTo(ChronoUnit.SECONDS))
 
 /** Строка истории: цена и момент — валюта известна из запроса и передаётся вызывающим. */
 private fun ResultSet.rate(currency: Currency): CurrencyRate = CurrencyRate(
