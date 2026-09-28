@@ -51,10 +51,10 @@ class McpOrchestrator(
      */
     fun tools(): List<AgentTool> = registry.all().map { registered ->
         AgentTool(
-            name = registered.qualifiedName,
+            name = registered.callName,
             description = "${registered.tool.description} (сервер: ${registered.serverId})",
             parameters = registered.tool.parameters,
-            call = { arguments -> execute(registered.qualifiedName, arguments) }
+            call = { arguments -> execute(registered.callName, arguments) }
         )
     }
 
@@ -85,7 +85,7 @@ class McpOrchestrator(
         val outcome = try {
             withTimeout(callTimeoutMs) { registered.tool.call(arguments) }
         } catch (timedOut: TimeoutCancellationException) {
-            log(call, registered, startedAt, success = false)
+            log(call, registered, arguments, startedAt, success = false)
             return failure(
                 call,
                 toolName,
@@ -98,7 +98,7 @@ class McpOrchestrator(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            log(call, registered, startedAt, success = false)
+            log(call, registered, arguments, startedAt, success = false)
             return failure(
                 call,
                 toolName,
@@ -110,7 +110,7 @@ class McpOrchestrator(
             )
         }
 
-        log(call, registered, startedAt, success = !outcome.isError)
+        log(call, registered, arguments, startedAt, success = !outcome.isError)
         // Отказ самого инструмента тоже отдаётся структурой: причина остаётся в `message`,
         // а рядом появляются код, сервер и имя вызова — по ним видно, чей это отказ, тогда как
         // в тексте одного инструмента этого не сказано вовсе. Форма отказа тогда одна на всех:
@@ -142,7 +142,7 @@ class McpOrchestrator(
      * или модель позвала то, чего нет).
      */
     private fun unknownTool(toolName: String): McpOrchestrationError {
-        val server = toolName.substringBefore('.', missingDelimiterValue = "")
+        val server = toolName.substringBefore(CALL_NAME_SEPARATOR, missingDelimiterValue = "")
         return if (server.isNotEmpty() && registry.knowsServer(server)) {
             McpOrchestrationError(UNKNOWN_TOOL_CODE, "Сервер $server такого инструмента не объявлял: $toolName.")
         } else {
@@ -180,11 +180,18 @@ class McpOrchestrator(
      * Печатается до возврата результата и в обоих исходах — иначе в логе не было бы видно
      * ни отказа, ни того, что вызов вообще был.
      */
-    private fun log(call: Pair<String, Int>, registered: RegisteredTool, startedAt: Long, success: Boolean) {
+    private fun log(
+        call: Pair<String, Int>,
+        registered: RegisteredTool,
+        arguments: JsonObject,
+        startedAt: Long,
+        success: Boolean
+    ) {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
         onLog(
-            "requestId=${call.first} iteration=${call.second} tool=${registered.qualifiedName} " +
-                "server=${registered.serverId} arguments=${argumentsSummary(arguments!!)} " +
+            "requestId=${call.first} iteration=${call.second} " +
+                "tool=${registered.name} server=${registered.serverId} " +
+                "arguments=${argumentsSummary(arguments)} " +
                 "duration=${elapsedMs}ms success=$success"
         )
     }
@@ -203,6 +210,9 @@ class McpOrchestrator(
         }
 
     companion object {
+        /** Разделитель имени вызова: тот же, что у [RegisteredTool.callName]. */
+        const val CALL_NAME_SEPARATOR = "__"
+
         /** Код отказа: имя вызова не разобралось в подключённый сервер. */
         const val SERVER_UNAVAILABLE_CODE = "MCP_SERVER_UNAVAILABLE"
 

@@ -1336,6 +1336,56 @@ USD, EUR и GEL относительно рубля, сформируй крат
 (149 знаков), в файле те же 149 знаков, ответ — «Готово. Курсы получены, сводка сформирована
 и сохранена.». Подробности — `docs/task-19-mcp-pipeline.md`.
 
+### task-20
+
+День 20. Оркестрация MCP: один агент, несколько серверов, длинный workflow
+
+Дни 16–19 дали агенту по серверу инструментов за раз. День 20 убирает границу: агент получает
+**один список инструментов нескольких MCP-серверов**, сам выбирает нужные, а маршрут каждого
+вызова (какому серверу он принадлежит) держит оркестратор. Порядок шагов не зашит — длинную
+цепочку собирает модель по описаниям инструментов.
+
+**Новый сервер `:mcp-report`** (четвёртый в проекте): `createReport(title, sections)` собирает
+markdown из заголовка и секций, `saveReport(content, filename?)` пишет файл в свой каталог
+(`REPORTS_DIR`) и отвечает абсолютным путём. Флага `--mcp` у него нет: работы без клиента не
+существует. В `:mcp-github` добавлены `getRepository(repository)` и
+`getRecentCommits(repository, limit)` — без них просьбу «найди репозиторий и покажи коммиты»
+выполнить было нечем.
+
+**Единый реестр и имена вызовов** (`server/.../orchestration/McpToolRegistry.kt`). Имя, которое
+видит модель, — `сервер__инструмент` (`github__getRecentCommits`): одинаковые имена у разных
+серверов возможны (запись файла умеют и пайплайн, и сервер отчётов), и выбирать между ними должен
+не код, а модель. Разделитель — двойное подчёркивание, а не точка: имена функций в API провайдера
+обязаны совпадать с `^[a-zA-Z0-9_-]+$`, и список с точками отклоняется целиком (`400 Invalid
+'tools[0].function.name'` — проверено живым запросом). Повторная запись того же имени реестр
+не удваивает: сессию сервера могут поднять заново.
+
+**Оркестратор** (`server/.../orchestration/McpOrchestrator.kt`) делает ровно одно: по имени вызова
+находит сервер, выполняет вызов и отвечает результатом; выбор инструмента остаётся за моделью.
+Срок вызова — минута (длинный workflow не должен держаться за один зависший вызов). Отказы —
+структурой `{"success": false, "error": {"code", "server", "tool", "message"}}` с кодами
+`MCP_SERVER_UNAVAILABLE`, `MCP_UNKNOWN_TOOL`, `MCP_TOOL_TIMEOUT`, `MCP_TOOL_ERROR`, `MCP_CALL_FAILED`,
+`MCP_EMPTY_RESULT`; отказ самого инструмента тоже заворачивается в эту форму — в его тексте не
+сказано, чей это отказ. Успешный результат отдаётся текстом инструмента как есть: следующий шаг
+принимает его аргументом. Каждый вызов печатается одной строкой протокола — номер запроса, номер
+вызова, инструмент, сервер, размеры аргументов, длительность, исход: по этим строкам
+восстанавливается весь workflow одного запроса.
+
+**Предел раундов** `MAX_TOOL_ROUNDS` поднят с трёх до пятнадцати: три хватало на один сервер,
+а длинная цепочка дня 20 обрывалась бы на середине. Бесконечный цикл по-прежнему невозможен.
+
+**Передача данных между серверами идёт через агента**: результат одного уходит аргументом
+следующему, серверы друг о друге не знают.
+
+**Проверка.** Живой прогон `./gradlew :server:orchestrationDemo -Pdemo.live=1`: модель
+`deepseek-v4-flash`, три сервера инструментов настоящими процессами по протоколу MCP (GitHub —
+подставной API, курсы — временная база, отчёты — временный каталог). Модель получила девять
+инструментов трёх серверов и прошла цепочку сама: `currency→get_currency_rates`,
+`github→get_repositories`, `github→getRecentCommits`, `report→createReport`, `report→saveReport`
+(пять вызовов, три сервера, ни одного зашитого шага); числа из ответа сервера курсов
+(95.8709 / 84.3414 / 32.1693) нашлись в записанном отчёте рядом с репозиторием `kmp-agent`
+из GitHub MCP. Подробности — `docs/task-20-orchestration.md`.
+
 This is a Kotlin Multiplatform project targeting Android, iOS, Web, Server.
 
 
@@ -1440,6 +1490,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - One currency update and exit (`CURRENCY_API_BASE`, `CURRENCY_DB`, `CURRENCY_INTERVAL` come from the environment; exit code 1 if nothing was saved): `./gradlew :currency-monitor:currencyOnce`
 - Currency service as a standalone jar (this is what runs on a server): `./gradlew :currency-monitor:fatJar` then `java -jar currency-monitor/build/libs/currency-monitor-1.0.0-all.jar` (no arguments — the service: minute collection plus stdio protocol, it keeps living after stdin ends; `--mcp` — the process a client owns, exits with it; `--once` — one update; `--list-tools` — print the tools, no database and no network). Deployment units and install commands: `currency-monitor/deploy/currency-monitor.service`
 - Pipeline tools (chain of three: rates → summary → file), no connection: `./gradlew :mcp-pipeline:mcpTools`; the chain itself on a live model: `./gradlew :server:pipelineDemo -Pdemo.live=1`; as a standalone process (`PIPELINE_OUTPUT_DIR`, `CURRENCY_DB` from the environment): `./gradlew :mcp-pipeline:fatJar` then `java -jar mcp-pipeline/build/libs/mcp-pipeline-1.0.0-all.jar`
+- Orchestration of several MCP servers (day 20): `./gradlew :server:orchestrationDemo -Pdemo.live=1` (long workflow through three servers, assembled by the model); report server alone: `./gradlew :mcp-report:mcpTools`, as a process: `./gradlew :mcp-report:fatJar` then `java -jar mcp-report/build/libs/mcp-report-1.0.0-all.jar` (`REPORTS_DIR`, `REPORT_MCP_COMMAND` from the environment)
 - Currency tools for the app server when the service runs on another machine: `CURRENCY_MCP_COMMAND='ssh vps sudo -n -u currency env CURRENCY_DB=/var/lib/currency-monitor/currency.db java -jar /opt/currency-monitor/currency-monitor.jar --mcp' ./gradlew :server:run` (the database belongs to the service user and the default path is relative, so both the user and the path are named in the command; otherwise the child creates an empty database of its own)
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`

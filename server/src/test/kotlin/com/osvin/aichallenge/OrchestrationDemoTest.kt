@@ -43,7 +43,7 @@ import kotlin.test.assertTrue
  * не меняется — серверы берут адрес API и базу из окружения так же, как брали бы настоящие.
  *
  * Что проверяется. Модель получает **один** список инструментов трёх серверов (имена вызовов
- * несут признак сервера: `currency.…`, `github.…`, `report.…`) и по обычной просьбе проходит
+ * несут признак сервера: `currency__…`, `github__…`, `report__…`) и по обычной просьбе проходит
  * цепочку сама: курсы (Currency MCP) → репозитории, репозиторий, коммиты (GitHub MCP) → сборка
  * и запись отчёта (Report MCP). Кода, который знал бы про этот порядок, в тесте нет — есть одна
  * просьба и один список инструментов.
@@ -73,7 +73,7 @@ class OrchestrationDemoTest {
             val reports = directory.resolve("reports")
             seedCurrency(database)
 
-            val github = StubGitHub()
+            val github = OrchestrationStubGitHub()
             val protocol = CopyOnWriteArrayList<String>()
             val onProtocol = { line: String -> protocol += line; log("оркестратор: $line") }
 
@@ -101,13 +101,22 @@ class OrchestrationDemoTest {
             )
             val http = demoHttpClient()
             try {
+                // Сессию GitHub открывает человек кнопкой (так устроено с дня 16), поэтому
+                // в демонстрации её открываем явно — как это делает приложение по нажатию.
+                val connection = githubTools.connect()
+                log("GitHub: ${connection::class.simpleName}")
+
                 val registry = McpToolRegistry()
                 val orchestrator = McpOrchestrator(registry, onLog = onProtocol)
+                // Ответы инструментов записываются: по ним видно, что именно вернул сервер курсов,
+                // и проверка отчёта сравнивается с ним, а не с выдуманными числами. Курсы служба
+                // берёт из сети, поэтому свои числа в проверке разошлись бы с её данными.
+                val answers = mutableMapOf<String, String>()
                 val servers = listOf(
                     ToolServers.GITHUB to githubTools.tools(),
                     ToolServers.CURRENCY to currencyTools.tools(),
                     ToolServers.REPORT to reportTools.tools()
-                )
+                ).map { (serverId, tools) -> serverId to tools.map { recorded(it, answers) } }
 
                 stage("Единый список инструментов трёх серверов")
                 val tools = orchestratedTools(registry, orchestrator, servers)
@@ -115,12 +124,12 @@ class OrchestrationDemoTest {
                 val names = tools.map { it.name }
                 assertEquals(names.distinct(), names, "имена вызовов должны различаться: $names")
                 listOf(
-                    "${ToolServers.GITHUB}.get_repositories",
-                    "${ToolServers.GITHUB}.getRepository",
-                    "${ToolServers.GITHUB}.getRecentCommits",
-                    "${ToolServers.CURRENCY}.get_currency_rates",
-                    "${ToolServers.REPORT}.createReport",
-                    "${ToolServers.REPORT}.saveReport"
+                    "${ToolServers.GITHUB}__get_repositories",
+                    "${ToolServers.GITHUB}__getRepository",
+                    "${ToolServers.GITHUB}__getRecentCommits",
+                    "${ToolServers.CURRENCY}__get_currency_rates",
+                    "${ToolServers.REPORT}__createReport",
+                    "${ToolServers.REPORT}__saveReport"
                 ).forEach { expected ->
                     assertTrue(expected in names, "в списке нет $expected: $names")
                 }
@@ -143,8 +152,15 @@ class OrchestrationDemoTest {
                     "workflow прошёл не через три сервера или не в том порядке: $route"
                 )
                 assertTrue(
-                    route.count { it.first == ToolServers.GITHUB } >= 3,
-                    "на GitHub-сервере должно было быть несколько вызовов: $route"
+                    route.size >= 5,
+                    "workflow должен состоять из нескольких вызовов: $route"
+                )
+                // Сколько именно шагов на GitHub-сервере, решает модель: в одном прогоне она
+                // берёт репозиторий отдельным вызовом, в другом сразу просит коммиты. Проверка
+                // держится за то, что шагов там больше одного, а не за конкретный их набор.
+                assertTrue(
+                    route.count { it.first == ToolServers.GITHUB } >= 2,
+                    "на GitHub-сервере должен был быть не один вызов: $route"
                 )
 
                 stage("Отчёт: данные двух серверов в одном файле")
@@ -152,9 +168,13 @@ class OrchestrationDemoTest {
                 val content = Files.readString(report)
                 log("отчёт: $report, знаков ${content.length}")
                 assertContains(content, "kmp-agent", message = "в отчёте нет репозитория из GitHub MCP: $content")
+                val rates = answers[CURRENCY_RATES_TOOL]
+                    ?: error("сервер курсов не ответил: ${answers.keys}")
+                val rateNumbers = kotlin.text.Regex("\\d+\\.\\d+").findAll(rates).map { it.value }.distinct().toList()
+                log("курсы из Currency MCP: ${rateNumbers.take(6)}")
                 assertTrue(
-                    RATE_MARKERS.any { marker -> content.contains(marker) },
-                    "в отчёте нет курсов из Currency MCP: $content"
+                    rateNumbers.any { number -> content.contains(number) || content.contains(number.replace('.', ',')) },
+                    "в отчёте нет ни одного курса из Currency MCP ($rateNumbers): $content"
                 )
                 assertTrue(result.reply.isNotBlank(), "модель ничего не ответила человеку")
                 log("workflow собран моделью: серверов 3, вызовов ${routed.size}, отчёт записан")
@@ -187,6 +207,15 @@ class OrchestrationDemoTest {
             repository.close()
         }
     }
+
+    /** Инструмент с записью ответа: записанное и сравнивается с содержимым отчёта. */
+    private fun recorded(tool: com.osvin.aichallenge.agent.AgentTool, answers: MutableMap<String, String>) =
+        com.osvin.aichallenge.agent.AgentTool(
+            name = tool.name,
+            description = tool.description,
+            parameters = tool.parameters,
+            call = { arguments -> tool.call(arguments).also { outcome -> answers[tool.name] = outcome.text } }
+        )
 
     /** Файл, единственный в каталоге отчётов: имя выбирает модель или умолчание сервера. */
     private fun onlyFile(reports: Path): Path = Files.list(reports).use { files ->
@@ -224,7 +253,7 @@ class OrchestrationDemoTest {
  * не подстановкой, а работой сервера инструментов. Репозиторий `kmp-agent` в наборе есть:
  * просьба называет его по имени.
  */
-private class StubGitHub {
+private class OrchestrationStubGitHub {
 
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
 
@@ -287,14 +316,19 @@ private const val GITHUB_SERVER_MAIN = "com.osvin.aichallenge.mcp.github.GitHubM
 /** Подставной доступ: сервер инструментов считает его найденным и ходит в подставной API. */
 private const val TEST_TOKEN = "test-token"
 
+/**
+ * Имя инструмента курсов у его сервера — литерал, как и у прочих имён провода.
+ *
+ * Имя без признака сервера: запись ответов идёт до регистрации, и там инструмент называется
+ * так, как его объявил сервер.
+ */
+private const val CURRENCY_RATES_TOOL = "get_currency_rates"
+
 /** Просьба основного сценария дня — дословно из задания. */
 private const val ASK =
     "Получи текущие курсы USD, EUR и GEL относительно рубля. Затем найди мои репозитории, " +
         "найди репозиторий kmp-agent, получи последние 5 коммитов. После этого создай общий отчёт " +
         "с курсами валют и активностью GitHub и сохрани его в файл."
-
-/** Чем в отчёте видны курсы из Currency MCP: значения посеянной истории. */
-private val RATE_MARKERS = listOf("82.15", "82,15", "96.42", "96,42", "30.31", "30,31")
 
 /** Строка демонстрации — в том же виде, что у прочих демонстраций проекта. */
 private fun log(line: String) = println("[agent] $line")
