@@ -24,6 +24,7 @@ logback = "1.4.14"
 dotenv = "6.4.1"
 material3 = "1.11.0-alpha07"
 shadow = "8.3.5"
+sqlite = "3.53.4.0"
 
 [libraries]
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
@@ -79,6 +80,10 @@ kotlinx-io-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-io-core", v
 # MCP: клиент живёт в агенте, сервер — в серверном модуле; версия одна на оба конца протокола
 mcp-client = { module = "io.modelcontextprotocol:kotlin-sdk-client", version.ref = "mcp" }
 mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp" }
+
+# Хранилище сервиса курсов: SQLite нужен только JVM-процессу на VPS, поэтому JDBC-драйвер,
+# а не Room (Room — Android-библиотека, и в JVM-модуле её нет).
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
