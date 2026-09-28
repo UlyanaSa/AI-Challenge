@@ -12,7 +12,7 @@ import kotlinx.serialization.json.Json
 private val JSON = Json { prettyPrint = true }
 
 /**
- * Инструмент `get_repository`: один репозиторий владельца токена.
+ * Инструмент `getRepository`: один репозиторий владельца токена.
  *
  * Аргумент — короткое имя, а не `владелец/репозиторий`: владелец один и тот же у токена,
  * и спрашивать его у модели значило бы заставлять её угадывать логин. Поэтому у инструмента
@@ -26,7 +26,7 @@ private val JSON = Json { prettyPrint = true }
  *        инструмент читает значение вызова, чтобы имя не разошлось со схемой.
  */
 fun getRepositoryTool(repository: DeclaredArgument): ServerTool<GitHubApi> = ServerTool(
-    name = "get_repository",
+    name = "getRepository",
     description = "Репозиторий GitHub по имени: полное имя, видимость, адрес страницы " +
         "и описание — тот же вид, что у get_repositories, но одним объектом.",
     arguments = listOf(repository)

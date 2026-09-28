@@ -18,7 +18,8 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
 /**
- * Данные GitHub в REST API: `GET /user/repos` и `GET /user`.
+ * Данные GitHub в REST API: `GET /user/repos`, `GET /user`, `GET /repos/{owner}/{repo}`
+ * и `GET /repos/{owner}/{repo}/commits`.
  *
  * Ходит по сети сам (Ktor + CIO): сервер общается с клиентом по stdio, а наружу ему нужен
  * HTTP-клиент. Клиент передаётся параметром со значением по умолчанию — проверки подставляют

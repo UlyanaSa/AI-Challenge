@@ -23,14 +23,14 @@ internal val COMMITS_LIMIT_RANGE = 1..100
 private val JSON = Json { prettyPrint = true }
 
 /**
- * Инструмент `get_recent_commits`: последние коммиты репозитория владельца токена.
+ * Инструмент `getRecentCommits`: последние коммиты репозитория владельца токена.
  *
  * Границы `limit` проверяются до обращения к API: сходить в GitHub за сотней коммитов, чтобы
  * показать их не больше десяти, — потраченный лимит запросов, а неверное число там всё равно
  * стало бы отказом GitHub, текст которого человеку ничего не объясняет. Отказ называет
  * допустимый диапазон, поэтому модель может исправиться по нему, а не по догадке.
  *
- * @param repository Объявление аргумента с именем репозитория; то же, что у `get_repository`.
+ * @param repository Объявление аргумента с именем репозитория; то же, что у `getRepository`.
  * @param limit Объявление аргумента с числом коммитов: имя, тип и описание — из него же
  *        инструмент читает значение вызова, чтобы имя не разошлось со схемой.
  */
@@ -38,7 +38,7 @@ fun getRecentCommitsTool(
     repository: DeclaredArgument,
     limit: DeclaredArgument
 ): ServerTool<GitHubApi> = ServerTool(
-    name = "get_recent_commits",
+    name = "getRecentCommits",
     description = "Последние коммиты репозитория GitHub: идентификатор, сообщение и автор, " +
         "свежие первыми; по умолчанию $DEFAULT_COMMITS_LIMIT коммитов.",
     arguments = listOf(repository, limit)

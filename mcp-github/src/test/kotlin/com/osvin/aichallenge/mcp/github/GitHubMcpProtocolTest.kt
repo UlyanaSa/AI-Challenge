@@ -111,8 +111,8 @@ class GitHubMcpProtocolTest {
      * репозиторий вовсе без поля `visibility`: фильтр должен работать и на последнем, иначе
      * проверка обошла бы обходной путь, ради которого он и написан. На `/user` приходит профиль
      * и заголовок с правами — именно так GitHub отвечает на вопрос о доступе. `/repos/…` и
-     * `/repos/…/commits` отдают один репозиторий и коммиты — то, что читают `get_repository`
-     * и `get_recent_commits`; коммит без автора там тоже есть, потому что модель допускает
+     * `/repos/…/commits` отдают один репозиторий и коммиты — то, что читают `getRepository`
+     * и `getRecentCommits`; коммит без автора там тоже есть, потому что модель допускает
      * его отсутствие.
      */
     private fun mockGitHub(paths: MutableList<String>, authorizations: MutableList<String?>): HttpServer {

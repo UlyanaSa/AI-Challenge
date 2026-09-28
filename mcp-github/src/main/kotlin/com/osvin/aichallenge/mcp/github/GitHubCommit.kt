@@ -3,7 +3,7 @@ package com.osvin.aichallenge.mcp.github
 import kotlinx.serialization.Serializable
 
 /**
- * Коммит GitHub в том виде, в каком его отдаёт инструмент `get_recent_commits`.
+ * Коммит GitHub в том виде, в каком его отдаёт инструмент `getRecentCommits`.
  *
  * Это обещанная форма ответа, а не документ GitHub: её читают модель и человек, поэтому поле
  * названо словом отчёта (`message`), а не путём в ответе GitHub (`commit.message`). Разбор
