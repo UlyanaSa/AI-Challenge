@@ -100,7 +100,7 @@ class GitHubMcpProtocolTest {
             "сервер ходил не туда: $paths"
         )
         assertTrue(authorizations.all { it == "Bearer $TEST_TOKEN" }, "сервер ходил без токена: $authorizations")
-        assertEquals(2, listed.size, "инструмент потерялся")
+        assertEquals(4, listed.size, "инструмент потерялся")
         log("сессия закрыта: серверный процесс остановлен, токен дошёл до GitHub")
     }
 
@@ -110,15 +110,24 @@ class GitHubMcpProtocolTest {
      * Ответ репозиториев содержит все три случая видимости — явные `private`/`public` и
      * репозиторий вовсе без поля `visibility`: фильтр должен работать и на последнем, иначе
      * проверка обошла бы обходной путь, ради которого он и написан. На `/user` приходит профиль
-     * и заголовок с правами — именно так GitHub отвечает на вопрос о доступе.
+     * и заголовок с правами — именно так GitHub отвечает на вопрос о доступе. `/repos/…` и
+     * `/repos/…/commits` отдают один репозиторий и коммиты — то, что читают `get_repository`
+     * и `get_recent_commits`; коммит без автора там тоже есть, потому что модель допускает
+     * его отсутствие.
      */
     private fun mockGitHub(paths: MutableList<String>, authorizations: MutableList<String?>): HttpServer {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
-            paths += exchange.requestURI.path
+            val path = exchange.requestURI.path
+            paths += path
             authorizations += exchange.requestHeaders.getFirst("Authorization")
-            val profile = exchange.requestURI.path == "/user"
-            val body = (if (profile) PROFILE else ANSWER).toByteArray(Charsets.UTF_8)
+            val profile = path == "/user"
+            val body = when {
+                profile -> PROFILE
+                path.endsWith("/commits") -> COMMITS
+                path.startsWith("/repos/") -> REPOSITORY
+                else -> ANSWER
+            }.toByteArray(Charsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
             if (profile) exchange.responseHeaders.add("X-OAuth-Scopes", SCOPES)
             exchange.sendResponseHeaders(200, body.size.toLong())
@@ -143,6 +152,17 @@ class GitHubMcpProtocolTest {
     private fun aStub(): GitHubApi = object : GitHubApi {
         override suspend fun repositories(): List<GitHubRepository> = emptyList()
 
+        override suspend fun repository(name: String): GitHubRepository = GitHubRepository(
+            id = 0,
+            name = name,
+            fullName = "octo/$name",
+            `private` = false,
+            visibility = "public",
+            url = "https://github.com/octo/$name"
+        )
+
+        override suspend fun commits(name: String, limit: Int): List<GitHubCommit> = emptyList()
+
         override suspend fun account(): GitHubAccount =
             GitHubAccount(login = null, scopes = emptyList(), scopesReported = false)
 
@@ -162,6 +182,35 @@ class GitHubMcpProtocolTest {
 
         /** Профиль владельца токена: так GitHub отвечает на `GET /user`. */
         const val PROFILE = """{"login":"ulanocka"}"""
+
+        /** Один репозиторий: так GitHub отвечает на `GET /repos/{owner}/{repo}`. */
+        val REPOSITORY = """
+            {
+              "id": 1,
+              "name": "public-repo",
+              "full_name": "octo/public-repo",
+              "html_url": "https://github.com/octo/public-repo",
+              "private": false,
+              "visibility": "public",
+              "description": "публичный"
+            }
+        """.trimIndent()
+
+        /**
+         * Коммиты: так GitHub отвечает на `GET /repos/{owner}/{repo}/commits`.
+         *
+         * У третьего коммита автора нет вовсе — этот случай обещан моделью
+         * ([GitHubCommit.author] допускает null), и подстановка обязана его показывать.
+         */
+        val COMMITS = """
+            [
+              {"sha": "a1b2c3d", "commit": {"message": "День 20: инструменты репозитория и коммитов",
+               "author": {"name": "Улан", "email": "ulan@example.com"}}},
+              {"sha": "d4e5f6a", "commit": {"message": "День 19: чистка",
+               "author": {"name": "Улан", "email": "ulan@example.com"}}},
+              {"sha": "b7c8d9e", "commit": {"message": "День 18: доступ", "author": null}}
+            ]
+        """.trimIndent()
 
         val ANSWER = """
             [

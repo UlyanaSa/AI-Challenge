@@ -341,8 +341,8 @@ class GitHubRoutesTest {
 }
 
 /**
- * Подставной GitHub: маршруты `GET /user` и `GET /user/repos` с тем же JSON, что отдаёт
- * настоящий API.
+ * Подставной GitHub: маршруты `GET /user`, `GET /user/repos`, `GET /repos/{owner}/{repo}` и
+ * `GET /repos/{owner}/{repo}/commits` с тем же JSON, что отдаёт настоящий API.
  *
  * Набор репозиториев нарочно неоднородный: приватный, публичный и запись без поля
  * `visibility` — так видно, что фильтр инструмента работает и что видимость выводится из
@@ -371,6 +371,10 @@ private class StubGitHubApi {
         server.createContext("/user/repos") { exchange ->
             respond(exchange, REPOSITORIES)
         }
+        server.createContext("/repos") { exchange ->
+            val body = if (exchange.requestURI.path.endsWith("/commits")) COMMITS else REPOSITORY
+            respond(exchange, body)
+        }
         server.start()
     }
 
@@ -397,6 +401,35 @@ private class StubGitHubApi {
 
         /** Ответ GitHub REST API на `/user`: владелец доступа. */
         val USER = """{"login": "ulanocka", "id": 1, "name": "Улан"}"""
+
+        /**
+         * Ответ GitHub REST API на `/repos/{owner}/{repo}`: один репозиторий из набора ниже.
+         *
+         * Тот же репозиторий, что первым в [REPOSITORIES]: имена в обоих ответах — имена GitHub
+         * (`full_name`, `html_url`), и разбирает их одна форма модели.
+         */
+        val REPOSITORY = """
+            {"id": 1, "name": "ai_challenge_task1",
+             "full_name": "ulanocka/ai_challenge_task1", "private": true, "visibility": "private",
+             "html_url": "https://github.com/ulanocka/ai_challenge_task1",
+             "description": "Челлендж по Android-разработке: агент и MCP"}
+        """.trimIndent()
+
+        /**
+         * Ответ GitHub REST API на `/repos/{owner}/{repo}/commits`: три коммита, свежие первыми.
+         *
+         * У последнего автора нет вовсе — так GitHub отвечает на коммиты без учётной записи,
+         * и обещанная форма это допускает.
+         */
+        val COMMITS = """
+            [
+              {"sha": "a1b2c3d", "commit": {"message": "День 20: инструменты репозитория и коммитов",
+               "author": {"name": "Улан", "email": "ulan@example.com"}}},
+              {"sha": "d4e5f6a", "commit": {"message": "День 19: чистка",
+               "author": {"name": "Улан", "email": "ulan@example.com"}}},
+              {"sha": "b7c8d9e", "commit": {"message": "День 18: доступ", "author": null}}
+            ]
+        """.trimIndent()
 
         /** Ответ GitHub REST API: те же имена полей, что у настоящего. */
         val REPOSITORIES = """

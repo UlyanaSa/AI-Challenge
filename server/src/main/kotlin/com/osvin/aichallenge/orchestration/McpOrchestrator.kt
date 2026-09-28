@@ -111,7 +111,18 @@ class McpOrchestrator(
         }
 
         log(call, registered, startedAt, success = !outcome.isError)
-        if (outcome.isError) return outcome
+        // Отказ самого инструмента тоже отдаётся структурой: причина остаётся в `message`,
+        // а рядом появляются код, сервер и имя вызова — по ним видно, чей это отказ, тогда как
+        // в тексте одного инструмента этого не сказано вовсе. Форма отказа тогда одна на всех:
+        // и «сервера нет», и «инструмент не смог» модель читает одинаково.
+        if (outcome.isError) {
+            return failure(
+                call,
+                toolName,
+                registered.serverId,
+                McpOrchestrationError(TOOL_ERROR_CODE, outcome.text)
+            )
+        }
         if (outcome.text.isBlank()) {
             return failure(
                 call,
@@ -203,6 +214,9 @@ class McpOrchestrator(
 
         /** Код отказа: вызов бросил исключение (сервер отключился, транспорт закрылся). */
         const val SERVER_ERROR_CODE = "MCP_CALL_FAILED"
+
+        /** Код отказа: инструмент ответил отказом (нет данных, негодный аргумент). */
+        const val TOOL_ERROR_CODE = "MCP_TOOL_ERROR"
 
         /** Код отказа: инструмент ответил пустым результатом — дальше передавать нечего. */
         const val EMPTY_RESULT_CODE = "MCP_EMPTY_RESULT"

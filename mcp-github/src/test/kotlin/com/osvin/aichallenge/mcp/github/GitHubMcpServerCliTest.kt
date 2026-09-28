@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 /**
  * Консольный режим сервера: флаг [LIST_TOOLS_FLAG] печатает инструменты и выходит.
  *
- * Проверяется договор команды с человеком: оба инструмента названы, у `get_repositories`
+ * Проверяется договор команды с человеком: инструменты названы, у `get_repositories`
  * напечатаны тип, необязательность и все три значения `visibility`, а у `github_access` —
  * то, что аргументов у него нет. Значения здесь важны не меньше имени инструмента: по этой
  * печати человек убеждается, что сервер объявляет ровно то, о чём договаривались, и ни токен,
@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 class GitHubMcpServerCliTest {
 
     @Test
-    fun `--list-tools печатает оба инструмента и значения аргумента visibility`() {
+    fun `--list-tools печатает инструменты и значения аргумента visibility`() {
         val printed = captureStdout { main(arrayOf(LIST_TOOLS_FLAG)) }
 
         assertTrue("get_repositories" in printed, "инструмент репозиториев не назван")
