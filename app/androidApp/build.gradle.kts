@@ -3,6 +3,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeCompiler)
+    // Вызовы инструментов лежат в базе строкой JSON (Migration 4→5): разбор строки —
+    // работа kotlinx-serialization, и плагин с зависимостью нужны здесь, а не только
+    // в общем модуле: `:app:shared` отдаёт их как implementation, наружу не выставляя
+    alias(libs.plugins.kotlinxSerialization)
     alias(libs.plugins.ksp)
 }
 
@@ -19,6 +23,9 @@ dependencies {
     // Room: локальное хранилище истории диалога
     implementation(libs.androidx.room.runtime)
     ksp(libs.androidx.room.compiler)
+
+    // Разбор списка вызовов инструмента, который хранится в колонке сообщения строкой JSON
+    implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.compose.uiToolingPreview)
     debugImplementation(libs.compose.uiTooling)

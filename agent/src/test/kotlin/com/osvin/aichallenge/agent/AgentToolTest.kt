@@ -151,7 +151,18 @@ class AgentToolTest {
         assertEquals(40, result.completionTokens)
         assertEquals(1, result.tokens.tools.rounds)
         assertEquals(30, result.tokens.tools.tokens)
-        assertEquals(listOf(ToolCallRecord("get_repositories")), result.tokens.tools.calls)
+        // Отчёт несёт вызов целиком, а не одно имя: по нему лента чата печатает команду,
+        // которой позвали инструмент, и ответ, который он вернул.
+        assertEquals(
+            listOf(
+                ToolCallRecord(
+                    name = "get_repositories",
+                    arguments = """{"visibility": "private"}""",
+                    result = """[{"name":"ai_challenge_task1"}]"""
+                )
+            ),
+            result.tokens.tools.calls
+        )
     }
 
     /** Без инструментов запрос уходит как раньше: ни объявлений, ни вызовов. */
@@ -203,7 +214,12 @@ class AgentToolTest {
             "модель должна узнать и причину, и что доступно: ${toolMessage.content}"
         )
         assertEquals("Погоду не знаю, но репозитории показать могу.", result.reply)
-        assertEquals(listOf(ToolCallRecord("get_weather", failed = true)), result.tokens.tools.calls)
+        val rejected = result.tokens.tools.calls.single()
+        assertEquals("get_weather", rejected.name)
+        assertEquals("""{"city": "Москва"}""", rejected.arguments)
+        assertEquals(true, rejected.failed)
+        // Ответ есть и у отказа: в ленте видно, чем именно он объяснён.
+        assertTrue(rejected.result.orEmpty().contains("не объявлен"), rejected.result)
     }
 
     /** Упавший инструмент — тоже ответ модели: причина уходит ей, запрос не падает. */

@@ -33,7 +33,9 @@ import com.osvin.aichallenge.ui.components.*
  * чтобы хранилище не мешало диалогу. Профиль пользователя — второй шторкой там же:
  * он общий для всех чатов и подставляется в каждый запрос к модели. Инварианты —
  * третьей: это правила проекта, которые ассистент нарушать не имеет права, и они
- * тоже уходят в каждый запрос, поэтому правятся поверх чата.
+ * тоже уходят в каждый запрос, поэтому правятся поверх чата. GitHub — четвёртой: подключение
+ * к MCP-серверу инструментов живёт на сервере приложения и общее для всех чатов, поэтому
+ * шторка показывает одно соединение и даёт вызвать инструмент руками.
  *
  * Задача чата видна полосой над полем ввода: состояние работы адресуется сессией
  * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставят на паузу
@@ -69,6 +71,9 @@ fun ChatScreen(
     // закончилось последнее обращение к серверу
     val invariants by viewModel.invariants.collectAsStateWithLifecycle()
     val invariantsError by viewModel.invariantsError.collectAsStateWithLifecycle()
+    // Инструменты GitHub: снимок подключения и причина последнего отказа
+    val github by viewModel.github.collectAsStateWithLifecycle()
+    val githubError by viewModel.githubError.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
@@ -100,6 +105,18 @@ fun ChatScreen(
     }
     var profileOpen by rememberSaveable { mutableStateOf(false) }
     val profileSheetState = rememberModalBottomSheetState()
+
+    // Признак открытой шторки GitHub: как и у остальных шторок, он живёт на экране,
+    // иначе перерисовка ленты сообщений закрывала бы шторку посреди ввода
+    var githubOpen by rememberSaveable { mutableStateOf(false) }
+    val githubSheetState = rememberModalBottomSheetState()
+
+    // Подключение живёт на сервере и переживает перезапуск приложения, поэтому снимок
+    // читается при появлении экрана: иначе кнопка и шторка показывали бы «не подключено»
+    // там, где инструменты уже работают
+    LaunchedEffect(Unit) {
+        viewModel.loadGitHub()
+    }
 
     // Шторка открывается с тем, что лежит на сервере, а не с прошлыми правками;
     // профиль мог прийти уже после открытия (медленная сеть) — тогда черновик
@@ -148,7 +165,8 @@ fun ChatScreen(
                 onNewChat = onNewChat,
                 onMemory = { memoryOpen = true },
                 onInvariants = { invariantsOpen = true },
-                onProfile = { profileOpen = true }
+                onProfile = { profileOpen = true },
+                onGitHub = { githubOpen = true }
             )
         },
         bottomBar = {
@@ -298,6 +316,24 @@ fun ChatScreen(
                 error = profileError,
                 onDraftChange = { profileDraft = it },
                 onSave = { viewModel.saveProfile(profileDraft) }
+            )
+        }
+    }
+
+    // Шторка GitHub: подключение к MCP-серверу инструментов и их вызов. Снимок приходит
+    // с сервера, поэтому и после подключения, и после отказа видно то, что он ответил;
+    // токен в состояние экрана не попадает вовсе — его держит сама шторка
+    if (githubOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { githubOpen = false },
+            sheetState = githubSheetState
+        ) {
+            GitHubSheet(
+                connection = github,
+                error = githubError,
+                onConnect = { viewModel.connectGitHub(it) },
+                onDisconnect = { viewModel.disconnectGitHub() },
+                onCall = { name, arguments -> viewModel.callGitHubTool(name, arguments) }
             )
         }
     }

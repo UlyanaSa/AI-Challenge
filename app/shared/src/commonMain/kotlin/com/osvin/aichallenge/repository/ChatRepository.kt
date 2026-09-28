@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlin.random.Random
 
 /**
@@ -60,6 +61,14 @@ import kotlin.random.Random
  * [forgetInvariant]), а проверку запроса на конфликт делает сервер. Своей копии
  * умолчаний у клиента нет: пока человек не задал правил, снимок с сервера приходит
  * с ними же.
+ *
+ * GitHub ([loadGitHub], [connectGitHub]) — чужой сервис, и клиент его не знает:
+ * подключение, список инструментов и сами вызовы держит сервер в отдельном
+ * MCP-процессе, а сюда приходит только снимок ([GitHubConnection]). Поэтому
+ * клиент не хранит ни состояния подключения, ни токена — токен уходит телом запроса
+ * и нигде на устройстве не оседает. Вызов инструмента ([callGitHubTool]) остаётся
+ * в ленте служебной записью ([MessageRole.TOOL]) с командой и результатом, но в модель
+ * не уезжает: это след работы для человека, а не реплика диалога.
  */
 class ChatRepository(
     private val baseUrl: String,
@@ -141,6 +150,21 @@ class ChatRepository(
     // правку инварианта человек делает отдельным действием и ждёт отдельного ответа.
     private val _invariantsError = MutableStateFlow<String?>(null)
     val invariantsError: StateFlow<String?> = _invariantsError.asStateFlow()
+
+    // Подключение к GitHub и его инструменты: клиент сам в GitHub не ходит, туда ходит
+    // сервер в отдельном MCP-процессе, а сюда приходит только снимок. Живёт отдельно
+    // от памяти, профиля и задачи: это чужой сервис, и его отказ не должен выглядеть
+    // как отказ памяти. null — снимка ещё не было: сервер недоступен или чтения не было
+    // вовсе, и «не подключено» отсюда не выводится — подключение держит сервер,
+    // а не клиент, и второй копии этого флага на устройстве нет намеренно.
+    private val _github = MutableStateFlow<GitHubConnection?>(null)
+    val github: StateFlow<GitHubConnection?> = _github.asStateFlow()
+
+    // Отказ сервера на подключение, отключение и вызов инструмента; null — отказа не было.
+    // Это своя ошибка, а не [memoryError]: сбой GitHub не должен выглядеть как сбой памяти,
+    // и причина отказа инструмента не должна теряться среди ошибок диалога.
+    private val _githubError = MutableStateFlow<String?>(null)
+    val githubError: StateFlow<String?> = _githubError.asStateFlow()
 
     // Настройки генерации из шторки. Стратегия в них — стратегия активного чата,
     // поэтому живут они рядом с активным чатом, а не в слое интерфейса.
@@ -366,6 +390,11 @@ class ChatRepository(
      *
      * @param message Текст сообщения пользователя.
      * @param settings Настройки генерации из шторки настроек.
+     *
+     * Записи о вызовах инструментов ([MessageRole.TOOL]) в историю не включаются: это след
+     * работы агента для человека, а не реплика диалога. Модель не должна видеть команды,
+     * которых не было в переписке с ней, — иначе вызов выглядел бы уже сделанным, и она
+     * повторила бы его или сослалась на данные, которых в её ответе не было.
      */
     suspend fun sendMessage(message: String, settings: GenerationSettings = GenerationSettings()) {
         if (message.isBlank()) return
@@ -382,8 +411,11 @@ class ChatRepository(
         val activeBranchId = _activeBranchId.value
         val branches = if (settings.strategy == ContextStrategy.BRANCHES) store.branches(chat.id) else null
 
-        // История чата до этого вопроса: все ветки вместе, у каждой своя метка
-        val history = store.messages(chat.id)
+        // История чата до этого вопроса: все ветки вместе, у каждой своя метка.
+        // Записи о вызовах инструментов отсеиваются: это след работы для человека
+        // ([MessageRole.TOOL]), а не реплика диалога, и модель не должна видеть команды,
+        // которых не было в переписке с ней.
+        val history = store.messages(chat.id).filter { it.role != MessageRole.TOOL }
 
         try {
             val response = client.post("$baseUrl/v1/chat/completions") {
@@ -435,7 +467,15 @@ class ChatRepository(
                     applyTaskReport(report.task)
                 }
 
-                val assistantMessage = ChatMessage(MessageRole.ASSISTANT, chatResponse.reply, branchId = activeBranchId)
+                // Вызовы инструментов из этого ответа остаются при сообщении: под пузырём
+                // видно, что агент делал и чем это кончилось, — иначе данные в ответе
+                // выглядели бы взятыми из ниоткуда. Пустой отчёт — вызовов не было.
+                val assistantMessage = ChatMessage(
+                    role = MessageRole.ASSISTANT,
+                    content = chatResponse.reply,
+                    branchId = activeBranchId,
+                    tools = chatResponse.tokens?.tools?.calls.orEmpty()
+                )
                 _messages.value = _messages.value + assistantMessage
                 store.append(chat.id, assistantMessage)
                 _chats.value = store.chats()
@@ -446,6 +486,10 @@ class ChatRepository(
                 // Агент мог дописать память сам: панель показывает то, что теперь
                 // лежит в слоях на сервере, а не только то, что ушло в этот ответ
                 loadMemory()
+                // Кнопка GitHub показывает правду: сервер инструментов мог умереть между
+                // вопросами, а снимок на клиенте обновляется только чтением — без него
+                // подключение выглядело бы живым, хотя вызовы уже не работают
+                loadGitHub()
             } else {
                 // Сервер объясняет отказ в теле ответа (переполнение контекста,
                 // пустой ответ модели, сбой провайдера) — в чате показываем его
@@ -825,6 +869,171 @@ class ChatRepository(
     }
 
     /**
+     * Снимок работы с GitHub: подключено ли, кто сервер инструментов и что он умеет.
+     * Читается без активного чата: подключение общее, а не принадлежит диалогу — иначе
+     * кнопка в одном чате показывала бы не то же, что в соседнем.
+     *
+     * Снимок не сбрасывается при отказе: подключение держит сервер, и «сеть отвалилась»
+     * — это не «отключено». Стереть снимок значило бы показать неправду и предложить
+     * подключиться там, где подключение, возможно, живо; причина отказа при этом видна
+     * строкой ([githubError]).
+     */
+    suspend fun loadGitHub() {
+        try {
+            val response = client.get("$baseUrl/v1/github")
+            if (response.status.isSuccess()) {
+                _github.value = response.body()
+                _githubError.value = null
+            } else {
+                _githubError.value = "GitHub недоступен: сервер ответил ${response.status.value}"
+                platformLog("agent", "[agent] GitHub не загружен: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _githubError.value = e.message ?: "GitHub недоступен: нет соединения"
+            platformLog("agent", "[agent] GitHub не загружен: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Подключение к серверу инструментов GitHub.
+     *
+     * @param token Токен GitHub или null, если взять его из окружения сервера: пустой
+     *        токен уходит так же, как отсутствующий, — поле в шторке легко оставить
+     *        пустым, а «пустой токен» сервер не должен принимать за настоящий.
+     *        Токен не пишется ни в состояние ([github]), ни в лог, ни в хранилище:
+     *        он нужен только на время рукопожатия, и после ответа на клиенте его нет.
+     */
+    suspend fun connectGitHub(token: String?) {
+        applyGitHubWrite {
+            client.post("$baseUrl/v1/github/connect") {
+                contentType(ContentType.Application.Json)
+                setBody(GitHubConnectRequest(token = token?.takeIf { it.isNotBlank() }))
+            }
+        }
+    }
+
+    /**
+     * Отключение от сервера инструментов: сервер закрывает сессию и отвечает снимком
+     * с `connected = false`. Снимок берётся из ответа, а не собирается на клиенте:
+     * список инструментов и имя сервера знает только он.
+     */
+    suspend fun disconnectGitHub() {
+        applyGitHubWrite {
+            client.post("$baseUrl/v1/github/disconnect")
+        }
+    }
+
+    /**
+     * Вызов инструмента GitHub с аргументами человека.
+     *
+     * Вызов остаётся в ленте чата служебной записью ([MessageRole.TOOL]): команда и её
+     * результат — то, что человек должен видеть, иначе данные в ответе ассистента
+     * выглядят взятыми из ниоткуда. Запись хранится в том же хранилище, что и сообщения,
+     * поэтому результат вызова виден и после перезапуска приложения. В историю, которая
+     * уезжает на сервер, такие записи не входят ([sendMessage]): это след работы
+     * для человека, а не реплика диалога.
+     *
+     * Отказ (не подключено, инструмента нет) и сбой сети не переводят чат
+     * в [ChatUiState.Error]: диалог продолжается, а причина видна строкой ([githubError]).
+     * Чат не выбран — единственный случай, когда записи некуда лечь, и тогда причина
+     * та же, что у отправки сообщения.
+     *
+     * @param name Имя инструмента из снимка ([GitHubTool.name]).
+     * @param arguments Аргументы строкой JSON, как их набрал человек; пусто — инструмент
+     *        вызывается со своими умолчаниями.
+     */
+    suspend fun callGitHubTool(name: String, arguments: String = "") {
+        val chat = _activeChat.value
+        if (chat == null) {
+            _state.value = ChatUiState.Error("Чат не выбран")
+            return
+        }
+        // Мусор в аргументах — это отказ без запроса: причина уже в [githubError]
+        val parsed = parseToolArguments(arguments) ?: return
+
+        try {
+            val response = client.post("$baseUrl/v1/github/call") {
+                contentType(ContentType.Application.Json)
+                setBody(GitHubCallRequest(name = name, arguments = parsed))
+            }
+            if (response.status.isSuccess()) {
+                val call = response.body<GitHubCallResponse>()
+                val message = ChatMessage(
+                    role = MessageRole.TOOL,
+                    // Текста у служебной записи нет: команду и результат несёт [ChatMessage.tools],
+                    // а пустая строка оставляет поле обязательным — сама запись о вызове
+                    // это не реплика диалога
+                    content = "",
+                    // Метка ветки та же, что у следующего ответа ассистента: вызов виден
+                    // в той же ветке, в которой шёл диалог, и не всплывает в соседней
+                    branchId = _activeBranchId.value,
+                    tools = listOf(
+                        ToolCallRecord(
+                            name = name,
+                            // Пустые аргументы записываются как отправленный пустой объект:
+                            // в ленте видно ровно то, что ушло серверу
+                            arguments = arguments.ifBlank { EMPTY_ARGUMENTS },
+                            result = call.result,
+                            failed = call.failed
+                        )
+                    )
+                )
+                _messages.value = _messages.value + message
+                store.append(chat.id, message)
+                _chats.value = store.chats()
+                _githubError.value = null
+            } else {
+                // Сервер объясняет отказ в теле (нет подключения, нет такого инструмента) —
+                // показываем его текст, а не только код статуса
+                _githubError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _githubError.value = e.message ?: "Сетевая ошибка"
+        }
+    }
+
+    /**
+     * Аргументы инструмента из строки, которую набрал человек.
+     *
+     * Набор полей у каждого инструмента свой ([GitHubToolArgument]), поэтому типизировать
+     * аргументы общим классом на клиенте нечем — разбирается свободный JSON-объект.
+     * Пустая строка — пустой объект: инструмент вызывается со своими умолчаниями,
+     * и тело запроса всё равно должно быть. Не JSON или не объект (например, массив) —
+     * запрос не уходит вовсе: сервер на такой аргумент ответит невнятно, а причину
+     * видно и без сети, сразу после нажатия.
+     */
+    private fun parseToolArguments(arguments: String): JsonObject? {
+        if (arguments.isBlank()) return JsonObject(emptyMap())
+        val parsed = runCatching { Json.parseToJsonElement(arguments) }.getOrNull() as? JsonObject
+        if (parsed == null) {
+            _githubError.value = "Аргументы инструмента — не JSON-объект"
+        }
+        return parsed
+    }
+
+    /**
+     * Общий путь подключения и отключения: снимок из ответа идёт в состояние, отказ —
+     * в текст ошибки, а прежний снимок остаётся на месте. Стереть его при отказе значило
+     * бы показать «не подключено» там, где подключение, возможно, живо: состояние
+     * подключения держит сервер, и знает о нём только он.
+     */
+    private suspend fun applyGitHubWrite(request: suspend () -> HttpResponse) {
+        try {
+            val response = request()
+            if (response.status.isSuccess()) {
+                _github.value = response.body()
+                _githubError.value = null
+            } else {
+                _githubError.value = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                    ?: "Ошибка сервера: ${response.status.value}"
+            }
+        } catch (e: Exception) {
+            _githubError.value = e.message ?: "Сетевая ошибка"
+        }
+    }
+
+    /**
      * Убирает сессию чата на сервере: сама история лежит на устройстве, а на
      * сервере по сессии хранится только сводка, и после удаления чата она не нужна.
      */
@@ -872,5 +1081,11 @@ class ChatRepository(
 
         /** Сколько символов первого сообщения попадает в заголовок списка. */
         const val TITLE_LIMIT = 40
+
+        /**
+         * Аргументы вызова инструмента, когда человек их не задал: пустой объект —
+         * инструмент вызывается со своими умолчаниями, и именно это уходит серверу.
+         */
+        const val EMPTY_ARGUMENTS = "{}"
     }
 }

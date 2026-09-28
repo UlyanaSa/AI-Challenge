@@ -586,7 +586,15 @@ class LlmAgent(
             }
         }
 
-        records += ToolCallRecord(name = call.function.name, failed = outcome.isError)
+        // Запись вызова — то, что уезжает в отчёт и печатается в ленте чата: имя,
+        // аргументы модели и ответ инструмента. Ответ обрезается тем же пределом, что
+        // и лог: в ленте вызов виден, а данные целиком нужны модели, не интерфейсу.
+        records += ToolCallRecord(
+            name = call.function.name,
+            arguments = call.function.arguments,
+            result = outcome.text.forLog(),
+            failed = outcome.isError
+        )
         logger.log(
             listOf(
                 "Инструмент ${call.function.name} → ${if (outcome.isError) "отказ" else "ответ"}",

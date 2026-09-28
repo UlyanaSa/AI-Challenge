@@ -50,16 +50,28 @@ data class McpServerConfig(
 )
 
 /**
- * Аргумент инструмента — то, что модель обязана положить в вызов.
+ * Аргумент инструмента: что за аргумент и как его понимать.
  *
  * Разбирается из схемы сервера ([McpTool.inputSchema]), а не объявляется у нас: имена,
  * типы и обязательность — слово сервера, и наша копия разошлась бы с ним молча.
  *
- * @param name Имя аргумента в вызове.
- * @param type Тип по схеме (`string`, `integer`, …); null — сервер тип не назвал.
- * @param required Аргумент обязателен: без него вызов не собрать.
+ * @param name Имя аргумента — то, что уезжает в вызове.
+ * @param type Тип значения по схеме сервера; null — сервер его не назвал.
+ * @param required Аргумент обязателен: без него вызов отвергнут.
+ * @param description Пояснение сервера: что аргумент значит. Нужно не только модели,
+ *        но и человеку — по нему он понимает, что подставить в ручном вызове.
+ * @param values Допустимые значения, если сервер объявил их списком (`enum`). Пустой
+ *        список — значения не ограничены схемой. Хранится рядом с аргументом, а не
+ *        разбирается заново читателем схемы: выбор из списка нужен интерфейсу, а схема
+ *        на проводе — документ, который читают ещё и глазами.
  */
-data class McpToolArgument(val name: String, val type: String?, val required: Boolean)
+data class McpToolArgument(
+    val name: String,
+    val type: String?,
+    val required: Boolean,
+    val description: String? = null,
+    val values: List<String> = emptyList()
+)
 
 /**
  * Инструмент MCP в том виде, в каком его видит агент.
@@ -200,17 +212,24 @@ class McpConnectionException(message: String, cause: Throwable? = null) : Except
  *
  * Сервер проекта — обычная Kotlin-программа в модуле `:server`, поэтому клиенту
  * для подключения к нему не нужен ни менеджер пакетов, ни внешний сервер: классы
- * берутся из того же classpath ([classpath]), что и у вызывающего.
+ * берутся из того же classpath ([classpath]), что и у вызывающего. Так же запускается
+ * и сервер инструментов GitHub — он тоже локальный.
  *
  * @param mainClass Класс с точкой входа сервера.
  * @param classpath Где искать классы; по умолчанию — classpath текущего процесса.
+ * @param env Переменные окружения поверх унаследованных: так дочернему процессу передают
+ *        токен и адрес API. Именно «поверх»: `ProcessBuilder` начинает с окружения родителя,
+ *        поэтому переменные, которые нужны и родителю, и серверу инструментов (адрес
+ *        подставного GitHub в проверках), не приходится перечислять второй раз.
  */
 fun localMcpServerConfig(
     mainClass: String,
-    classpath: String = System.getProperty("java.class.path").orEmpty()
+    classpath: String = System.getProperty("java.class.path").orEmpty(),
+    env: Map<String, String> = emptyMap()
 ): McpServerConfig = McpServerConfig(
     command = File(System.getProperty("java.home"), "bin/java").absolutePath,
-    args = listOf("-cp", classpath, mainClass)
+    args = listOf("-cp", classpath, mainClass),
+    env = env
 )
 
 /** Схема сервера глазами агента: аргументы верхнего уровня и отметка об обязательности. */
@@ -221,10 +240,17 @@ private fun JsonObject.readArguments(): List<McpToolArgument> {
         .orEmpty()
     val properties = this["properties"]?.jsonObject ?: return emptyList()
     return properties.map { (name, schema) ->
+        val described = schema as? JsonObject
         McpToolArgument(
             name = name,
-            type = (schema as? JsonObject)?.get("type").asText(),
-            required = name in required
+            type = described?.get("type").asText(),
+            required = name in required,
+            description = described?.get("description").asText(),
+            // Значения ограничены только тогда, когда сервер объявил их списком:
+            // отсутствие `enum` — это «любое значение типа», а не пустой выбор.
+            values = (described?.get("enum") as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                .orEmpty()
         )
     }
 }

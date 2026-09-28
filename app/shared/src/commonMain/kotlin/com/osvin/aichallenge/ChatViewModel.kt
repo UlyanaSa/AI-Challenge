@@ -8,6 +8,7 @@ import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.ContextStrategy
 import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
+import com.osvin.aichallenge.data.GitHubConnection
 import com.osvin.aichallenge.data.InvariantSnapshot
 import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.MemoryReport
@@ -56,6 +57,13 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     // их только показывает и правит явными действиями человека
     val invariants: StateFlow<InvariantSnapshot?> = repository.invariants
     val invariantsError: StateFlow<String?> = repository.invariantsError
+
+    // Подключение к GitHub и его инструменты. Это ни память, ни задача, ни правила: GitHub —
+    // чужой сервис за отдельным MCP-процессом, и клиент знает о нём ровно столько, сколько
+    // сообщил сервер. Снимок и причина отказа — свои потоки: сбой GitHub не должен выглядеть
+    // как сбой памяти, а причина отказа инструмента теряться среди ошибок диалога
+    val github: StateFlow<GitHubConnection?> = repository.github
+    val githubError: StateFlow<String?> = repository.githubError
 
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
@@ -268,6 +276,55 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun forgetInvariant(kind: String, value: String) {
         viewModelScope.launch {
             repository.forgetInvariant(kind, value)
+        }
+    }
+
+    /**
+     * Перечитывание снимка GitHub: подключено ли и какие инструменты объявлены. Шторка
+     * открывается с ним, поэтому читает его и сама; чат его не читает — подключение
+     * не принадлежит диалогу, а состояние держит сервер.
+     */
+    fun loadGitHub() {
+        viewModelScope.launch {
+            repository.loadGitHub()
+        }
+    }
+
+    /**
+     * Подключение к серверу инструментов GitHub.
+     *
+     * @param token Токен GitHub; null или пусто — сервер возьмёт `GITHUB_TOKEN`
+     *        из своего окружения. Токен передаётся только в запросе и на клиенте
+     *        не сохраняется: ни в снимке, ни в логах его нет.
+     */
+    fun connectGitHub(token: String?) {
+        viewModelScope.launch {
+            repository.connectGitHub(token)
+        }
+    }
+
+    /**
+     * Отключение от сервера инструментов: состояние после него берётся из ответа
+     * сервера — список инструментов знает только он.
+     */
+    fun disconnectGitHub() {
+        viewModelScope.launch {
+            repository.disconnectGitHub()
+        }
+    }
+
+    /**
+     * Вызов инструмента GitHub с аргументами, которые набрал человек. Результат остаётся
+     * в ленте служебной записью, а причина отказа — строкой ошибки: диалог при этом
+     * продолжается.
+     *
+     * @param name Имя инструмента из снимка.
+     * @param arguments Аргументы строкой JSON; пусто — инструмент вызывается
+     *        со своими умолчаниями.
+     */
+    fun callGitHubTool(name: String, arguments: String = "") {
+        viewModelScope.launch {
+            repository.callGitHubTool(name, arguments)
         }
     }
 }

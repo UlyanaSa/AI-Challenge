@@ -22,13 +22,24 @@ data class ToolsReport(
 )
 
 /**
- * Один вызов инструмента: что вызвала модель и получила ли она данные.
+ * Один вызов инструмента: что вызвала модель, чем и что получила.
+ *
+ * Хранится вместе с сообщением чата: лента печатает вызов командой — именем и аргументами,
+ * как их прислала модель, — и ответ инструмента, поэтому по одному имени её не показать.
  *
  * @param name Имя инструмента.
+ * @param arguments Аргументы вызова строкой JSON, как их прислала модель; пустая строка —
+ *        аргументов не было, и инструмент отвечал по своим умолчаниям.
+ * @param result Ответ инструмента текстом, обрезанный для ленты; null — ответа не было.
  * @param failed Инструмент ответил отказом: данных нет, и модель отвечала без них.
  */
 @Serializable
 data class ToolCallRecord(
     @SerialName("name") val name: String,
+    @SerialName("arguments") val arguments: String = "",
+    @SerialName("result") val result: String? = null,
     @SerialName("failed") val failed: Boolean = false
-)
+) {
+    /** Команда вызова одной строкой: её печатает лента чата. */
+    fun command(): String = if (arguments.isBlank()) name else "$name $arguments"
+}

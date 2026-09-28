@@ -51,6 +51,59 @@ class McpToolTest {
         assertEquals(emptyList(), tool.arguments)
     }
 
+    /**
+     * Аргумент со списком значений и пояснением читается целиком: интерфейс выбирает
+     * значение из списка, а человек читает пояснение — и то и другое объявил сервер,
+     * и своей копии этих сведений на стороне клиента быть не должно.
+     */
+    @Test
+    fun `значения и пояснение аргумента берутся из схемы`() {
+        val tool = McpTool(
+            name = "get_repositories",
+            description = null,
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("visibility") {
+                        put("type", "string")
+                        put("description", "какие репозитории вернуть")
+                        put("enum", buildJsonArray {
+                            add(JsonPrimitive("all"))
+                            add(JsonPrimitive("public"))
+                            add(JsonPrimitive("private"))
+                        })
+                    }
+                }
+            }
+        )
+
+        assertEquals(
+            listOf(
+                McpToolArgument(
+                    name = "visibility",
+                    type = "string",
+                    required = false,
+                    description = "какие репозитории вернуть",
+                    values = listOf("all", "public", "private")
+                )
+            ),
+            tool.arguments
+        )
+    }
+
+    /** Схема без `enum` — «любое значение типа», а не пустой выбор: список остаётся пустым. */
+    @Test
+    fun `аргумент без списка значений не ограничивает выбор`() {
+        val tool = McpTool(
+            name = "sum",
+            description = null,
+            inputSchema = schemaOf("a" to true)
+        )
+
+        assertEquals(emptyList(), tool.arguments.single().values)
+        assertEquals(null, tool.arguments.single().description)
+    }
+
     /** Схема с аргументами: имя, тип и обязательность — как их объявляет сервер. */
     private fun schemaOf(vararg arguments: Pair<String, Boolean>) = buildJsonObject {
         put("type", "object")

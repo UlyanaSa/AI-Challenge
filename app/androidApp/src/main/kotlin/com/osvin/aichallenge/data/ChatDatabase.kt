@@ -34,6 +34,8 @@ data class ChatEntity(
  * Сообщение чата в таблице SQLite.
  * @param chatId Чат, которому принадлежит сообщение.
  * @param branchId Ветка диалога, к которой относится сообщение; null — основная линия.
+ * @param toolCalls Вызовы инструментов, которые модель сделала в этом сообщении, JSON-строкой;
+ *        null — вызовов не было (в том числе у сообщений, записанных до схемы 5).
  */
 @Entity(tableName = "chat_messages", indices = [Index("chatId")])
 data class ChatMessageEntity(
@@ -42,7 +44,16 @@ data class ChatMessageEntity(
     val content: String,
     val timestamp: Long,
     val chatId: String,
-    val branchId: String? = null
+    val branchId: String? = null,
+    /**
+     * Лента чата печатает вызов не только именем, но и аргументами с ответом, поэтому вызовы
+     * нужно сохранять вместе с сообщением: на сервер уходит один ответ, а показать надо все его
+     * шаги. Хранится одной JSON-строкой, а не отдельной таблицей: вызовов в сообщении бывает
+     * от нуля до трёх, и ради такого короткого списка заводить таблицу со связью — лишняя
+     * работа на каждое чтение истории. Строкой же переживает и рост набора полей вызова:
+     * [ToolCallRecord] читается с `ignoreUnknownKeys`, поэтому старые записи не ломаются.
+     */
+    val toolCalls: String? = null
 )
 
 /**
@@ -144,7 +155,7 @@ abstract class ChatMessageDao {
  */
 @Database(
     entities = [ChatEntity::class, ChatMessageEntity::class, DialogBranchEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -236,6 +247,20 @@ abstract class ChatDatabase : RoomDatabase() {
         val MIGRATION_3_4: Migration = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE chats ADD COLUMN strategy TEXT NOT NULL DEFAULT 'memory'")
+            }
+        }
+
+        /**
+         * Переход со схемы 4 на схему 5: у сообщения появились вызовы инструментов.
+         *
+         * Данные не теряются: колонка добавляется аддитивно и у старых сообщений
+         * остаётся null — это и значит «вызовов не было». Пустая строка здесь не
+         * подошла бы: её пришлось бы отличать от вызова без аргументов, а null честно
+         * говорит, что запись сделана до появления инструментов.
+         */
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN toolCalls TEXT")
             }
         }
 

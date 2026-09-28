@@ -104,15 +104,16 @@ data class TokenReport(
         add("[agent] Ответ ← $model")
         add("[agent] токенов запроса: $promptTokens (факт), $promptEstimate (оценка)")
         add("[agent] токенов ответа: $replyTokens (рассуждения: $replyReasoningTokens)")
-        // Вызовы инструментов печатаются по одному: по строкам видно, чем агент добывал
-        // данные и где инструмент отказал, — иначе рост расхода остался бы без объяснения
+        // Вызовы инструментов печатаются по одному, командой целиком: по строкам видно,
+        // чем и с чем агент добывал данные и где инструмент отказал, — иначе рост расхода
+        // остался бы без объяснения, а отказ без причины
         if (tools.calls.isNotEmpty()) {
             add(
                 "[agent] вызовов инструментов: ${tools.calls.size} в ${tools.rounds} раунд(ах), " +
                     "${tools.tokens} ток."
             )
             tools.calls.forEach { call ->
-                add("[agent] - ${call.name}${if (call.failed) " | отказ" else ""}")
+                add("[agent] - ${call.command()}${if (call.failed) " | отказ" else ""}")
             }
         }
         add("[agent] finish: ${replyFinishReason ?: "неизвестно"}")

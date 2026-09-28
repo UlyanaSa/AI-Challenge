@@ -49,6 +49,7 @@ import io.ktor.server.plugins.ratelimit.RateLimit
 import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveNullable
 import io.ktor.server.response.respond
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
@@ -164,16 +165,6 @@ val profileStore = JsonFileProfileStore(JsonFileProfileStore.defaultFile())
 val invariantStore = JsonFileInvariantStore(JsonFileInvariantStore.defaultFile())
 
 /**
- * Инструменты, которые сервер даёт модели: доступ к GitHub по протоколу MCP.
- *
- * Живёт рядом со сторами, потому что устроен так же — общее на все запросы состояние,
- * которое переживает запрос (агент создаётся на каждый запрос, а сессия инструментов
- * одна). Отличие в том, что это состояние чужого процесса: сервер инструментов — 
- * отдельная программа, и она поднимается при первом запросе, которому нужны инструменты.
- */
-val githubTools = GitHubTools()
-
-/**
  * Профиль, который уходит в запрос к модели и показывается клиенту: пусто в сторе —
  * профиль KMP-разработчика ([UserProfile.DEFAULT]).
  *
@@ -254,8 +245,15 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
 /**
  * Основной модуль сервера Ktor.
  * Настраивает плагины и маршрутизацию.
+ *
+ * @param githubTools Инструменты GitHub — общее на все запросы состояние, которое переживает
+ *        запрос (агент создаётся на каждый запрос, а сессия инструментов одна). Приходит
+ *        параметром со значением по умолчанию, а не берётся из глобальной переменной: так
+ *        маршруты проверяются на настоящем MCP-процессе с подставным GitHub, а глобального
+ *        изменяемого состояния в сервере не остаётся. Запуск без аргумента создаёт обычные
+ *        инструменты, поэтому [main] этим значением не занимается.
  */
-fun Application.module() {
+fun Application.module(githubTools: GitHubTools = GitHubTools()) {
     // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
         json(Json {
@@ -377,6 +375,78 @@ fun Application.module() {
         }
 
         /**
+         * Состояние подключения к GitHub: подключено ли, кто ответил и какие инструменты
+         * доступны.
+         *
+         * Всегда 200: до подключения и после отключения — нормальные состояния, и
+         * `connected=false` с пустым списком говорит о них лучше, чем код ошибки. 200 же,
+         * когда сервер инструментов вообще не поднимался: снимок просто скажет «не
+         * подключено», а причина отказа придёт на саму попытку подключения.
+         */
+        get("/v1/github") {
+            call.respond(githubTools.connection())
+        }
+
+        /**
+         * Подключение к MCP-серверу GitHub: человек назвал токен или положился на окружение.
+         *
+         * 200 с состоянием соединения — и когда подключено было уже (повторное нажатие не
+         * ошибка), и когда соединение установлено этим запросом. 502, если сервер инструментов
+         * не поднялся: это отказ чужого процесса, а не ошибка запроса, поэтому причину отдаём
+         * телом [ErrorResponse] как есть. Токен в ответ не попадает: он уезжает дочернему
+         * процессу окружением и в теле ответа не возвращается.
+         */
+        post("/v1/github/connect") {
+            val request = call.receiveNullable<GitHubConnectRequest>()
+            when (val result = githubTools.connect(request?.token)) {
+                is GitHubConnect.Connected -> call.respond(result.connection)
+
+                is GitHubConnect.Rejected -> call.respond(
+                    HttpStatusCode.BadGateway,
+                    ErrorResponse(success = false, error = result.reason)
+                )
+            }
+        }
+
+        /**
+         * Отключение от GitHub: процесс сервера инструментов гасится.
+         *
+         * 200 и тогда, когда соединения не было: отключать уже нечего, и ошибка здесь
+         * заставила бы интерфейс считать, что соединение осталось, тогда как его нет.
+         * Ответ — тот же снимок, что у `GET /v1/github`: клиенту не нужен отдельный запрос
+         * после нажатия кнопки.
+         */
+        post("/v1/github/disconnect") {
+            call.respond(githubTools.disconnect())
+        }
+
+        /**
+         * Прямой вызов инструмента из чата: имя и аргументы человек собрал сам.
+         *
+         * 200 даже при отказе инструмента: вызов дошёл, и инструмент ответил — причину несёт
+         * `failed` с текстом в `result`. Это ответ, а не ошибка транспорта, и показывать его
+         * надо как результат вызова. Ошибкой запроса осталось только то, чего инструмент не
+         * совершал: 409, если соединения нет (вызывать не у кого), и 404, если имени нет
+         * в списке объявленных подключённым сервером.
+         */
+        post("/v1/github/call") {
+            val request = call.receive<GitHubCallRequest>()
+            when (val result = githubTools.call(request.name, request.arguments)) {
+                is GitHubCall.Answered -> call.respond(result.response)
+
+                is GitHubCall.UnknownTool -> call.respond(
+                    HttpStatusCode.NotFound,
+                    ErrorResponse(success = false, error = result.reason)
+                )
+
+                is GitHubCall.Rejected -> call.respond(
+                    HttpStatusCode.Conflict,
+                    ErrorResponse(success = false, error = result.reason)
+                )
+            }
+        }
+
+        /**
          * Основной endpoint для чата.
          * Транспортный адаптер: принимает HTTP-запрос, передаёт набор параметров
          * агенту ([LlmAgent]) и возвращает ответ клиенту. Вся работа с моделью
@@ -406,11 +476,11 @@ fun Application.module() {
             )
             val result = agent.run(
                 userMessage = request.message,
-                // Инструменты спрашиваются на каждый запрос: их даёт чужой процесс, и он
-                // мог не подняться в прошлый раз. Список при живом соединении не стоит
-                // ничего — соединение уже есть.
+                // Инструменты берутся у подключённой сессии: соединение открывает человек
+                // кнопкой, поэтому здесь только выборка готового списка. Соединения нет —
+                // список пуст, и это не отменяет ответ: модель отвечает без инструментов.
                 options = request.toAgentOptions(profile = profileStore.profileOrDefault())
-                    .copy(tools = githubTools.available())
+                    .copy(tools = githubTools.tools())
             )
 
             call.respond(

@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
  * @param onMemory Открытие шторки памяти чата.
  * @param onInvariants Открытие шторки инвариантов проекта.
  * @param onProfile Открытие шторки профиля пользователя.
+ * @param onGitHub Открытие шторки GitHub: подключение инструментов и вызов инструмента.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,6 +43,7 @@ fun ChatTopBar(
     onMemory: () -> Unit,
     onInvariants: () -> Unit,
     onProfile: () -> Unit,
+    onGitHub: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
@@ -82,6 +84,13 @@ fun ChatTopBar(
             // агента открываются поверх чата, а не занимают ленту сообщений
             TextButton(onClick = onProfile) {
                 Text("Профиль", style = MaterialTheme.typography.labelLarge)
+            }
+            // GitHub: подключение к MCP-серверу инструментов и их ручной вызов открываются
+            // той же шторкой, что и остальные настройки агента. Подпись короче соседних
+            // намеренно: действий в шапке уже четыре, и «Инструменты GitHub» выдавили бы
+            // заголовок чата, ради которого шапка и нужна
+            TextButton(onClick = onGitHub) {
+                Text("GitHub", style = MaterialTheme.typography.labelLarge)
             }
             // Кнопка создания нового чата: возвращает к настройке агента
             IconButton(onClick = onNewChat) {

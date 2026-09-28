@@ -22,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
@@ -53,12 +54,20 @@ class GitHubToolsDemoTest {
 
         val github = StubGitHub()
         val http = demoHttpClient()
-        val tools = githubTools(github, token = "test-token")
+        val tools = githubTools(github)
 
         try {
             log("GitHub (подставной): ${github.baseUrl}")
+            stage("Подключение к серверу инструментов")
+            val connection = assertIs<GitHubConnect.Connected>(
+                tools.connect("test-token"),
+                "сервер инструментов не подключился: соединение теперь открывается явно"
+            ).connection
+            assertTrue(connection.connected, "снимок подключения должен быть подключённым")
+            log("подключено: ${connection.server} ${connection.version}")
+
             stage("Инструменты, которые агент получил от MCP-сервера")
-            val available = tools.available()
+            val available = tools.tools()
             assertEquals(
                 listOf("get_repositories"),
                 available.map { it.name },
@@ -115,9 +124,13 @@ class GitHubToolsDemoTest {
             log("обращений к подставному GitHub: ${github.requests.size}, все с Bearer-токеном")
 
             stage("Отказ инструмента: нет токена")
-            val tokenless = githubTools(github, token = "")
+            val tokenless = githubTools(github)
             try {
-                val refusal = recorded(tokenless.available())
+                assertIs<GitHubConnect.Connected>(
+                    tokenless.connect(null),
+                    "без токена само подключение проходит: токен читается только на вызове"
+                )
+                val refusal = recorded(tokenless.tools())
                 val refusalReply = answers(agent, refusal, "Сколько у меня репозиториев на GitHub?")
                 val refusalAnswer = refusal.answers.single()
                 assertTrue(refusalAnswer.isError, "без токена инструмент должен был отказать")
@@ -139,11 +152,14 @@ class GitHubToolsDemoTest {
 
     /**
      * Инструменты GitHub как у сервера приложения: тот же модуль на своём classpath, тот же
-     * класс точки входа, а токен и адрес API уезжают процессу окружением.
+     * класс точки входа, а адрес API уезжает процессу окружением. Токен здесь не подставляется
+     * в конфиг: его называет явное подключение ([GitHubTools.connect]) — так же, как это делает
+     * сервер приложения, когда человек нажимает кнопку.
      */
-    private fun githubTools(github: StubGitHub, token: String) = GitHubTools(
-        config = localMcpServerConfig(GitHubTools.GITHUB_SERVER_MAIN).copy(
-            env = mapOf("GITHUB_TOKEN" to token, "GITHUB_API_BASE" to github.baseUrl)
+    private fun githubTools(github: StubGitHub) = GitHubTools(
+        config = localMcpServerConfig(
+            GitHubTools.GITHUB_SERVER_MAIN,
+            env = mapOf("GITHUB_API_BASE" to github.baseUrl)
         ),
         onLog = { log(it) }
     )

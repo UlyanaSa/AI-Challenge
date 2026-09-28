@@ -81,8 +81,19 @@ class McpDemoTest {
         ProjectMcpServer.tools.forEach { spec ->
             val tool = tools.first { it.name == spec.name }
             assertEquals(spec.description, tool.description, "описание инструмента ${spec.name}")
+            // Сверяется всё, что клиент читает из схемы: имя, тип, обязательность, пояснение
+            // и список допустимых значений. Пояснение и список — не украшение: из них шторка
+            // подключения строит выбор аргумента, и потеря любого из них была бы молчаливой.
             assertEquals(
-                spec.arguments.map { McpToolArgument(it.name, it.type, it.required) },
+                spec.arguments.map {
+                    McpToolArgument(
+                        name = it.name,
+                        type = it.type,
+                        required = it.required,
+                        description = it.description,
+                        values = it.values.orEmpty()
+                    )
+                },
                 tool.arguments,
                 "аргументы инструмента ${spec.name}"
             )
@@ -114,8 +125,12 @@ class McpDemoTest {
     private fun CallToolResult.text(): String =
         content.filterIsInstance<TextContent>().joinToString("\n") { it.text }
 
-    private fun McpToolArgument.render(): String =
-        "$name: ${type ?: "тип не назван"}, " + if (required) "обязательный" else "необязательный"
+    private fun McpToolArgument.render(): String = buildString {
+        append("$name: ${type ?: "тип не назван"}, ")
+        append(if (required) "обязательный" else "необязательный")
+        if (values.isNotEmpty()) append(", значения: ${values.joinToString(" | ")}")
+        description?.let { append(" — $it") }
+    }
 
     /**
      * Протокольные логи SDK — на уровень WARN: демонстрация печатает список инструментов,
