@@ -1,12 +1,12 @@
-// Страница дня 22: два агента на десяти контрольных вопросах.
+// Страница дня 23: три режима ответа и разбор этапов конвейера на десяти контрольных вопросах.
 //
 // Данных у страницы два источника, и оба приходят с сервера целиком. Набор вопросов — это setup:
-// он не меняется и содержит ожидания, факты и место в книге. Состояние прогона — это state:
-// его страница опрашивает и рисует из него таблицу, метрики и конвейеры.
+// он не меняется и содержит ожидания, факты, место в книге и начальные настройки этапов. Состояние
+// прогона — это state: его страница опрашивает и рисует из него таблицу, метрики, конвейеры и трейс.
 //
-// Страница ничего не считает сама: оценки, попадание источника и итоговые метрики приходят
-// посчитанными. Второй набор формул в браузере разошёлся бы с отчётом прогона — а сверять
-// страницу с отчётом тогда было бы нечем. Здесь только раскладка: что показать и в каком порядке.
+// Страница ничего не считает сама: оценки, попадания, метрики этапов и классификацию потерь считает
+// `:rag`, а сюда они приходят посчитанными. Второй набор формул в браузере разошёлся бы с отчётом
+// прогона — а сверять страницу с отчётом тогда было бы нечем. Здесь только раскладка.
 
 let setup = null;
 let state = null;
@@ -50,6 +50,14 @@ function tokens(count) {
     return count.toLocaleString("ru-RU");
 }
 
+function ru(value, digits) {
+    return value.toFixed(digits).replace(".", ",");
+}
+
+function thresholdLabel(value) {
+    return value <= 0 ? "без порога" : `similarity >= ${ru(value, 2)}`;
+}
+
 // Оценка показывается по шкале задания — «N из 2», а не «N из числа фактов»: у вопроса
 // без ответа в базе факт один, и «2 / 1» читалось бы как ошибка счёта, хотя это полный балл.
 function scoreBadge(score) {
@@ -58,6 +66,14 @@ function scoreBadge(score) {
 
 function outcomeLabel(outcome) {
     return outcome ? `<span class="outcome">${esc(outcome)}</span>` : "";
+}
+
+// Класс потери: не найден поиском — ошибка поиска (красный), отсечён порогом или вторым этапом —
+// цена этапа (жёлтый), дошёл — зелёный. Это то, что задание просит называть точно.
+function lossBadge(check) {
+    if (!check) return `<span class="question-meta">—</span>`;
+    const kind = { NONE: "good", RETRIEVAL: "bad", FILTER: "warn", RERANK: "warn" }[check.lossCode] || "";
+    return `<span class="loss loss-${kind}">${esc(check.loss)}</span>`;
 }
 
 function fold(key, summary, bodyHtml) {
@@ -74,12 +90,17 @@ function stage(title, bodyHtml, time) {
 
 function questionRow(question, result) {
     const without = result?.without;
-    const withRag = result?.with;
+    const baseline = result?.baseline;
+    const improved = result?.improved;
+    const check = result?.stageCheck;
     const absent = question.absent;
     const expectedClass = absent ? "expected absent" : "expected";
     const place = absent
         ? "ответа в базе нет — правильным считается признать нехватку сведений"
         : `${esc(question.section)}, страницы ${question.pages.join(", ")}`;
+    // «Потеря» показывается только у вопроса с ответом в базе: у вопроса без ответа терять нечего.
+    const loss = !check || absent ? `<span class="question-meta">—</span>` : lossBadge(check);
+    const hit = !check || absent ? "—" : check.inFinal ? "да" : "нет";
     return `<tr class="question-row${selected === question.id ? " selected" : ""}" data-id="${question.id}">
         <td class="mono">${esc(question.id)}</td>
         <td>
@@ -88,9 +109,11 @@ function questionRow(question, result) {
             <div class="${expectedClass}"><b>Ожидание:</b> ${esc(question.expected)}</div>
         </td>
         <td>${without ? scoreBadge(without.score) + outcomeLabel(without.outcome) : "—"}</td>
-        <td>${withRag ? scoreBadge(withRag.score) + outcomeLabel(withRag.outcome) : "—"}</td>
-        <td>${absent || !withRag ? "—" : withRag.hit ? "да" : "нет"}</td>
-        <td>${withRag ? esc(withRag.outcome) : "не прогонялся"}</td>
+        <td>${baseline ? scoreBadge(baseline.score) + outcomeLabel(baseline.outcome) : "—"}</td>
+        <td>${improved ? scoreBadge(improved.score) + outcomeLabel(improved.outcome) : "—"}</td>
+        <td>${absent || !baseline ? "—" : baseline.hit ? "да" : "нет"}</td>
+        <td>${hit}</td>
+        <td>${loss}</td>
         <td><button class="mini secondary run-one" data-id="${question.id}" type="button"${setup.keyNote ? " disabled" : ""}>Прогнать</button></td>
     </tr>`;
 }
@@ -117,7 +140,7 @@ function sourceTable(mode) {
             return `<tr>
                 <td class="mono">[${source.rank}]</td>
                 <td><span class="mono">${esc(source.id)}</span><br><span class="question-meta">${esc(place)}</span></td>
-                <td class="similarity">${source.similarity.toFixed(3).replace(".", ",")}</td>
+                <td class="similarity">${ru(source.similarity, 3)}</td>
                 <td>${tokens(source.tokens)} токенов</td>
             </tr>`;
         })
@@ -134,6 +157,100 @@ function sourceTable(mode) {
                 )
             )
             .join("")}`;
+}
+
+// Таблица кандидатов поиска: место в выдаче, отметка фильтра, оценка и позиция после второго этапа,
+// номер в контексте. По этой таблице видно, почему в контекст ушёл или не ушёл каждый фрагмент.
+function candidateTable(trace) {
+    if (!trace.candidates.length) {
+        return `<p class="missing">Поиск не вернул ни одного кандидата.</p>`;
+    }
+    const rows = trace.candidates
+        .map((candidate) => {
+            const filter = candidate.accepted
+                ? `<span class="loss loss-good">прошёл</span>`
+                : `<span class="loss loss-bad">отсечён</span>`;
+            const score = candidate.rerankScore == null ? "—" : ru(candidate.rerankScore, 3);
+            const moved = candidate.rerankRank != null && candidate.rerankRank !== candidate.rank;
+            const position = candidate.rerankRank == null
+                ? "—"
+                : `${candidate.rank} → <span class="${moved ? "moved" : ""}">${candidate.rerankRank}</span>`;
+            const context = candidate.finalRank == null ? "—" : `<b>[${candidate.finalRank}]</b>`;
+            return `<tr>
+                <td class="mono">${candidate.rank}</td>
+                <td><span class="mono">${esc(candidate.id)}</span><br><span class="question-meta">${esc(candidate.label)}</span></td>
+                <td class="similarity">${ru(candidate.similarity, 3)}</td>
+                <td>${filter}</td>
+                <td class="similarity">${score}</td>
+                <td class="similarity">${position}</td>
+                <td>${context}</td>
+            </tr>`;
+        })
+        .join("");
+    return `<table class="sources">
+        <thead><tr>
+            <th># поиска</th><th>фрагмент</th><th>близость</th><th>фильтр</th>
+            <th>оценка этапа</th><th>позиция</th><th>контекст</th>
+        </tr></thead>
+        <tbody>${rows}</tbody></table>`;
+}
+
+function rewriteStage(trace) {
+    const query = trace.rewritten ?? trace.original;
+    const changed = trace.rewritten != null && trace.rewritten.trim() !== trace.original.trim();
+    const note = trace.rewritten == null
+        ? "Переписывания нет: в поиск ушёл исходный вопрос."
+        : changed
+          ? "Модель изменила запрос: он ушёл только в поиск, а модель отвечает на исходный вопрос."
+          : "Модель вернула тот же запрос: переписывание ничего не поменяло.";
+    const body = `
+        <p><span class="question-meta">Исходный вопрос</span><br>${esc(trace.original)}</p>
+        <p><span class="question-meta">Запрос в поиск</span><br>${esc(query)}</p>
+        <p class="question-meta">${esc(note)}</p>`;
+    return stage("1. Query Rewrite", body, trace.rewriteMillis ? seconds(trace.rewriteMillis) : null);
+}
+
+function retrievalStage(trace) {
+    const note = trace.note ? `<p class="question-meta">Замечание этапа: ${esc(trace.note)}</p>` : "";
+    return stage(
+        `2. Retrieval (Top-${trace.retrievalTopK})`,
+        candidateTable(trace) + note,
+        seconds(trace.retrievalMillis)
+    );
+}
+
+function filterStage(trace) {
+    const body = `<p>Прошло порог ${trace.accepted} из ${trace.candidates.length}, отсеяно ${trace.removed}.</p>` +
+        (trace.empty ? `<p class="missing">Кандидатов не осталось: контекста нет.</p>` : "");
+    return stage(`3. Similarity Filter (${thresholdLabel(trace.threshold)})`, body);
+}
+
+function rerankStage(trace) {
+    const moved = trace.candidates.filter((candidate) => candidate.rerankRank != null && candidate.rerankRank !== candidate.rank);
+    const name = state.config?.rerank || "без второго этапа";
+    const body = `<p>В контекст после отсечения прошло ${trace.passed} из ${trace.accepted}. ` +
+        `Порядок до → после второго этапа: ${moved.length ? `изменился у ${moved.length}` : "не менялся"}.</p>` +
+        (trace.rerankScoredByModel > 0
+            ? `<p class="question-meta">Оценено моделью: ${trace.rerankScoredByModel} из ${trace.accepted}.</p>`
+            : "");
+    return stage(`4. Reranking (${esc(name)})`, body, trace.rerankMillis ? seconds(trace.rerankMillis) : null);
+}
+
+function finalStage(trace) {
+    const final = trace.candidates
+        .filter((candidate) => candidate.finalRank != null)
+        .sort((left, right) => left.finalRank - right.finalRank);
+    if (!final.length) {
+        return stage("5. Финальный Top-K", `<p class="missing">В контекст не ушло ни одного фрагмента.</p>`);
+    }
+    const items = final
+        .map(
+            (candidate) =>
+                `<li><b>[${candidate.finalRank}]</b> <span class="mono">${esc(candidate.id)}</span> — ` +
+                `был #${candidate.rank} по близости ${ru(candidate.similarity, 3)}</li>`
+        )
+        .join("");
+    return stage(`5. Финальный Top-K (${final.length})`, `<ul class="rank-list">${items}</ul>`);
 }
 
 function answerStage(mode) {
@@ -176,24 +293,45 @@ function checkStage(mode) {
     );
 }
 
-function agentColumn(mode, question) {
+function stageCheckStage(result) {
+    const check = result.stageCheck;
+    if (!check) return "";
+    const mark = (value) => (value ? "да" : "нет");
+    const body = `
+        <p>Правильный фрагмент после поиска: ${mark(check.inRetrieval)}; после фильтра: ${mark(check.inFiltered)}; ` +
+        `в финальном контексте: ${mark(check.inFinal)}.</p>
+        <p class="question-meta">Кандидатов ${check.candidates}, прошло порог ${check.accepted}, в контексте ${check.passed}; ` +
+        `отсеяно ${check.removed}, из них правильных ${check.wronglyFiltered}; порядок изменён: ${check.reordered ? "да" : "нет"}` +
+        `${check.scored ? "" : " (ответа в базе нет — попадание не считается)"}.</p>
+        <p>${lossBadge(check)}</p>`;
+    return stage("Классификация потерь", body);
+}
+
+function agentColumn(mode, question, result) {
+    const kind = mode?.mode;
     if (!mode) {
         return `<div class="agent"><div class="agent-head"><h3>Режим не прогонялся</h3></div>
-            <p class="missing">Нажмите «Прогнать» у вопроса — появятся оба конвейера.</p></div>`;
+            <p class="missing">Нажмите «Прогнать» у вопроса — появятся все три конвейера.</p></div>`;
     }
     const head = `<div class="agent-head"><h3>${esc(mode.title)}</h3>
         <span>${scoreBadge(mode.score)}${outcomeLabel(mode.outcome)}</span></div>`;
     if (mode.state === "failed") {
-        const stages =
-            mode.mode === "with"
-                ? stage("Поиск", `<p class="missing">Отказ случился до выдачи: поиск не выполнялся.</p>`)
-                : stage("Поиск", `<p class="missing">Режим без RAG к поиску не обращается.</p>`);
-        return `<div class="agent${mode.mode === "with" ? " with" : ""}">${head}${stages}
+        const search = mode.mode === "without"
+            ? stage("Поиск", `<p class="missing">Режим без RAG к поиску не обращается.</p>`)
+            : stage("Поиск", `<p class="missing">Отказ случился до выдачи: поиск не выполнялся.</p>`);
+        return `<div class="agent ${esc(kind)}">${head}${search}
             <div class="stage"><div class="error-box">${esc(mode.error || "режим отказал")}</div></div></div>`;
     }
 
     const stages = [stage("Вопрос", esc(question.question))];
-    if (mode.mode === "with") {
+    if (kind === "without") {
+        stages.push(
+            stage(
+                "Поиска не было",
+                `<p class="missing">Режим без базы не обращается к индексу: модель отвечает по памяти.</p>`
+            )
+        );
+    } else {
         stages.push(
             stage(
                 "Вектор вопроса",
@@ -209,23 +347,25 @@ function agentColumn(mode, question) {
                 seconds(mode.retrievalMillis)
             )
         );
-        stages.push(stage("Top-K", sourceTable(mode)));
-    } else {
-        stages.push(
-            stage(
-                "Поиска не было",
-                `<p class="missing">Режим без базы не обращается к индексу: модель отвечает по памяти.</p>`
-            )
-        );
+        if (kind === "improved" && result?.trace) {
+            const trace = result.trace;
+            stages.push(rewriteStage(trace));
+            stages.push(retrievalStage(trace));
+            stages.push(filterStage(trace));
+            stages.push(rerankStage(trace));
+            stages.push(finalStage(trace));
+        } else {
+            stages.push(stage(`Top-K (${mode.sources.length})`, sourceTable(mode)));
+        }
     }
     const user = mode.messages.find((message) => message.role === "user");
     const system = mode.messages.find((message) => message.role === "system");
     if (user) {
         stages.push(
             stage(
-                mode.mode === "with" ? "Контекст, ушедший в модель" : "Запрос к модели",
+                kind === "without" ? "Запрос к модели" : "Контекст, ушедший в модель",
                 fold(
-                    `context-${mode.mode}`,
+                    `context-${kind}`,
                     `показать текст запроса — ${user.content.length} символов`,
                     `<pre>${esc(user.content)}</pre>`
                 )
@@ -237,7 +377,8 @@ function agentColumn(mode, question) {
     }
     stages.push(answerStage(mode));
     stages.push(checkStage(mode));
-    return `<div class="agent${mode.mode === "with" ? " with" : ""}">${head}${stages.join("")}</div>`;
+    if (kind === "improved") stages.push(stageCheckStage(result));
+    return `<div class="agent ${esc(kind)}">${head}${stages.join("")}</div>`;
 }
 
 function renderPipeline() {
@@ -251,7 +392,14 @@ function renderPipeline() {
     }
     const result = state.results.find((item) => item.id === selected);
     hint.hidden = true;
-    element.innerHTML = agentColumn(result?.without, question) + agentColumn(result?.with, question);
+    element.innerHTML =
+        agentColumn(result?.without, question, result) +
+        agentColumn(result?.baseline, question, result) +
+        agentColumn(result?.improved, question, result);
+}
+
+function metric(title, value, note) {
+    return `<div class="metric"><dt>${esc(title)}</dt><dd>${value}${note ? `<small>${esc(note)}</small>` : ""}</dd></div>`;
 }
 
 function renderMetrics() {
@@ -266,28 +414,26 @@ function renderMetrics() {
     document.getElementById("metrics-hint").textContent =
         `Метрики посчитаны по прогнанным вопросам: ${run} из ${setup.questions.length}. ` +
         `Вопросы без ответа в базе (${setup.questions.length - summary.scored}) в Source Hit Rate не входят.`;
-    const metric = (title, value, note) =>
-        `<div class="metric"><dt>${esc(title)}</dt><dd>${value}${note ? `<small>${esc(note)}</small>` : ""}</dd></div>`;
     document.getElementById("metrics").innerHTML = [
         metric(
             "Средняя оценка без RAG",
-            `${summary.averageWithout.toFixed(1).replace(".", ",")} из 2`,
+            `${ru(summary.averageWithout, 1)} из 2`,
             `${summary.factsWithout} из ${summary.factsTotal} фактов`
         ),
         metric(
-            "Средняя оценка с RAG",
-            `${summary.averageWith.toFixed(1).replace(".", ",")} из 2`,
+            "Средняя оценка базового RAG",
+            `${ru(summary.averageWith, 1)} из 2`,
             `${summary.factsWith} из ${summary.factsTotal} фактов`
         ),
         metric(
-            `Source Hit Rate (Top-${document.getElementById("topk").value})`,
+            `Source Hit Rate (Top-${state.config?.baselineTopK ?? setup.topK})`,
             `${summary.hits} из ${summary.scored}`,
             `${Math.round(summary.hitRate * 100)}% — ожидаемый источник попал в выдачу`
         ),
         metric(
             "По вопросам",
             `+${summary.better} / =${summary.same} / −${summary.worse}`,
-            "с RAG выше, столько же, ниже"
+            "базовый RAG выше, столько же, ниже"
         ),
         metric(
             "Итог",
@@ -297,12 +443,76 @@ function renderMetrics() {
         metric(
             "Токены",
             `${tokens(summary.without.prompt + summary.without.completion)} / ${tokens(summary.with.prompt + summary.with.completion)}`,
-            "без RAG / с RAG, запрос + ответ"
+            "без RAG / базовый RAG, запрос + ответ"
         ),
         metric(
             "Время",
             `${seconds(summary.millisWithout)} / ${seconds(summary.millisWith)}`,
-            `без RAG / с RAG; модель и поиск, без RAG поиска не было`
+            `без RAG / базовый RAG; модель и поиск, без RAG поиска не было`
+        ),
+    ].join("");
+}
+
+function renderStages() {
+    const panel = document.getElementById("stages-panel");
+    const stages = state.stages;
+    if (!stages) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    const config = state.config || {};
+    const retrievalTopK = config.retrievalTopK ?? setup.retrievalTopK;
+    const finalTopK = config.finalTopK ?? setup.finalTopK;
+    document.getElementById("stages-hint").textContent =
+        `Вопросов с ответом в базе: ${stages.scored} из ${stages.questions}. ` +
+        `Этапы: переписывание — ${config.rewrite || "нет"}, фильтр — ${thresholdLabel(config.threshold ?? setup.threshold)}, ` +
+        `второй этап — ${config.rerank || "нет"}. Hit считается по вопросам с ответом в базе.`;
+    document.getElementById("stages-metrics").innerHTML = [
+        metric(
+            "Средняя оценка трёх режимов",
+            `${ru(stages.noBaseScore, 2)} / ${ru(stages.baselineScore, 2)} / ${ru(stages.improvedScore, 2)}`,
+            "без базы / базовый / улучшенный, из 2"
+        ),
+        metric(
+            "Факты в ответах",
+            `${stages.baselineFacts} / ${stages.improvedFacts}`,
+            `базовый / улучшенный, из ${stages.factsTotal}`
+        ),
+        metric(
+            "Улучшенный против базового",
+            `+${stages.better} / =${stages.same} / −${stages.worse}`,
+            "выше, столько же, ниже по оценке"
+        ),
+        metric(
+            "Source Hit Rate",
+            `${stages.baselineHits} / ${stages.improvedHits}`,
+            `базовый / улучшенный, из ${stages.scored}`
+        ),
+        metric(
+            "Попадание по этапам",
+            `${stages.retrievalHits} → ${stages.filterHits} → ${stages.finalHits}`,
+            `после поиска Top-${retrievalTopK}, после фильтра, после второго этапа Top-${finalTopK}`
+        ),
+        metric(
+            "Цена фильтра",
+            `${stages.removed} отсеяно`,
+            `из них правильных ${stages.wronglyFiltered}; пустых контекстов ${stages.emptyContext}`
+        ),
+        metric(
+            "Второй этап",
+            `${stages.reordered} вопросов`,
+            "изменил порядок кандидатов"
+        ),
+        metric(
+            "Где потерялся фрагмент",
+            `${stages.lostInRetrieval} / ${stages.lostInFilter} / ${stages.lostInRerank}`,
+            "не найден поиском / отсечён порогом / проиграл на втором этапе"
+        ),
+        metric(
+            "Переписывание",
+            `${stages.rewriteChanged} вопросов`,
+            "запрос изменился и ушёл в поиск переписанным"
         ),
     ].join("");
 }
@@ -368,6 +578,7 @@ function render() {
     renderStatus();
     renderQuestions();
     renderMetrics();
+    renderStages();
     renderPipeline();
 }
 
@@ -377,12 +588,17 @@ function renderSetup() {
         `Векторы: ${setup.provider.name}. Каталог прогона: ${setup.dir}`;
     document.getElementById("topk").value = setup.topK;
     document.getElementById("topk").max = setup.maxTopK;
+    document.getElementById("retrieval-topk").value = setup.retrievalTopK;
+    document.getElementById("final-topk").value = setup.finalTopK;
+    document.getElementById("threshold").value = setup.threshold;
+    document.getElementById("rewrite").value = setup.rewrite;
+    document.getElementById("rerank").value = setup.rerank;
     document.getElementById("setup-facts").innerHTML = [
         ["База", `${setup.base.file} — ${tokens(setup.base.chars)} символов, ${tokens(setup.base.tokens)} токенов, ${setup.base.pages} страниц`],
         ["Нарезка", `${setup.index.strategy} — ${tokens(setup.index.chunks)} чанков`],
         ["Векторы", `${setup.provider.name} — ${setup.provider.dimension} измерений`],
         ["Провайдер", setup.provider.note],
-        ["Поиск", `Top-K = ${setup.topK} (можно изменить перед прогоном)`],
+        ["Этапы по умолчанию", `поиск Top-${setup.retrievalTopK}, в контекст Top-${setup.finalTopK}, порог ${setup.threshold}, переписывание ${setup.rewrite}, второй этап ${setup.rerank}`],
     ]
         .map(([term, value]) => `<div><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`)
         .join("");
@@ -402,8 +618,16 @@ async function refresh() {
 
 async function run(ids) {
     try {
-        const topK = Number(document.getElementById("topk").value) || setup.topK;
-        state = await api(`/api/run?ids=${ids.join(",")}&topK=${topK}`, { method: "POST" });
+        const params = new URLSearchParams({
+            ids: ids.join(","),
+            topK: document.getElementById("topk").value,
+            retrievalTopK: document.getElementById("retrieval-topk").value,
+            finalTopK: document.getElementById("final-topk").value,
+            threshold: document.getElementById("threshold").value,
+            rewrite: document.getElementById("rewrite").value,
+            rerank: document.getElementById("rerank").value,
+        });
+        state = await api(`/api/run?${params}`, { method: "POST" });
         signature = "";
         render();
     } catch (cause) {

@@ -103,6 +103,17 @@ object Check {
         return text.split(' ').any { word -> word.startsWith(wanted) }
     }
 
+    /**
+     * Есть ли факт в тексте: хватает любого из его признаков.
+     *
+     * Текст ожидается уже нормализованный ([normalize]): нормализация — не часть сопоставления,
+     * а подготовка, и вызывающий, у которого текст десятков фрагментов, делает её один раз, а не
+     * на каждый признак. Отдельная функция, потому что тем же вопросом задаются двое: сверка ответа
+     * ([evaluate]) и сверка этапов ([Stages] — попал ли в контекст фрагмент с ответом).
+     */
+    fun contains(text: String, fact: Fact): Boolean =
+        fact.keywords.any { keyword -> matches(text, keyword) }
+
     /** Сверяет ответ с ожиданием вопроса и с выдачей поиска, если она была. */
     fun evaluate(question: ControlQuestion, answer: String, sources: List<Source>): AnswerCheck {
         val text = normalize(answer)
@@ -126,7 +137,7 @@ object Check {
 
     /** Есть ли факт хоть в одном из текстов: признак факта ищется тем же сопоставлением. */
     private fun factsIn(texts: List<String>, fact: Fact): Boolean =
-        texts.any { text -> fact.keywords.any { keyword -> matches(text, keyword) } }
+        texts.any { text -> contains(text, fact) }
 
     /**
      * Чем кончился вопрос: ответ сошёлся, поиск не нашёл или модель не справилась.

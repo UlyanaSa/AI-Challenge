@@ -3,27 +3,57 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>День 22. Два агента: с базой и без базы</title>
+    <title>День 23. Три режима RAG: переписывание, фильтр и реранкинг</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-    <h1>День 22. RAG: один вопрос — два агента</h1>
+    <h1>День 23. RAG: без базы, базовый и улучшенный</h1>
     <p class="subtitle" id="run-title">Загрузка прогона…</p>
 </header>
 
 <main>
     <section class="panel">
-        <h2><span class="step">1</span> Прогон и индекс</h2>
+        <h2><span class="step">1</span> Прогон и настройки этапов</h2>
         <p class="hint">
             Вопросы набора не редактируются: вместе с каждым заранее известен ответ, ключевые факты
-            и место в книге — по ним и считается оценка. Индекс базы строится один раз: поиск идёт
-            по готовому файлу, и в шапке видно, был он собран заново или взят готовым.
+            и место в книге — по ним и считается оценка. Каждый вопрос прогоняется в трёх режимах
+            на одном индексе и одной модели: без базы, базовый RAG (Top-K дня 22) и улучшенный
+            конвейер. Настройки этапов — те же, что у прогона в консоли, и они попадают в отчёт:
+            без них числа нельзя ни повторить, ни объяснить. Индекс базы строится один раз: поиск
+            идёт по готовому файлу, и в шапке видно, был он собран заново или взят готовым.
         </p>
         <div class="controls settings">
             <label class="field">
-                <span>top_k — сколько фрагментов уходит в запрос</span>
+                <span>top_k — Top-K базового режима</span>
                 <input type="number" id="topk" min="1" max="20" step="1" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>retrieval_top_k — кандидатов поиска</span>
+                <input type="number" id="retrieval-topk" min="1" max="20" step="1" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>final_top_k — фрагментов в контекст</span>
+                <input type="number" id="final-topk" min="1" max="20" step="1" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>порог близости (0 — без фильтра)</span>
+                <input type="number" id="threshold" min="0" max="1" step="0.05" inputmode="decimal">
+            </label>
+            <label class="field">
+                <span>переписывание запроса</span>
+                <select id="rewrite">
+                    <option value="none">none — без этапа</option>
+                    <option value="llm">llm — моделью</option>
+                </select>
+            </label>
+            <label class="field">
+                <span>второй этап (реранкинг)</span>
+                <select id="rerank">
+                    <option value="none">none — без этапа</option>
+                    <option value="heuristic">heuristic — эвристика</option>
+                    <option value="llm">llm — моделью</option>
+                </select>
             </label>
             <button id="run-all" type="button">Прогнать все десять</button>
             <button id="rebuild" type="button" class="secondary">Пересобрать индекс</button>
@@ -40,21 +70,25 @@
     <section class="panel">
         <h2><span class="step">2</span> Десять контрольных вопросов</h2>
         <p class="hint">
-            Каждый вопрос прогоняется дважды: сначала агент без базы — он отвечает по памяти,
-            потом агент с базой — он отвечает по найденным фрагментам. Оценка 0–2 у обоих одна:
-            0 — ответа нет или он неверен, 1 — часть ожидаемых фактов, 2 — все. «Источник» —
-            попал ли ожидаемый текст в Top-K: это отдельная проверка поиска, она не входит
-            в оценку ответа и отделяет ошибку поиска от ошибки генерации.
+            Три режима отвечают на разные вопросы сравнения. «Без базы» — нижняя граница: что модель
+            помнит сама. «Базовый RAG» — то, что дал поиск дня 22 (Top-K по близости), и он же учтён
+            в метриках дня 22. «Улучшенный RAG» — конвейер с переписыванием, расширенной выдачей,
+            порогом и вторым этапом. Оценка 0–2 у всех одна: 0 — ответа нет или он неверен, 1 — часть
+            ожидаемых фактов, 2 — все. «Источник» — попал ли ожидаемый текст в Top-K базового режима;
+            «Hit@K» — дошёл ли он до финального контекста улучшенного, а «Потеря» называет этап,
+            на котором правильный фрагмент пропал.
         </p>
         <table class="questions">
             <thead>
             <tr>
                 <th>#</th>
                 <th>Вопрос, ожидание и место в книге</th>
-                <th>Без RAG</th>
-                <th>С RAG</th>
+                <th>Без базы</th>
+                <th>Базовый RAG</th>
+                <th>Улучшенный RAG</th>
                 <th>Источник</th>
-                <th>Итог</th>
+                <th>Hit@K</th>
+                <th>Потеря</th>
                 <th></th>
             </tr>
             </thead>
@@ -63,17 +97,24 @@
     </section>
 
     <section class="panel" id="metrics-panel" hidden>
-        <h2>Итоговые метрики</h2>
+        <h2>Метрики дня 22: память против базового RAG</h2>
         <p class="hint" id="metrics-hint"></p>
         <div class="metrics" id="metrics"></div>
+    </section>
+
+    <section class="panel" id="stages-panel" hidden>
+        <h2>Метрики этапов дня 23</h2>
+        <p class="hint" id="stages-hint"></p>
+        <div class="metrics" id="stages-metrics"></div>
     </section>
 
     <section class="panel">
         <h2><span class="step">3</span> Конвейер вопроса</h2>
         <p class="hint" id="pipeline-hint">
-            Выберите вопрос в таблице — здесь появятся оба конвейера: вопрос, вектор вопроса,
-            выдача поиска с идентификаторами и близостями, контекст, ушедший в модель, ответ
-            и сверка с ожиданием. Звенья показываются так, как они выполнялись.
+            Выберите вопрос в таблице — здесь появятся все три конвейера: вопрос, вектор вопроса,
+            выдача поиска с идентификаторами и близостями, этапы улучшенного конвейера (переписанный
+            запрос, порог, второй этап, финальный Top-K), контекст, ушедший в модель, ответ и сверка
+            с ожиданием. Звенья показываются так, как они выполнялись.
         </p>
         <div class="agents" id="pipeline"></div>
     </section>

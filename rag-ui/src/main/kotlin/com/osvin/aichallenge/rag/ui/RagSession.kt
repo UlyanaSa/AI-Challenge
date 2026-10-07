@@ -6,18 +6,28 @@ import com.osvin.aichallenge.indexing.model.ChunkingStrategyType
 import com.osvin.aichallenge.indexing.ollama.Embedding
 import com.osvin.aichallenge.rag.Api
 import com.osvin.aichallenge.rag.Check
-import com.osvin.aichallenge.rag.Comparison
 import com.osvin.aichallenge.rag.ControlQuestion
 import com.osvin.aichallenge.rag.Controls
 import com.osvin.aichallenge.rag.Corpus
 import com.osvin.aichallenge.rag.DayBase
+import com.osvin.aichallenge.rag.HeuristicReranker
+import com.osvin.aichallenge.rag.LlmQueryRewriter
+import com.osvin.aichallenge.rag.LlmReranker
 import com.osvin.aichallenge.rag.Mode
+import com.osvin.aichallenge.rag.QueryRewriter
 import com.osvin.aichallenge.rag.RagAgent
 import com.osvin.aichallenge.rag.RagIndex
+import com.osvin.aichallenge.rag.RagPipeline
 import com.osvin.aichallenge.rag.Report
+import com.osvin.aichallenge.rag.Reranker
 import com.osvin.aichallenge.rag.Run
 import com.osvin.aichallenge.rag.RunHeader
+import com.osvin.aichallenge.rag.SimilarityFilter
+import com.osvin.aichallenge.rag.StageConfig
+import com.osvin.aichallenge.rag.StageReport
+import com.osvin.aichallenge.rag.Stages
 import com.osvin.aichallenge.rag.Summary
+import com.osvin.aichallenge.rag.Trial
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.CoroutineScope
@@ -33,12 +43,108 @@ sealed interface StartOutcome {
 }
 
 /**
- * Состояние страницы дня 22: индекс базы, прогон контрольных вопросов и отчёты.
+ * Условия прогона, которые задаёт человек на странице: те же, что у прогона в консоли.
+ *
+ * Варианты этапов идут строками, а не объектами, по той же причине, что и в консоли: клиент модели
+ * появляется только после проверки ключа, а разбор варианта должен случиться до прогона — чтобы
+ * неизвестное имя отвергло запуск с причиной, а не упало в фоне посреди прогона.
+ *
+ * Два Top-K независимы: [retrievalTopK] — сколько кандидатов просит поиск у улучшенного конвейера,
+ * [finalTopK] — сколько фрагментов уходит в контекст после фильтра и второго этапа.
+ */
+data class RunSettings(
+    /** Top-K базового режима дня 22: столько фрагментов берёт поиск по близости. */
+    val baselineTopK: Int,
+    val retrievalTopK: Int,
+    val finalTopK: Int,
+    /** Порог фильтрации; `0.0` — фильтра нет. */
+    val threshold: Double,
+    /** Вариант переписывания: `none` или `llm`. */
+    val rewrite: String,
+    /** Вариант второго этапа: `none`, `heuristic` или `llm`. */
+    val rerank: String
+) {
+
+    /** Переписыватель по имени варианта: `null` — этапа нет. */
+    fun rewriterOf(llm: LlmClient, model: String): QueryRewriter? = when (rewrite) {
+        NONE -> null
+        "llm" -> LlmQueryRewriter(llm, model)
+        else -> error("Вариант переписывания не поддержан: $rewrite")
+    }
+
+    /** Второй этап по имени варианта: `null` — этапа нет. */
+    fun rerankerOf(llm: LlmClient, model: String): Reranker? = when (rerank) {
+        NONE -> null
+        "heuristic" -> HeuristicReranker()
+        "llm" -> LlmReranker(llm, model)
+        else -> error("Вариант второго этапа не поддержан: $rerank")
+    }
+
+    /**
+     * Проверка условий до запуска: причина отказа важнее, чем прогон, падающий на середине.
+     *
+     * Правила те же, что у разбора аргументов в консоли, и это не дублирование: страница — второй
+     * вход в тот же прогон, и она обязана отвергать те же условия теми же словами, иначе прогон
+     * со страницы и прогон в консоли начинали бы с разного.
+     */
+    fun validate(): String? = when {
+        baselineTopK !in 1..RagSession.MAX_TOP_K ->
+            "Top-K базового режима: от 1 до ${RagSession.MAX_TOP_K}, получено $baselineTopK"
+
+        retrievalTopK !in 1..RagSession.MAX_TOP_K ->
+            "retrievalTopK: от 1 до ${RagSession.MAX_TOP_K}, получено $retrievalTopK"
+
+        finalTopK !in 1..retrievalTopK ->
+            "finalTopK ($finalTopK) должен быть от 1 до retrievalTopK ($retrievalTopK)"
+
+        threshold !in 0.0..1.0 -> "Порог: от 0 до 1, получено $threshold"
+        rewrite !in REWRITE_VARIANTS -> "Вариант переписывания «$rewrite» неизвестен: допустимы $NONE, llm"
+        rerank !in RERANK_VARIANTS -> "Вариант второго этапа «$rerank» неизвестен: допустимы $NONE, heuristic, llm"
+        else -> null
+    }
+
+    companion object {
+
+        /** Имя «этапа нет»: одно и то же в разборе условий и в подсказке. */
+        const val NONE = "none"
+
+        val REWRITE_VARIANTS = listOf(NONE, "llm")
+        val RERANK_VARIANTS = listOf(NONE, "heuristic", "llm")
+
+        /**
+         * Значения по умолчанию — как у прогона в консоли.
+         *
+         * Десять кандидатов — пример из задания: их хватает фильтру и второму этапу, чтобы было
+         * из чего выбирать, но каждый кандидат стоит токенов у LLM-реранкера. Финальные три — тот же
+         * контекст, что в дне 22, иначе сравнение с базовым режимом было бы нечестным. Порог 0,40 —
+         * значение, выбранное подбором на этом корпусе: 0,50 и 0,60 отсеивают правильные фрагменты
+         * быстрее, чем шум (правильные близости здесь начинаются от 0,45). Переписывание моделью
+         * включено — это главный этап дня 23, а эвристический второй этап детерминирован и не стоит
+         * обращений к модели.
+         */
+        val DEFAULT = RunSettings(
+            baselineTopK = RagSession.DEFAULT_TOP_K,
+            retrievalTopK = 10,
+            finalTopK = 3,
+            threshold = 0.40,
+            rewrite = "llm",
+            rerank = "heuristic"
+        )
+    }
+}
+
+/**
+ * Состояние страницы дня 23: индекс базы, прогон контрольных вопросов в трёх режимах и отчёты.
+ *
+ * Режимов три, и они повторяют прогон в консоли ([RagCli]): без базы, базовый RAG (Top-K дня 22)
+ * и улучшенный RAG — конвейер с переписыванием запроса, расширенной выдачей, порогом и вторым
+ * этапом. Все три идут по одному индексу и одной модели, и порядок вызовов внутри вопроса
+ * фиксирован: иначе разница между колонками была бы разницей настроек, а не этапов.
  *
  * Сессия держит ровно то, чего нет в конвейере: индекс рабочего каталога, набор результатов
- * и состояние прогона. Сами ответы получает [RagAgent], сверка — [Check], метрики — [Report]:
- * страница не считает ни одного числа сама, иначе её числа разошлись бы с отчётом прогона
- * в консоли, а сверять одно с другим стало бы нечем.
+ * и состояние прогона. Сами ответы получает [RagAgent], сверка — [Check], метрики — [Report]
+ * и [Stages]: страница не считает ни одного числа сама, иначе её числа разошлись бы с отчётом
+ * прогона в консоли, а сверять одно с другим стало бы нечем.
  *
  * Прогон идёт в фоне ([scope]) и пишет состояние под замком: страница опрашивает [state] раз
  * в секунду, и сервер обязан отвечать, пока идёт обращение к модели. Прогон один на страницу:
@@ -68,7 +174,11 @@ class RagSession(
     private val llm: (String) -> LlmClient = Api::model
 ) {
 
-    private data class ResultPair(val without: ModeResult? = null, val with: ModeResult? = null)
+    private data class ResultPair(
+        val without: ModeResult? = null,
+        val baseline: ModeResult? = null,
+        val improved: ModeResult? = null
+    )
 
     private val lock = Any()
 
@@ -91,8 +201,14 @@ class RagSession(
     /** Индекс взят готовым, а не собран этим прогоном: в отчёте это разные числа и разные слова. */
     private var indexReused = false
 
-    /** Top-K последнего прогона: он попадает в отчёт, и без него Source Hit Rate не воспроизводится. */
-    private var topK = DEFAULT_TOP_K
+    /**
+     * Настройки этапов последнего прогона: они попадают в отчёт, и без них числа не воспроизвести.
+     *
+     * Хранятся готовым [StageConfig] с именами реализаций, а не сырыми вариантами: отчёт печатает
+     * «модель deepseek-v4-flash», и собирать это имя второй раз из варианта значило бы завести
+     * второе место, где этап превращается в строку.
+     */
+    private var stageConfig: StageConfig? = null
 
     private var state = StateDto.IDLE
     private var stage: String? = null
@@ -103,10 +219,15 @@ class RagSession(
     private var elapsedMs = 0L
     private val results = LinkedHashMap<String, ResultPair>()
 
-    /** Прогнанные вопросы целиком: по ним считаются метрики и пишутся отчёты. */
-    private val completed = ArrayList<Comparison>()
+    /** Прогнанные вопросы целиком: по ним считаются метрики этапов и метрики дня 22. */
+    private val completed = ArrayList<Trial>()
 
+    /** Метрики дня 22 (память против базового RAG): считаются [Report.summary] по паре каждого Trial. */
     private var summary: Summary? = null
+
+    /** Метрики этапов дня 23: считаются [Stages.summary] по тем же вопросам. */
+    private var stageSummary: StagesDto? = null
+
     private var reports = emptyList<ReportDto>()
 
     init {
@@ -135,8 +256,13 @@ class RagSession(
                 note = embedding.note
             ),
             model = model,
-            topK = DEFAULT_TOP_K,
+            topK = RunSettings.DEFAULT.baselineTopK,
             maxTopK = MAX_TOP_K,
+            retrievalTopK = RunSettings.DEFAULT.retrievalTopK,
+            finalTopK = RunSettings.DEFAULT.finalTopK,
+            threshold = RunSettings.DEFAULT.threshold,
+            rewrite = RunSettings.DEFAULT.rewrite,
+            rerank = RunSettings.DEFAULT.rerank,
             keyNote = when {
                 current == null -> Corpus.MISSING_MESSAGE
                 apiKey == null -> NO_KEY_MESSAGE
@@ -175,15 +301,23 @@ class RagSession(
             error = error,
             results = results.map { (id, pair) ->
                 val control = Controls.byId(id)
+                // Трейс и сверка этапов есть только у улучшенного режима: у базового поиска дня 22
+                // этапов не было, и пустой трейс страница читает как «этапов нет», а не «потерялись».
+                val trace = pair.improved?.answer?.retrieval?.trace
                 ResultDto(
                     id = id,
                     question = control?.question.orEmpty(),
                     absent = control?.absent ?: false,
-                    without = pair.without?.toDto(),
-                    with = pair.with?.toDto()
+                    without = pair.without?.toDto("without", "без базы"),
+                    baseline = pair.baseline?.toDto("baseline", "базовый RAG"),
+                    improved = pair.improved?.toDto("improved", "улучшенный RAG"),
+                    trace = trace?.toDto(),
+                    stageCheck = if (control == null) null else Stages.evaluate(control, trace)?.toDto()
                 )
             },
             summary = summary,
+            stages = stageSummary,
+            config = stageConfig?.toDto(),
             reports = reports,
             elapsedMs = elapsedMs
         )
@@ -224,16 +358,15 @@ class RagSession(
      * Запускает прогон выбранных вопросов.
      *
      * Вопросы приходят номерами, а не текстом: набор — условие сравнения, и его не редактируют
-     * со страницы. Top-K здесь же, потому что это параметр прогона, а не настройка интерфейса:
-     * он попадает в отчёт, и числа без него не воспроизводятся.
+     * со страницы. Настройки этапов приходят [RunSettings] и проверяются здесь до запуска: они
+     * попадают в отчёт, и числа без них не воспроизводятся, а неизвестный вариант этапа должен
+     * отвергнуть запуск, а не упасть в фоне посреди прогона.
      */
-    fun start(ids: List<String>, topK: Int): StartOutcome {
+    fun start(ids: List<String>, settings: RunSettings): StartOutcome {
         val current = base ?: return StartOutcome.Rejected(Corpus.MISSING_MESSAGE)
         if (apiKey == null) return StartOutcome.Rejected(NO_KEY_MESSAGE)
         if (ids.isEmpty()) return StartOutcome.Rejected(NO_QUESTIONS_MESSAGE)
-        if (topK < 1 || topK > MAX_TOP_K) {
-            return StartOutcome.Rejected("topK должен быть от 1 до $MAX_TOP_K, получено $topK")
-        }
+        settings.validate()?.let { return StartOutcome.Rejected(it) }
         val unknown = ids.filter { Controls.byId(it) == null }
         if (unknown.isNotEmpty()) {
             return StartOutcome.Rejected("В наборе нет вопросов: ${unknown.joinToString(", ")}")
@@ -250,50 +383,73 @@ class RagSession(
             total = ids.size
             error = null
             elapsedMs = 0L
-            this.topK = topK
         }
-        scope.launch { runJob(ids, current, topK) }
+        scope.launch { runJob(ids, current, settings) }
         return StartOutcome.Accepted
     }
 
     /**
      * Прогон: индекс, вопросы по очереди, отчёты.
      *
-     * Вопрос прогоняется сначала без базы, потом с ней — один и тот же порядок для всех вопросов.
-     * Разный порядок для разных вопросов сделал бы числа несравнимыми между собой: два режима
-     * должны отличаться только тем, что один видит найденные фрагменты, а другой нет.
+     * Внутри вопроса режимы идут в фиксированном порядке — без базы, базовый, улучшенный, — и он
+     * одинаков для всех вопросов: обращения к модели идут по очереди, и разный порядок для разных
+     * вопросов сделал бы числа несравнимыми между собой.
      *
-     * Результат первого режима показывается сразу, не дожидаясь второго: обращение к модели идёт
+     * Результат режима показывается сразу, не дожидаясь следующего: обращение к модели идёт
      * секундами, и человеку видно, где прогон находится.
+     *
+     * Два поиска над одним индексом: базовому режиму нужны [RunSettings.baselineTopK] ближайших
+     * чанков, конвейеру — [RunSettings.retrievalTopK] кандидатов. Индекс читается дважды, но
+     * остаётся одним файлом: сравнение режимов не зависит от того, какой из них собрал хранилище.
      */
-    private suspend fun runJob(ids: List<String>, current: DayBase, topK: Int) {
+    private suspend fun runJob(ids: List<String>, current: DayBase, settings: RunSettings) {
         val started = System.nanoTime()
         try {
             val prepared = prepareIndex(current)
-            val agent = RagAgent(llm(requireNotNull(apiKey)), prepared.retriever(topK), model)
+            val llm = llm(requireNotNull(apiKey))
+            val rewriter = settings.rewriterOf(llm, model)
+            val reranker = settings.rerankerOf(llm, model)
+            // Имена реализаций попадают в отчёт: по ним видно, какой именно этап работал в этом прогоне.
+            synchronized(lock) {
+                stageConfig = StageConfig(
+                    baselineTopK = settings.baselineTopK,
+                    retrievalTopK = settings.retrievalTopK,
+                    finalTopK = settings.finalTopK,
+                    threshold = settings.threshold,
+                    rewrite = rewriter?.name,
+                    rerank = reranker?.name
+                )
+            }
+            val baseAgent = RagAgent(llm, prepared.retriever(settings.baselineTopK), model)
+            val pipeline = RagPipeline(
+                finder = prepared.retriever(settings.retrievalTopK),
+                rewriter = rewriter,
+                filter = SimilarityFilter(settings.threshold),
+                reranker = reranker,
+                finalTopK = settings.finalTopK
+            )
+            val improvedAgent = RagAgent(llm, pipeline, model)
             for (id in ids) {
                 val control = requireNotNull(Controls.byId(id))
                 synchronized(lock) {
                     stage = id
                     stageTitle = control.question
                 }
-                val without = ask(agent, control, Mode.WITHOUT_RAG)
-                record(id, without, null)
-                val with = ask(agent, control, Mode.WITH_RAG)
-                val pair = record(id, without, with)
-                if (pair.without?.failed == false && pair.with?.failed == false) {
-                    completed += Comparison(
+                val without = ask(baseAgent, control, Mode.WITHOUT_RAG)
+                record(id, without = without)
+                val baseline = ask(baseAgent, control, Mode.WITH_RAG)
+                record(id, baseline = baseline)
+                val improved = ask(improvedAgent, control, Mode.WITH_RAG)
+                val pair = record(id, improved = improved)
+                if (pair.without?.failed == false &&
+                    pair.baseline?.failed == false &&
+                    pair.improved?.failed == false
+                ) {
+                    completed += Trial(
                         control = control,
-                        withRag = Run(
-                            control,
-                            requireNotNull(pair.with.answer),
-                            requireNotNull(pair.with.check)
-                        ),
-                        withoutRag = Run(
-                            control,
-                            requireNotNull(pair.without.answer),
-                            requireNotNull(pair.without.check)
-                        )
+                        noBase = run(pair.without),
+                        baseline = run(pair.baseline),
+                        improved = run(pair.improved)
                     )
                     publish()
                 }
@@ -330,15 +486,27 @@ class RagSession(
         ModeResult(control, mode, answer = null, check = null, error = message(cause))
     }
 
+    /** Прогон режима в том виде, в каком его принимает [Trial]: без ответа и сверки Trial не собрать. */
+    private fun run(result: ModeResult): Run =
+        Run(result.control, requireNotNull(result.answer), requireNotNull(result.check))
+
     /** Записывает результат режима и отдаёт пару целиком: по ней видно, чего ещё не было. */
-    private fun record(id: String, without: ModeResult, with: ModeResult?): ResultPair =
-        synchronized(lock) {
-            val previous = results[id] ?: ResultPair()
-            val pair = previous.copy(without = without, with = with ?: previous.with)
-            results[id] = pair
-            if (with != null) done++
-            pair
-        }
+    private fun record(
+        id: String,
+        without: ModeResult? = null,
+        baseline: ModeResult? = null,
+        improved: ModeResult? = null
+    ): ResultPair = synchronized(lock) {
+        val previous = results[id] ?: ResultPair()
+        val pair = ResultPair(
+            without = without ?: previous.without,
+            baseline = baseline ?: previous.baseline,
+            improved = improved ?: previous.improved
+        )
+        results[id] = pair
+        if (improved != null) done++
+        pair
+    }
 
     /**
      * Индекс для прогона: готовый берётся как есть, отсутствующий собирается.
@@ -385,18 +553,25 @@ class RagSession(
 
     /** Считает метрики и пишет отчёты: файл всегда описывает прогон целиком, а не один вопрос. */
     private fun publish() {
-        val comparisons = synchronized(lock) { completed.toList() }
-        if (comparisons.isEmpty()) return
-        val report = Report(header())
+        val trials = synchronized(lock) { completed.toList() }
+        if (trials.isEmpty()) return
+        val header = header()
+        val config = synchronized(lock) { requireNotNull(stageConfig) }
+        val stages = Stages.summary(trials)
+        // Отчёт дня 23 ведёт [StageReport]: в нём сравнение трёх режимов, разбор этапов и лог запросов.
+        val report = StageReport(header, config, Report(header))
         val comparisonFile = workDir.resolve(REPORT_FILE)
         val logFile = workDir.resolve(LOG_FILE)
-        Files.writeString(comparisonFile, report.markdown(comparisons))
-        Files.writeString(logFile, report.log(comparisons))
-        val summary = report.summary(comparisons)
+        Files.writeString(comparisonFile, report.markdown(trials, stages))
+        Files.writeString(logFile, report.log(trials))
+        // Метрики дня 22 считает тот же [Report.summary], что и в дне 22: второй набор формул
+        // разошёлся бы с первым, и сверять отчёты стало бы нечем.
+        val day22 = Report(header).summary(trials.map { it.day22 })
         synchronized(lock) {
-            this.summary = summary
+            summary = day22
+            stageSummary = stages.toDto()
             reports = listOf(
-                ReportDto("Сравнение ответов", comparisonFile.toAbsolutePath().toString()),
+                ReportDto("Сравнение и этапы", comparisonFile.toAbsolutePath().toString()),
                 ReportDto("Лог запросов", logFile.toAbsolutePath().toString())
             )
         }
@@ -409,7 +584,8 @@ class RagSession(
             model = model,
             embedding = embedding.name,
             strategy = strategy,
-            topK = topK,
+            // Top-K дня 22 берётся из настроек прогона: без него Source Hit Rate не воспроизводится.
+            topK = requireNotNull(stageConfig).baselineTopK,
             baseChars = current.chars,
             baseTokens = current.tokens,
             basePages = current.pages.size,

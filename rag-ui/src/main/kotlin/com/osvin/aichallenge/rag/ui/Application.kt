@@ -31,7 +31,7 @@ import kotlinx.serialization.json.Json
 data class ErrorDto(val message: String)
 
 /**
- * Страница дня 22: два агента на десяти контрольных вопросах.
+ * Страница дня 23: три режима ответа и разбор этапов конвейера на десяти контрольных вопросах.
  *
  * Сервер локальный и слушает только `127.0.0.1`: это окно в прогон на этой машине, а не сервис,
  * которому нужен внешний доступ. Страница отдаётся статикой из ресурсов (`web/`), данные — по
@@ -62,7 +62,7 @@ fun main() {
             "Ключ DEEPSEEK_API_KEY найден: страница отвечает живой моделью."
         }
     )
-    println("Страница дня 22: http://127.0.0.1:$port (рабочий каталог: ${workDir.toAbsolutePath()})")
+    println("Страница дня 23: http://127.0.0.1:$port (рабочий каталог: ${workDir.toAbsolutePath()})")
     embeddedServer(Netty, port = port, host = "127.0.0.1") {
         module(workDir, embedding, apiKey)
     }.start(wait = true)
@@ -116,10 +116,13 @@ fun Application.module(
         get("/api/state") { call.respond(session.state()) }
 
         /**
-         * Запуск прогона: `ids` — номера вопросов через запятую (пусто — все десять), `topK`.
+         * Запуск прогона: `ids` — номера вопросов через запятую (пусто — все десять) и настройки
+         * этапов (`topK`, `retrievalTopK`, `finalTopK`, `threshold`, `rewrite`, `rerank`).
          *
-         * Отвергнутый запуск ничего не меняет: состояние остаётся тем же, а страница показывает
-         * причину рядом с кнопкой.
+         * Настройки разбираются здесь, а проверяются в [RagSession.start]: страница — второй вход
+         * в тот же прогон, и неизвестный вариант этапа должен отвергнуть запуск с причиной там же,
+         * где и в консоли. Отвергнутый запуск ничего не меняет: состояние остаётся тем же, а страница
+         * показывает причину рядом с кнопкой.
          */
         post("/api/run") {
             val ids = call.request.queryParameters["ids"]
@@ -127,9 +130,18 @@ fun Application.module(
                 ?.map { it.trim() }
                 ?.filter { it.isNotEmpty() }
                 ?: emptyList()
-            val topK = call.request.queryParameters["topK"]?.toIntOrNull() ?: RagSession.DEFAULT_TOP_K
+            val defaults = RunSettings.DEFAULT
+            val parameters = call.request.queryParameters
+            val settings = RunSettings(
+                baselineTopK = parameters["topK"]?.toIntOrNull() ?: defaults.baselineTopK,
+                retrievalTopK = parameters["retrievalTopK"]?.toIntOrNull() ?: defaults.retrievalTopK,
+                finalTopK = parameters["finalTopK"]?.toIntOrNull() ?: defaults.finalTopK,
+                threshold = parameters["threshold"]?.replace(',', '.')?.toDoubleOrNull() ?: defaults.threshold,
+                rewrite = parameters["rewrite"]?.trim()?.lowercase() ?: defaults.rewrite,
+                rerank = parameters["rerank"]?.trim()?.lowercase() ?: defaults.rerank
+            )
             val selected = if (ids.isEmpty()) Controls.questions.map { it.id } else ids
-            when (val outcome = session.start(selected, topK)) {
+            when (val outcome = session.start(selected, settings)) {
                 is StartOutcome.Accepted -> call.respond(session.state())
                 is StartOutcome.Rejected ->
                     call.respond(HttpStatusCode.BadRequest, ErrorDto(outcome.message))

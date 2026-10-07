@@ -20,12 +20,17 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * Тесты страницы дня 22: прогон на настоящем индексе, но с подставной моделью.
+ * Тесты страницы дня 23: прогон на настоящем индексе, но с подставной моделью.
  *
- * Проверяется то, чего не видно в отчёте: что страница показывает оба конвейера и показывает их
- * верно — с найденными фрагментами и вектором вопроса у агента с базой и без поиска у агента
- * без базы. Ошибка здесь не сломала бы ни один прогон: она нарисовала бы путь запроса, которого
- * не было, и числа сравнения читались бы по чужому пути.
+ * Проверяется то, чего не видно в отчёте: что страница показывает три конвейера и показывает их
+ * верно — базовый берёт Top-K дня 22, улучшенный уходит в контекст с финальным Top-K и оставляет
+ * трейс этапов, а режим без базы не ищет вовсе. Ошибка здесь не сломала бы ни один прогон: она
+ * нарисовала бы путь запроса, которого не было, и числа сравнения читались бы по чужому пути.
+ *
+ * Настройки прогона задаются явно, а не берутся по умолчанию: числа трейса тогда известны заранее,
+ * и видно, что поля настроек действительно управляют конвейером. Переписывание выключено, а второй
+ * этап — эвристический: так подставная модель отвечает только на вопросы, и прогон остаётся
+ * детерминированным.
  *
  * Индекс строится хешированием (сеть не нужна), корпус — тот же PDF дня, что у остальных прогонов:
  * без него тест не имеет предмета и пропускается, как и в `:rag`.
@@ -34,6 +39,16 @@ class RagSessionTest {
 
     /** Ответ, в котором есть все факты первого вопроса набора. */
     private val answer = "Остался пятилетний сын; жена скончалась в Париже."
+
+    /** Настройки прогона теста: шесть кандидатов поиска, три — в контекст, без переписывания. */
+    private val settings = RunSettings(
+        baselineTopK = 3,
+        retrievalTopK = 6,
+        finalTopK = 3,
+        threshold = 0.0,
+        rewrite = "none",
+        rerank = "heuristic"
+    )
 
     /** Подставная модель: записывает запросы и отвечает заготовкой — сеть в тестах не нужна. */
     private class FakeLlm(private val text: String, private val pauseMillis: Long = 0) : LlmClient {
@@ -80,14 +95,14 @@ class RagSessionTest {
     }
 
     @Test
-    fun `прогон вопроса заполняет оба конвейера и пишет отчёты`() = runBlocking {
+    fun `прогон вопроса заполняет три конвейера и пишет отчёты`() = runBlocking {
         val dir = Files.createTempDirectory("rag-ui")
         val scope = CoroutineScope(Dispatchers.Default)
         val session = session(dir, scope, FakeLlm(answer))
         // Корпус дня берётся из встроенного PDF: если его нет, проверять нечего.
         if (session.setup().base.chars == 0) return@runBlocking
 
-        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), 3))
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), settings))
         val state = await(session)
 
         assertEquals(StateDto.DONE, state.state)
@@ -95,25 +110,50 @@ class RagSessionTest {
         val result = state.results.single()
         assertEquals("q01", result.id)
 
-        // Агент с базой: фрагменты, вектор вопроса и время поиска — то, из чего рисуется конвейер.
-        val with = requireNotNull(result.with)
-        assertEquals(ModeDto.DONE, with.state)
-        assertEquals(3, with.sources.size, "в запрос уходит Top-K фрагментов")
-        assertTrue(requireNotNull(with.queryDimension) > 0, "вектор вопроса виден странице")
-        assertTrue(with.retrievalMillis >= 0)
-        assertEquals(2, with.messages.size, "системное правило и вопрос с контекстом")
+        // Настройки прогона доехали до состояния: ими объясняются числа и трейс.
+        val config = requireNotNull(state.config)
+        assertEquals(3, config.baselineTopK)
+        assertEquals(6, config.retrievalTopK)
+        assertEquals(3, config.finalTopK)
+        assertEquals(null, config.rewrite, "переписывание выключено настройкой")
+        assertEquals("эвристика (слова, имена, близость)", config.rerank)
+
+        // Базовый режим: Top-K дня 22, вектор вопроса и время поиска — то, из чего рисуется конвейер.
+        val baseline = requireNotNull(result.baseline)
+        assertEquals(ModeDto.DONE, baseline.state)
+        assertEquals(3, baseline.sources.size, "базовый режим берёт Top-K дня 22")
+        assertTrue(requireNotNull(baseline.queryDimension) > 0, "вектор вопроса виден странице")
+        assertTrue(baseline.retrievalMillis >= 0)
+        assertEquals(2, baseline.messages.size, "системное правило и вопрос с контекстом")
         assertTrue(
-            with.messages[0].content.contains("Опирайся только на фрагменты"),
+            baseline.messages[0].content.contains("Опирайся только на фрагменты"),
             "в режиме с базой системное правило требует опираться на фрагменты"
         )
-        val first = requireNotNull(with.sources.firstOrNull())
+        val baselineFirst = requireNotNull(baseline.sources.firstOrNull())
         assertTrue(
-            with.messages[1].content.contains(first.text.take(40)),
+            baseline.messages[1].content.contains(baselineFirst.text.take(40)),
             "в запросе есть найденный текст, а не только вопрос"
         )
-        assertTrue(with.messages[1].content.contains("[${first.rank}]"), "фрагмент подписан своим номером")
+        assertTrue(baseline.messages[1].content.contains("[${baselineFirst.rank}]"), "фрагмент подписан своим номером")
 
-        // Агент без базы: ни фрагментов, ни вектора, ни времени поиска.
+        // Улучшенный режим: тот же вопрос, но в контекст уходит финальный Top-K, а не выдача поиска.
+        val improved = requireNotNull(result.improved)
+        assertEquals(ModeDto.DONE, improved.state)
+        assertEquals(3, improved.sources.size, "в контекст уходит финальный Top-K")
+
+        // Трейс этапов: число кандидатов задано настройкой, а не размером контекста.
+        val trace = requireNotNull(result.trace)
+        assertEquals(result.question, trace.original)
+        assertEquals(null, trace.rewritten, "переписывания в этом прогоне нет")
+        assertEquals(6, trace.candidates.size, "retrievalTopK управляет числом кандидатов")
+        assertEquals(0.0, trace.threshold)
+        assertEquals(3, trace.passed, "в контекст проходят ровно finalTopK фрагментов")
+        assertTrue(trace.accepted >= trace.passed)
+        val check = requireNotNull(result.stageCheck)
+        assertEquals(6, check.candidates)
+        assertEquals(trace.accepted, check.accepted)
+
+        // Режим без базы: ни фрагментов, ни вектора, ни времени поиска.
         val without = requireNotNull(result.without)
         assertEquals(ModeDto.DONE, without.state)
         assertTrue(without.sources.isEmpty(), "режим без базы не получает фрагментов")
@@ -123,11 +163,11 @@ class RagSessionTest {
 
         // Попадание источника у вопроса с ответом в базе всегда «да» или «нет», а не прочерк:
         // прочерк страница показывает только там, где ответа в базе нет вовсе.
-        assertTrue(with.hit != null, "у вопроса с ответом в базе попадание источника определено")
+        assertTrue(baseline.hit != null, "у вопроса с ответом в базе попадание источника определено")
 
-        // Метрики и отчёты: числа считает Report, страница их только показывает. Модель отвечает
-        // заготовкой, поэтому оценка известна заранее — а попадёт ли нужный текст в выдачу, зависит
-        // от поиска, и этого тест не проверяет: проверка поиска живёт в наборе (:rag).
+        // Метрики дня 22 считает Report, метрики этапов — Stages: страница их только показывает.
+        // Модель отвечает заготовкой, поэтому оценка известна заранее — а попадёт ли нужный текст
+        // в выдачу, зависит от поиска, и этого тест не проверяет: проверка поиска живёт в наборе (:rag).
         val summary = requireNotNull(state.summary)
         assertEquals(1, summary.questions)
         assertEquals(1, summary.scored)
@@ -136,6 +176,10 @@ class RagSessionTest {
         assertEquals(2, summary.factsWithout)
         assertEquals(2.0, summary.averageWith)
         assertEquals(2.0, summary.averageWithout)
+        val stages = requireNotNull(state.stages)
+        assertEquals(1, stages.questions)
+        assertEquals(1, stages.scored)
+        assertEquals(2.0, stages.improvedScore)
         assertTrue(Files.exists(dir.resolve(RagSession.REPORT_FILE)), "сравнение записано на диск")
         assertTrue(Files.exists(dir.resolve(RagSession.LOG_FILE)), "лог запросов записан на диск")
         assertEquals(2, state.reports.size)
@@ -149,8 +193,8 @@ class RagSessionTest {
         val session = session(dir, scope, FakeLlm(answer, pauseMillis = 200))
         if (session.setup().base.chars == 0) return@runBlocking
 
-        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), 3))
-        val second = session.start(listOf("q02"), 3)
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), settings))
+        val second = session.start(listOf("q02"), settings)
 
         assertTrue(second is StartOutcome.Rejected, "два прогона писали бы одни файлы и путали результаты")
         assertEquals(StateDto.DONE, await(session).state)

@@ -103,9 +103,26 @@ class RagAgent(
             // а не только пустым списком фрагментов.
             Mode.WITHOUT_RAG -> Retrieval(emptyList(), emptyList(), 0)
         }
+        return askWith(question, mode, retrieval)
+    }
 
+    /**
+     * Ответ по уже найденным фрагментам: тот же запрос к модели, но без поиска.
+     *
+     * Нужен эксперименту по порогам (задание §18): контекст там уже посчитан фильтром и вторым
+     * этапом, и повторный поиск дал бы другую выдачу — эксперимент мерил бы не порог, а разницу
+     * выдач. Отдельный метод, а не флаг у [ask], потому что поиск в нём не «выключен»: его просто
+     * не должно быть, и это видно по сигнатуре — фрагменты приходят снаружи.
+     */
+    suspend fun askWith(question: String, mode: Mode, retrieval: Retrieval): Answer {
         val messages = when (mode) {
-            Mode.WITH_RAG -> Prompt.withContext(question, retrieval.sources)
+            // Пустая выдача — не «контекст без фрагментов», а состояние, о котором модель обязана
+            // знать: пустой блок фрагментов читается как «фрагменты были, но не показались», и модель
+            // отвечает по памяти — ровно то, чего задание просит не делать.
+            Mode.WITH_RAG ->
+                if (retrieval.sources.isEmpty()) Prompt.withEmptyContext(question)
+                else Prompt.withContext(question, retrieval.sources)
+
             Mode.WITHOUT_RAG -> Prompt.withoutContext(question)
         }
 

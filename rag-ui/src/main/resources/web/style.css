@@ -118,6 +118,15 @@ input[type="number"] {
     width: 4.5rem;
 }
 
+select {
+    background: #12141a;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    font: inherit;
+}
+
 button {
     background: var(--accent-strong);
     color: #fff;
@@ -308,7 +317,7 @@ table.questions tr.question-row {
 
 .agents {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
     gap: 1rem;
 }
 
@@ -317,10 +326,17 @@ table.questions tr.question-row {
     border-radius: 8px;
     padding: 0.85rem 1rem;
     background: #191c23;
+    /* Колонка не расширяется под содержимое: иначе таблица кандидатов с длинными
+       идентификаторами чанков растягивает всю страницу и вылезает за экран. */
+    min-width: 0;
 }
 
-.agent.with {
+.agent.baseline {
     border-color: #2f4a78;
+}
+
+.agent.improved {
+    border-color: #3f6b45;
 }
 
 .agent-head {
@@ -390,8 +406,26 @@ details.fold summary {
 
 table.sources {
     width: 100%;
+    max-width: 100%;
+    /* Таблицы этапов стоят в узкой колонке из трёх панелей рядом, и столбцов у таблицы кандидатов
+       семь: без фиксированной раскладки таблица шире колонки растягивала всю страницу, и её
+       приходилось прокручивать вбок целиком. Фиксированная раскладка делит ширину колонки между
+       столбцами, а переносы (ниже) укладывают содержимое в них. */
+    table-layout: fixed;
     border-collapse: collapse;
     font-size: 0.85rem;
+}
+
+/* Короткие столбцы — счётчики и оценки: им хватает узкой доли, остальное достаётся фрагменту. */
+table.sources th:first-child,
+table.sources td:first-child {
+    width: 3.2rem;
+}
+
+/* Второй столбец — фрагмент или чанк с местом в книге: самая длинная подпись, ему и ширина. */
+table.sources th:nth-child(2),
+table.sources td:nth-child(2) {
+    width: 34%;
 }
 
 table.sources th {
@@ -406,6 +440,9 @@ table.sources td {
     padding: 0.3rem 0.6rem 0.3rem 0;
     border-bottom: 1px solid #232730;
     vertical-align: top;
+    /* Идентификатор фрагмента — одно длинное слово без пробелов; перенос внутри него
+       позволяет таблице ужаться до ширины колонки вместо растягивания страницы. */
+    overflow-wrap: anywhere;
 }
 
 .similarity {
@@ -430,6 +467,44 @@ table.sources td {
     color: var(--muted);
     font-size: 0.82rem;
     margin-top: 0.3rem;
+}
+
+.loss {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+.loss-good {
+    background: #1d3327;
+    color: var(--good);
+}
+
+.loss-warn {
+    background: #3a331f;
+    color: var(--warn);
+}
+
+.loss-bad {
+    background: #3a2320;
+    color: var(--bad);
+}
+
+.moved {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.rank-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.88rem;
+}
+
+.rank-list li {
+    margin-bottom: 0.2rem;
 }
 
 .metrics {
