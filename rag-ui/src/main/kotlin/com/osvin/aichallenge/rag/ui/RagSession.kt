@@ -429,6 +429,11 @@ class RagSession(
      * со страницы. Настройки этапов приходят [RunSettings] и проверяются здесь до запуска: они
      * попадают в отчёт, и числа без них не воспроизводятся, а неизвестный вариант этапа должен
      * отвергнуть запуск, а не упасть в фоне посреди прогона.
+     *
+     * Запущенный прогон не отвергает второй, а уступает ему место: кнопка «Остановить» уже есть,
+     * и заставлять человека останавливать прошлый набор руками значило бы требовать двух нажатий
+     * там, где одно очевидно. Проверки при этом идут до вытеснения: отвергнутый запуск не должен
+     * стирать данные того прогона, который продолжает идти.
      */
     fun start(ids: List<String>, settings: RunSettings): StartOutcome {
         val current = base ?: return StartOutcome.Rejected(Corpus.MISSING_MESSAGE)
@@ -584,38 +589,53 @@ class RagSession(
                 record(token, id, baseline = baseline)
                 val day24 = askDay24(id, control, improvedAgent, groundedAgent, pipeline, settings.threshold)
                 val pair = record(token, id, improved = day24.improved, grounded = day24.grounded)
-                // Список под тем же замком, что и его чтение в [publish]: страница опрашивает
-                // состояние параллельно прогону, и незакрытая запись видна ей как обрывок списка.
-                day24.trial?.let { trial -> synchronized(lock) { groundedTrials += trial } }
-                if (pair.without?.failed == false &&
+                val trial = day24.trial
+                val passed = pair.without?.failed == false &&
                     pair.baseline?.failed == false &&
                     pair.improved?.failed == false
-                ) {
-                    completed += Trial(
-                        control = control,
-                        noBase = run(pair.without),
-                        baseline = run(pair.baseline),
-                        improved = run(pair.improved)
-                    )
-                    publish()
-                } else if (day24.trial != null) {
-                    // День 24 может состояться и без трёх режимов дня 23: у него своя сверка,
-                    // и при отказе предыдущего режима писать всё равно нужно — его файлы.
-                    publish()
+                synchronized(lock) {
+                    // Номер проверяется у самой записи, а не только у цикла: между проверкой
+                    // и записью прогон мог быть вытеснен, и тогда его Trial попал бы в чужой отчёт.
+                    alive(token)
+                    // Список под тем же замком, что и его чтение в [publish]: страница опрашивает
+                    // состояние параллельно прогону, и незакрытая запись видна ей как обрывок списка.
+                    trial?.let { groundedTrials += it }
+                    if (passed) {
+                        completed += Trial(
+                            control = control,
+                            noBase = run(pair.without),
+                            baseline = run(pair.baseline),
+                            improved = run(pair.improved)
+                        )
+                    }
                 }
+                // День 24 может состояться и без трёх режимов дня 23: у него своя сверка,
+                // и при отказе предыдущего режима писать всё равно нужно — его файлы.
+                if (passed || trial != null) publish(token)
             }
-            synchronized(lock) { done = ids.size }
+            synchronized(lock) { if (token == runId) done = ids.size }
+        } catch (cause: CancellationException) {
+            // Отмена — не отказ прогона: состояние уже переведено тем, кто отменил работу
+            // (остановка — в [stop], вытеснение — в [start]).
+            throw cause
         } catch (cause: Exception) {
             synchronized(lock) {
-                state = StateDto.FAILED
-                error = message(cause)
+                if (token == runId) {
+                    state = StateDto.FAILED
+                    error = message(cause)
+                }
             }
         } finally {
             synchronized(lock) {
-                elapsedMs = (System.nanoTime() - started) / 1_000_000
-                stage = null
-                stageTitle = null
-                if (state != StateDto.FAILED) state = StateDto.DONE
+                // Итоги подводит только текущая работа: вытесненная ничего не закрывает — её данные
+                // уже стёрты, а состояние принадлежит тому прогону, который её заменил.
+                if (token == runId) {
+                    elapsedMs = (System.nanoTime() - started) / 1_000_000
+                    stage = null
+                    stageTitle = null
+                    job = null
+                    if (state != StateDto.FAILED) state = StateDto.DONE
+                }
             }
         }
     }
@@ -631,6 +651,9 @@ class RagSession(
             error = null
         )
     } catch (cause: Exception) {
+        // Отмену пробрасываем: отказ режима — это отказ модели или поиска, а отмена приходит снаружи,
+        // и, проглотив её здесь, страница продолжала бы прогон после нажатия «Остановить».
+        if (cause is CancellationException) throw cause
         // Отказ режима — не отказ прогона: второй режим всё ещё может ответить, и страница
         // показывает ошибку в том столбце, где она случилась.
         ModeResult(control, mode, answer = null, check = null, error = message(cause))
@@ -667,6 +690,8 @@ class RagSession(
         val found = try {
             pipeline.find(control.question)
         } catch (cause: Exception) {
+            // Отмена — не отказ поиска (см. [ask]): её пробрасываем, чтобы прогон действительно встал.
+            if (cause is CancellationException) throw cause
             val error = "Поиск не выполнился: ${message(cause)}"
             return Day24(
                 improved = ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = error),
@@ -684,11 +709,13 @@ class RagSession(
                 error = null
             )
         } catch (cause: Exception) {
+            if (cause is CancellationException) throw cause
             ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = message(cause))
         }
         val groundedAnswer = try {
             groundedAgent.answer(control.question, found)
         } catch (cause: Exception) {
+            if (cause is CancellationException) throw cause
             return Day24(
                 improved = improved,
                 grounded = failedGrounded(id, control, threshold, "Grounded-ответ не получен: ${message(cause)}"),
@@ -733,12 +760,14 @@ class RagSession(
 
     /** Записывает результат режима и отдаёт пару целиком: по ней видно, чего ещё не было. */
     private fun record(
+        token: Long,
         id: String,
         without: ModeResult? = null,
         baseline: ModeResult? = null,
         improved: ModeResult? = null,
         grounded: GroundedDto? = null
     ): ResultPair = synchronized(lock) {
+        alive(token)
         val previous = results[id] ?: ResultPair()
         val pair = ResultPair(
             without = without ?: previous.without,
@@ -757,7 +786,7 @@ class RagSession(
      * Проверка идёт на диске ([RagIndex.exists]), а не по состоянию страницы: файл мог появиться
      * или пропасть между запусками, и решение должно опираться на то, что есть сейчас.
      */
-    private suspend fun prepareIndex(current: DayBase): RagIndex {
+    private suspend fun prepareIndex(token: Long, current: DayBase): RagIndex {
         synchronized(lock) {
             if (index.exists) {
                 indexState = IndexDto.READY
@@ -766,11 +795,23 @@ class RagSession(
                 indexMillis = 0L
             }
         }
-        return if (index.exists) index else build(current)
+        return if (index.exists) index else build(token, current)
     }
 
-    /** Сборка индекса: прогресс уходит в состояние, чтобы страница показывала ход работы. */
-    private suspend fun build(current: DayBase): RagIndex {
+    /**
+     * Сборка индекса: прогресс уходит в состояние, чтобы страница показывала ход работы.
+     *
+     * Номер проверяется и в обратном вызове, а не только в цикле вопросов: хеширование считает векторы
+     * без обращений к сети, и отмена корутины не нашла бы там точки приостановки — нажатие
+     * «Остановить» не подействовало бы до конца сборки. Заодно это отсекает прогресс вытесненной
+     * сборки: её числа не должны появляться в состоянии нового прогона.
+     *
+     * Прерванная сборка удаляет свой файл: хранилище пишет индекс после каждого чанка, и без
+     * этого недописанный файл выглядел бы для следующего прогона готовым индексом — ответы считались
+     * бы по обрывку базы, и отчёт не сказал бы об этом ни слова. Неполный индекс хуже отсутствующего:
+     * отсутствующий виден в состоянии и собирается заново.
+     */
+    private suspend fun build(token: Long, current: DayBase): RagIndex {
         synchronized(lock) {
             indexState = IndexDto.BUILDING
             indexChunks = 0
@@ -778,20 +819,36 @@ class RagSession(
             indexReused = false
         }
         val started = System.nanoTime()
-        val built = index.build(current) { ready, all ->
-            synchronized(lock) {
-                indexChunks = ready
-                indexTotal = all
-                indexMillis = (System.nanoTime() - started) / 1_000_000
+        try {
+            val built = index.build(current) { ready, all ->
+                synchronized(lock) {
+                    alive(token)
+                    indexChunks = ready
+                    indexTotal = all
+                    indexMillis = (System.nanoTime() - started) / 1_000_000
+                }
             }
+            synchronized(lock) {
+                indexState = IndexDto.READY
+                indexChunks = built.chunks.size
+                indexTotal = built.chunks.size
+                indexMillis = built.elapsedMillis
+            }
+            return index
+        } catch (cause: CancellationException) {
+            synchronized(lock) {
+                // Файл трогаем только у текущей работы: у вытесненной сборки на диске уже пишет
+                // следующая, и удаление отняло бы у неё готовый индекс.
+                if (token == runId) {
+                    runCatching { Files.deleteIfExists(index.file) }
+                    indexState = IndexDto.IDLE
+                    indexChunks = 0
+                    indexTotal = 0
+                    indexReused = false
+                }
+            }
+            throw cause
         }
-        synchronized(lock) {
-            indexState = IndexDto.READY
-            indexChunks = built.chunks.size
-            indexTotal = built.chunks.size
-            indexMillis = built.elapsedMillis
-        }
-        return index
     }
 
     /**
@@ -807,11 +864,19 @@ class RagSession(
      * [groundedTrials]. Смешать их нельзя: у дня 24 вопрос без ответа предыдущего режима выпадает
      * из сверки, а у дня 23 он же остаётся полноправным вопросом сравнения.
      */
-    private fun publish() {
-        val trials = synchronized(lock) { completed.toList() }
-        val day24 = synchronized(lock) { groundedTrials.toList() }
+    private fun publish(token: Long) {
+        // Прогон, которого больше нет, файлов не пишет: он переписал бы отчёт нового прогона
+        // своим набором вопросов — и на диске оказался бы отчёт о прогоне, которого не было.
+        val trials = synchronized(lock) {
+            alive(token)
+            completed.toList()
+        }
+        val day24 = synchronized(lock) {
+            alive(token)
+            groundedTrials.toList()
+        }
         if (trials.isEmpty() && day24.isEmpty()) return
-        val header = header()
+        val header = header(token)
         val config = synchronized(lock) { requireNotNull(stageConfig) }
         val written = ArrayList<ReportDto>()
         var day22Summary: Summary? = null
@@ -849,8 +914,10 @@ class RagSession(
             written += ReportDto("Grounding: путь запроса", logFile.toAbsolutePath().toString())
         }
         // Поля состояния переписываются только тем, что посчитано сейчас: иначе отчёт об одном
-        // вопросе стирал бы сводку по всем уже прогнанным.
+        // вопросе стирал бы сводку по всем уже прогнанным. Номер проверяется и здесь: файлы пишутся
+        // секундами, за них прогон мог быть вытеснен, и его сводка не должна лечь поверх чужой.
         synchronized(lock) {
+            alive(token)
             if (day22Summary != null) summary = day22Summary
             if (stagesDto != null) stageSummary = stagesDto
             if (groundingDto != null) grounding = groundingDto
@@ -859,7 +926,8 @@ class RagSession(
     }
 
     /** Шапка отчёта: чем и на каких настройках получены числа. */
-    private fun header(): RunHeader = synchronized(lock) {
+    private fun header(token: Long): RunHeader = synchronized(lock) {
+        alive(token)
         val current = requireNotNull(base)
         RunHeader(
             model = model,
@@ -915,7 +983,18 @@ class RagSession(
         const val GROUNDED_REPORT_FILE = "report-day24.md"
         const val GROUNDED_LOG_FILE = "log-day24.md"
 
-        const val BUSY_MESSAGE = "Прогон уже идёт: дождитесь его конца"
+        /**
+         * Отказ пересборки при идущем прогоне: пересборку вытеснить прогоном можно, а наоборот — нет.
+         *
+         * Вытеснение здесь было бы тихим: прогон продолжил бы считать по базе, которой на диске уже
+         * нет, и его числа описывали бы индекс, по которому отвечали не все вопросы. Поэтому причина
+         * называется прямо, а решение остаётся за человеком: остановить прогон кнопкой и пересобрать.
+         */
+        const val RUNNING_MESSAGE =
+            "Прогон идёт: пересборка подменила бы индекс посреди прогона — сначала нажмите «Остановить»"
+
+        /** Отказ пересборки при идущей пересборке: второй сборки в одном слоте быть не может. */
+        const val BUILDING_MESSAGE = "Индекс уже собирается: дождитесь конца или остановите работу"
         const val NO_QUESTIONS_MESSAGE = "Не выбрано ни одного вопроса"
 
         const val NO_KEY_MESSAGE =

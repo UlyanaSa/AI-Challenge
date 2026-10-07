@@ -200,18 +200,67 @@ class RagSessionTest {
     }
 
     @Test
-    fun `второй прогон поверх идущего отвергается`() = runBlocking {
-        val dir = Files.createTempDirectory("rag-ui-busy")
+    fun `остановка прекращает прогон и оставляет посчитанное`() = runBlocking {
+        val dir = Files.createTempDirectory("rag-ui-stop")
         val scope = CoroutineScope(Dispatchers.Default)
         val session = session(dir, scope, FakeLlm(answer, pauseMillis = 200))
         if (session.setup().base.chars == 0) return@runBlocking
 
-        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), settings))
-        val second = session.start(listOf("q02"), settings)
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q01", "q02", "q03"), settings))
+        // Ждём первый записанный отчёт, а не состояние «идёт»: отчёт появляется вместе с первым
+        // посчитанным вопросом, и по нему видно, что остановка сохранила посчитанное, а не стёрла его.
+        withTimeout(120_000) { while (session.state().reports.isEmpty()) delay(20) }
+        assertTrue(session.stop(), "работа идёт — её можно остановить")
 
-        assertTrue(second is StartOutcome.Rejected, "два прогона писали бы одни файлы и путали результаты")
-        assertEquals(StateDto.DONE, await(session).state)
-        assertEquals(1, session.state().results.size, "второй запрос ничего не прогнал")
+        val stopped = session.state()
+        assertEquals(StateDto.STOPPED, stopped.state)
+        assertEquals(1, stopped.done, "посчитанный вопрос остаётся в состоянии")
+        assertTrue(stopped.done < stopped.total, "прогон не дошёл до конца набора")
+        assertEquals(listOf("q01"), stopped.results.map { it.id }, "в состоянии только посчитанный вопрос")
+        assertTrue(stopped.elapsedMs > 0, "видно, сколько прогон успел проработать")
+        assertTrue(stopped.reports.isNotEmpty(), "файлы посчитанного прогона остаются заявленными")
+        assertTrue(Files.exists(dir.resolve(RagSession.REPORT_FILE)), "отчёт по посчитанному остался на диске")
+
+        // Отменённый прогон не продолжается: без этого «остановлен» было бы только словом, а счёт
+        // шёл бы дальше — здесь на это хватило бы четвёртой части следующего вопроса.
+        delay(1_000)
+        assertEquals(1, session.state().done, "после остановки счёт не растёт")
+        assertEquals(StateDto.STOPPED, session.state().state)
+        assertTrue(!session.stop(), "останавливать больше нечего")
+        scope.cancel()
+    }
+
+    @Test
+    fun `новый прогон заменяет предыдущий и очищает его данные`() = runBlocking {
+        val dir = Files.createTempDirectory("rag-ui-replace")
+        val scope = CoroutineScope(Dispatchers.Default)
+        val session = session(dir, scope, FakeLlm(answer, pauseMillis = 200))
+        if (session.setup().base.chars == 0) return@runBlocking
+
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q01", "q02"), settings))
+        withTimeout(120_000) { while (session.state().reports.isEmpty()) delay(20) }
+        val first = session.state()
+        assertEquals(StateDto.RUNNING, first.state, "второй вопрос набора ещё считается")
+        assertEquals(listOf("q01"), first.results.map { it.id })
+        assertTrue(first.reports.isNotEmpty(), "отчёт первого прогона записан")
+
+        // Новый набор принимается, не дожидаясь конца предыдущего: он его вытесняет.
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q03"), settings))
+        val cleared = session.state()
+        assertEquals(StateDto.RUNNING, cleared.state)
+        assertTrue(cleared.results.isEmpty(), "данные вытесненного прогона не показываются рядом с новым")
+        assertTrue(cleared.reports.isEmpty(), "файлы вытесненного прогона больше не заявлены")
+        assertTrue(
+            cleared.summary == null && cleared.stages == null && cleared.grounding == null,
+            "метрики вытесненного прогона стёрты вместе с ответами"
+        )
+        assertEquals(1, cleared.total, "прогон описывает новый набор")
+        assertEquals(0, cleared.done)
+
+        val state = await(session)
+        assertEquals(StateDto.DONE, state.state)
+        assertEquals(listOf("q03"), state.results.map { it.id }, "остались только результаты нового прогона")
+        assertEquals(1, requireNotNull(state.summary).questions)
         scope.cancel()
     }
 }

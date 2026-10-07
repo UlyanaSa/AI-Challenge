@@ -56,8 +56,14 @@
                 </select>
             </label>
             <button id="run-all" type="button">Прогнать все десять</button>
+            <button id="stop" type="button" class="secondary">Остановить</button>
             <button id="rebuild" type="button" class="secondary">Пересобрать индекс</button>
         </div>
+        <p class="hint" id="run-hint">
+            Новый запуск заменяет идущий прогон и очищает результаты предыдущего: на странице всегда
+            один прогон — тот, что идёт или остановлен последним. «Остановить» прекращает работу,
+            оставляя на странице то, что успело посчитаться.
+        </p>
         <p class="status" id="state-status">Загрузка…</p>
         <div class="progress" id="progress-wrap" hidden>
             <div class="progress-bar" id="progress-bar"></div>

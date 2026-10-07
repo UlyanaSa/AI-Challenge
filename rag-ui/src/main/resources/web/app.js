@@ -746,13 +746,25 @@ function renderStatus() {
     );
     if (state.state === "running") {
         parts.push(`Прогон идёт: ${state.stageTitle ? esc(state.stageTitle) : "подготовка"} (${state.done} из ${state.total})`);
+    } else if (state.state === "stopped") {
+        // Данные остановленного прогона остаются на странице, поэтому в подписи есть числа:
+        // видно, сколько успело посчитаться, а не только «остановлен».
+        parts.push(`Прогон остановлен через ${seconds(state.elapsedMs)}: ${state.done} из ${state.total} вопросов`);
     } else if (state.state === "done") {
         parts.push(`Прогон закончен за ${seconds(state.elapsedMs)}: ${state.done} из ${state.total} вопросов`);
     } else {
         parts.push("Прогон не запускался");
     }
     status.innerHTML = parts.join(" · ");
-    status.className = "status" + (state.error ? " error" : state.state === "done" ? " done" : "");
+    status.className =
+        "status" +
+        (state.error
+            ? " error"
+            : state.state === "done"
+              ? " done"
+              : state.state === "stopped"
+                ? " stopped"
+                : "");
 
     const running = state.state === "running" || index.state === "building";
     const bar = document.getElementById("progress-wrap");
@@ -763,6 +775,8 @@ function renderStatus() {
             : (state.total ? (state.done * 100) / state.total : 0);
         document.getElementById("progress-bar").style.width = `${Math.round(percent)}%`;
     }
+    // Останавливать можно только то, что идёт: иначе кнопка обещала бы действие, которого нет.
+    document.getElementById("stop").disabled = !running;
 
     const reports = document.getElementById("reports");
     reports.hidden = state.reports.length === 0;
@@ -854,6 +868,17 @@ async function run(ids) {
 }
 
 document.getElementById("run-all").addEventListener("click", () => run([]));
+document.getElementById("stop").addEventListener("click", async () => {
+    try {
+        state = await api("/api/stop", { method: "POST" });
+        // Подпись и таблица перерисовываются сразу по ответу, а не по следующему опросу:
+        // остановленный прогон — это результат, и ждать его секунду незачем.
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+});
 document.getElementById("rebuild").addEventListener("click", async () => {
     try {
         state = await api("/api/index", { method: "POST" });
