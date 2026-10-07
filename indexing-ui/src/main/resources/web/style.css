@@ -1,0 +1,499 @@
+:root {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --line: #2c313b;
+    --text: #e8eaed;
+    --muted: #9aa2ae;
+    --accent: #6ea8fe;
+    --accent-strong: #2f6fdc;
+    --good: #57c98a;
+    --bad: #e5786c;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0 0 3rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header {
+    padding: 1.5rem 2rem 0.5rem;
+}
+
+h1 {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 600;
+}
+
+h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+
+.step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    background: var(--accent-strong);
+    color: #fff;
+    font-size: 0.8rem;
+}
+
+.subtitle {
+    margin: 0.25rem 0 0;
+    color: var(--muted);
+}
+
+main {
+    padding: 1rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+}
+
+.hint {
+    margin: 0 0 0.75rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.files,
+.phases {
+    margin: 0 0 0.75rem;
+    padding-left: 1.1rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.files code,
+.phases code,
+.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.88em;
+    color: var(--text);
+}
+
+.controls {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.field.grow {
+    flex: 1 1 24rem;
+}
+
+select,
+input[type="number"],
+input[type="url"],
+input[type="file"] {
+    background: #12141a;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    font: inherit;
+}
+
+/* Поля настроек узкие: числа короткие, и рядом должны уместиться обе кнопки. */
+.controls.settings .field input {
+    width: 7.5rem;
+}
+
+/* Группа файлов одного документа: имя документа заголовком, файлы — вложенным списком. */
+.document {
+    color: var(--text);
+}
+
+.document-files {
+    margin: 0.15rem 0 0.5rem;
+    padding-left: 1.1rem;
+    list-style: none;
+}
+
+.document-files li::before {
+    content: "—";
+    color: var(--line);
+    margin-right: 0.4rem;
+}
+
+#corpus-files > li {
+    margin-bottom: 0.2rem;
+}
+
+.controls.download {
+    margin-top: 0.75rem;
+}
+
+/* У выбора файла своя высота: кнопка «Выбрать файл» не подчиняется общей высоте поля. */
+input[type="file"] {
+    padding: 0.35rem 0.4rem;
+    max-width: 100%;
+}
+
+input[type="file"]::file-selector-button {
+    background: #1b1f27;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.2rem 0.5rem;
+    margin-right: 0.5rem;
+    font: inherit;
+    cursor: pointer;
+}
+
+#download-status:empty {
+    display: none;
+}
+
+button.secondary {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+}
+
+button {
+    background: var(--accent-strong);
+    color: #fff;
+    border: 0;
+    border-radius: 6px;
+    padding: 0.55rem 1rem;
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+button:disabled {
+    background: #333844;
+    color: var(--muted);
+    cursor: not-allowed;
+}
+
+.status {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.status.error {
+    color: var(--bad);
+}
+
+.status.done {
+    color: var(--good);
+}
+
+.progress {
+    margin-top: 0.75rem;
+    height: 8px;
+    background: #12141a;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.progress-bar {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+    transition: width 0.2s ease;
+}
+
+/* Ответ задания: с ним сверяется выдача, и он не должен читаться как текст из документа. */
+.expected {
+    margin: 0 0 0.75rem;
+    padding: 0.7rem 0.9rem;
+    border-left: 3px solid #6f8f4f;
+    background: #171c14;
+    border-radius: 0 6px 6px 0;
+    line-height: 1.45;
+}
+
+/* Вопрос дня: это не поле ввода, а условие задачи — он набран как текст, а не как контрол. */
+.question {
+    margin: 0 0 0.75rem;
+    padding: 0.7rem 0.9rem;
+    border-left: 3px solid var(--accent);
+    background: #12141a;
+    border-radius: 0 6px 6px 0;
+    font-size: 1.05rem;
+    line-height: 1.45;
+}
+
+.reference {
+    margin-top: 0.9rem;
+    border-left: 3px solid var(--accent);
+    padding: 0.5rem 0 0.5rem 0.9rem;
+}
+
+.reference .row {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.strategies {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(28rem, 1fr));
+    gap: 1rem;
+}
+
+.strategy h3 {
+    margin: 0 0 0.25rem;
+    font-size: 0.95rem;
+}
+
+.strategy .meta {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+}
+
+.strategy .meta.found {
+    color: var(--good);
+}
+
+.strategy .meta.missed {
+    color: var(--bad);
+}
+
+.result {
+    border-top: 1px solid var(--line);
+    padding: 0.7rem 0;
+}
+
+.result:first-of-type {
+    border-top: 0;
+}
+
+.result-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.9rem;
+}
+
+.rank {
+    font-weight: 600;
+}
+
+.similarity {
+    color: var(--muted);
+}
+
+.badge {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+}
+
+.reference-badge {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* Ресурс дня в списке файлов: пометка о происхождении документа, а не оценка результата. */
+.built-in-badge {
+    margin-left: 0.4rem;
+    border-color: #3b4a63;
+    background: #1b2233;
+    color: #9db4d6;
+}
+
+.result .where {
+    margin: 0.35rem 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.fragment {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    background: #12141a;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    white-space: pre-wrap;
+}
+
+.result.reference-hit .fragment {
+    border-color: var(--accent);
+}
+
+/* Разбор близости под каждым результатом: вектор и слагаемые, из которых складывается similarity. */
+details.why {
+    margin-top: 0.5rem;
+}
+
+details.why summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.vec-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: 0.75rem;
+    margin: 0.6rem 0 0.4rem;
+}
+
+.vec {
+    background: #12141a;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.75rem;
+}
+
+.vec h4 {
+    margin: 0 0 0.25rem;
+    font-size: 0.85rem;
+}
+
+.vec-meta {
+    margin: 0 0 0.5rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.dims {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+}
+
+.dims li {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.08rem 0;
+}
+
+.dim {
+    color: var(--muted);
+    min-width: 3.4rem;
+}
+
+.weight {
+    min-width: 4.2rem;
+    color: var(--accent);
+}
+
+.features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: baseline;
+}
+
+.feat {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0 0.3rem;
+}
+
+.feat-trigram {
+    color: var(--muted);
+}
+
+.feat-more {
+    color: var(--muted);
+}
+
+table.terms {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+}
+
+table.terms th,
+table.terms td {
+    text-align: left;
+    padding: 0.2rem 0.4rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+}
+
+table.terms th {
+    color: var(--muted);
+    font-weight: 500;
+}
+
+table.terms tr.sum td {
+    color: var(--muted);
+    border-bottom: 0;
+}
+
+.number {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.contribution {
+    color: var(--accent);
+}
+
+dl.check {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    margin: 0.6rem 0 0;
+}
+
+dl.check div {
+    display: flex;
+    flex-direction: column;
+}
+
+dl.check dt {
+    color: var(--muted);
+    font-size: 0.74rem;
+}
+
+dl.check dd {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem;
+}
+
+dl.check dd.ok {
+    color: var(--good);
+}
+
+dl.check dd.bad {
+    color: var(--bad);
+    font-weight: 600;
+}

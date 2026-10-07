@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>День 21. Индексация документов</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+    <h1>День 21. Индексация документов</h1>
+    <p class="subtitle" id="corpus-title">Загрузка корпуса…</p>
+</header>
+
+<main>
+    <section class="panel">
+        <h2><span class="step">1</span> Загрузите PDF</h2>
+        <p class="hint">
+            Документ дня уже на месте: это встроенный PDF, и в корпус входят не все его страницы,
+            а отрезок вокруг ответа — диапазон виден в списке файлов ниже. Текст, страницы и заголовки
+            берутся из самой вёрстки файла. Этот шаг можно пропустить и сразу перейти ко второму;
+            он нужен, если хочется добавить свой PDF рядом. Загруженный документ ложится в рабочий
+            каталог и переживает перезапуск страницы.
+        </p>
+        <div class="controls download">
+            <label class="field grow">
+                <span>Локальный файл PDF</span>
+                <input type="file" id="pdf-file" accept="application/pdf,.pdf">
+            </label>
+            <button id="upload-button" type="button">Загрузить файл</button>
+        </div>
+        <div class="controls download">
+            <label class="field grow">
+                <span>Ссылка на PDF</span>
+                <input type="url" id="pdf-url" spellcheck="false" placeholder="https://example.org/document.pdf">
+            </label>
+            <button id="load-button" type="button">Загрузить по ссылке</button>
+        </div>
+        <p class="status" id="download-status"></p>
+        <ul class="files" id="corpus-files"></ul>
+    </section>
+
+    <section class="panel">
+        <h2><span class="step">2</span> Постройте индекс</h2>
+        <p class="hint" id="strategy-hint"></p>
+        <div class="controls settings">
+            <label class="field">
+                <span>chunk — окно Fixed Size</span>
+                <input type="number" id="chunk-size" min="1" step="50" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>overlap — перекрытие</span>
+                <input type="number" id="overlap" min="0" step="10" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>max_chunk — предел Structural</span>
+                <input type="number" id="max-chunk-size" min="1" step="100" inputmode="numeric">
+            </label>
+            <button id="reset-settings" type="button" class="secondary">Сбросить</button>
+            <button id="index-button" type="button" disabled>Запустить индексацию</button>
+        </div>
+        <p class="status" id="status">Индекс не построен.</p>
+        <p class="hint" id="settings-hint" hidden></p>
+        <div class="progress" id="progress-wrap" hidden>
+            <div class="progress-bar" id="progress-bar"></div>
+        </div>
+        <ul class="phases" id="phase-log" hidden></ul>
+    </section>
+
+    <section class="panel">
+        <h2><span class="step">3</span> Запустите поиск вопроса дня</h2>
+        <p class="question" id="question-text"></p>
+        <p class="hint">
+            Вопрос задан заранее и не редактируется: вместе с ним заранее известно, где лежит ответ,
+            — это страницы загруженного PDF, и текст ответа читается оттуда же. Человек выбирает
+            только <code>top_k</code>: сколько результатов показать.
+        </p>
+        <div class="controls">
+            <label class="field">
+                <span>top_k</span>
+                <select id="topk"></select>
+            </label>
+            <button id="search-button" type="button" disabled>Найти</button>
+        </div>
+        <div id="reference" class="reference" hidden></div>
+        <p class="hint">
+            Обе стратегии получают один и тот же вопрос: расхождение в выдаче — след нарезки,
+            а не поиска. Значок <span class="badge reference-badge">эталон</span> отмечает чанк,
+            который лежит на страницах эталона.
+        </p>
+        <p class="hint" id="provider-hint"></p>
+        <div class="strategies" id="strategies"></div>
+    </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

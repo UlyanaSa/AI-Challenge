@@ -21,6 +21,7 @@ kotlinx-serialization = "1.11.0"
 kotlinx-io = "0.9.1"
 mcp = "0.15.0"
 logback = "1.4.14"
+pdfbox = "3.0.8"
 dotenv = "6.4.1"
 material3 = "1.11.0-alpha07"
 shadow = "8.3.5"
@@ -47,6 +48,7 @@ compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMul
 compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "composeMultiplatform" }
 compose-uiToolingPreview = { module = "org.jetbrains.compose.ui:ui-tooling-preview", version.ref = "composeMultiplatform" }
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 dotenv-kotlin = { module = "io.github.cdimascio:dotenv-kotlin", version.ref = "dotenv" }
 
 wrappers-browser = { module = "org.jetbrains.kotlin-wrappers:kotlin-browser", version.ref = "kotlin-wrappers" }

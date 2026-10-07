@@ -29,3 +29,10 @@ server/data/
 currency.db
 currency.db-shm
 currency.db-wal
+
+# Материалы под авторским правом: PDF дня и тексты глав для тестов конвейера.
+# Файлы лежат рядом с кодом на машине, где идёт прогон, но в репозиторий не попадают:
+# страница собирает встроенный корпус дня из book.pdf, а сравнение стратегий —
+# из глав в indexing/src/test/resources/corpus.
+*.pdf
+indexing/src/test/resources/corpus/

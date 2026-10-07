@@ -1,0 +1,13 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{24} - %msg%n</pattern>
+        </encoder>
+    </appender>
+    <!-- Страница локальная: в логе нужны её собственные сообщения, а не отладка Netty на каждый запрос. -->
+    <root level="info">
+        <appender-ref ref="STDOUT"/>
+    </root>
+    <logger name="io.netty" level="warn"/>
+    <logger name="io.ktor" level="info"/>
+</configuration>
