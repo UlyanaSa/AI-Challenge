@@ -27,6 +27,11 @@ import kotlinx.coroutines.withTimeout
  * трейс этапов, а режим без базы не ищет вовсе. Ошибка здесь не сломала бы ни один прогон: она
  * нарисовала бы путь запроса, которого не было, и числа сравнения читались бы по чужому пути.
  *
+ * День 24 проверяется тем же прогоном: grounded-этап идёт на той же выдаче, что улучшенный режим,
+ * берёт тот же порог и пишет свои файлы, не переписывая отчёты трёх режимов. Подставная модель
+ * отвечает свободным текстом, поэтому цитат в её ответе нет: проверяется не качество цитат — для
+ * этого нужен живой прогон, — а то, что этап выполнился и назвал исход словами `:rag`.
+ *
  * Настройки прогона задаются явно, а не берутся по умолчанию: числа трейса тогда известны заранее,
  * и видно, что поля настроек действительно управляют конвейером. Переписывание выключено, а второй
  * этап — эвристический: так подставная модель отвечает только на вопросы, и прогон остаётся
@@ -182,7 +187,15 @@ class RagSessionTest {
         assertEquals(2.0, stages.improvedScore)
         assertTrue(Files.exists(dir.resolve(RagSession.REPORT_FILE)), "сравнение записано на диск")
         assertTrue(Files.exists(dir.resolve(RagSession.LOG_FILE)), "лог запросов записан на диск")
-        assertEquals(2, state.reports.size)
+
+        // День 24: ответ grounded-режима идёт на той же выдаче, что улучшенный, и получает свой блок
+        // и свои файлы. Порог достаточности — тот же, что у фильтра, а сверку считает `:rag`.
+        val grounded = requireNotNull(result.grounded)
+        assertEquals(GroundedDto.DONE, grounded.state)
+        assertEquals(trace.threshold, grounded.confidence.threshold, "порог достаточности — порог фильтра")
+        assertEquals(1, requireNotNull(state.grounding).questions)
+        assertTrue(Files.exists(dir.resolve(RagSession.GROUNDED_REPORT_FILE)), "ответы с цитатами записаны на диск")
+        assertTrue(Files.exists(dir.resolve(RagSession.GROUNDED_LOG_FILE)), "лог дня 24 записан на диск")
         scope.cancel()
     }
 

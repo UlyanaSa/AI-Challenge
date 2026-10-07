@@ -1,12 +1,15 @@
-// Страница дня 23: три режима ответа и разбор этапов конвейера на десяти контрольных вопросах.
+// Страница дня 23 и дня 24: три режима ответа, разбор этапов конвейера и grounded-ответ
+// с источниками, цитатами и их проверкой на десяти контрольных вопросах.
 //
 // Данных у страницы два источника, и оба приходят с сервера целиком. Набор вопросов — это setup:
 // он не меняется и содержит ожидания, факты, место в книге и начальные настройки этапов. Состояние
-// прогона — это state: его страница опрашивает и рисует из него таблицу, метрики, конвейеры и трейс.
+// прогона — это state: его страница опрашивает и рисует из него таблицу, метрики, конвейеры, трейс
+// и блок дня 24 у каждого вопроса.
 //
-// Страница ничего не считает сама: оценки, попадания, метрики этапов и классификацию потерь считает
-// `:rag`, а сюда они приходят посчитанными. Второй набор формул в браузере разошёлся бы с отчётом
-// прогона — а сверять страницу с отчётом тогда было бы нечем. Здесь только раскладка.
+// Страница ничего не считает сама: оценки, попадания, метрики этапов, классификацию потерь и признаки
+// дня 24 (подтверждён ли ответ, охвачен ли источником и цитатой, уместен ли отказ) считает `:rag`,
+// а сюда они приходят посчитанными. Второй набор формул в браузере разошёлся бы с отчётом прогона —
+// а сверять страницу с отчётом тогда было бы нечем. Здесь только раскладка.
 
 let setup = null;
 let state = null;
@@ -101,7 +104,7 @@ function questionRow(question, result) {
     // «Потеря» показывается только у вопроса с ответом в базе: у вопроса без ответа терять нечего.
     const loss = !check || absent ? `<span class="question-meta">—</span>` : lossBadge(check);
     const hit = !check || absent ? "—" : check.inFinal ? "да" : "нет";
-    return `<tr class="question-row${selected === question.id ? " selected" : ""}" data-id="${question.id}">
+    const row = `<tr class="question-row${selected === question.id ? " selected" : ""}" data-id="${question.id}">
         <td class="mono">${esc(question.id)}</td>
         <td>
             <span class="question-text">${esc(question.question)}</span>
@@ -115,6 +118,12 @@ function questionRow(question, result) {
         <td>${hit}</td>
         <td>${loss}</td>
         <td><button class="mini secondary run-one" data-id="${question.id}" type="button"${setup.keyNote ? " disabled" : ""}>Прогнать</button></td>
+    </tr>`;
+    // Блок дня 24 идёт отдельной строкой под вопросом во всю ширину таблицы: ответ, источники,
+    // цитаты и проверка в колонки сравнения не помещаются, а ломать разметку трёх режимов нельзя —
+    // она остаётся ровно такой, какой была.
+    return `${row}<tr class="grounded-row" data-id="${question.id}">
+        <td colspan="9">${groundedBlock(question, result)}</td>
     </tr>`;
 }
 
@@ -381,6 +390,213 @@ function agentColumn(mode, question, result) {
     return `<div class="agent ${esc(kind)}">${head}${stages.join("")}</div>`;
 }
 
+// День 24: ответ grounded-режима, его источники, цитаты и результат проверки. Разметка та же, что
+// у конвейеров дня 23, — те же классы и те же блоки-этапы: это четвёртый блок вопроса, а не вторая
+// страница, и отдельного вида у него быть не должно.
+
+// Доля словами и числом, как в отчёте дня 24. Ноль в знаменателе — не «0 %», а отсутствие данных:
+// у прогона без обычных ответов охват источников считать не по чему.
+function rate(part, total) {
+    return total ? `${part} из ${total} (${Math.round((part * 100) / total)} %)` : "нет данных";
+}
+
+function groundedSourceTable(grounded) {
+    if (!grounded.sources.length) {
+        return `<p class="missing">Источников нет: отказ не сопровождается источниками (§10).</p>`;
+    }
+    const rows = grounded.sources
+        .map(
+            (source) => `<tr>
+            <td class="mono">[${source.fragment}]</td>
+            <td><span class="mono">${esc(source.source)}</span>${source.section ? `<br><span class="question-meta">section: ${esc(source.section)}</span>` : ""}</td>
+            <td class="mono">${esc(source.chunkId)}</td>
+            <td>${source.pages.length ? esc(source.pages.join(", ")) : "—"}</td>
+            <td class="similarity">${ru(source.similarity, 3)}</td>
+            <td class="similarity">${source.rerankScore == null ? "—" : ru(source.rerankScore, 3)}</td>
+        </tr>`
+        )
+        .join("");
+    return `<table class="sources">
+        <thead><tr>
+            <th>фрагм.</th><th>источник и раздел</th><th>chunk_id</th><th>страницы</th>
+            <th>близость</th><th>оценка этапа</th>
+        </tr></thead>
+        <tbody>${rows}</tbody></table>`;
+}
+
+function groundedQuotes(grounded) {
+    // Показываются подтверждённые цитаты. Отброшенные не прячутся: они стоят в таблице проверки
+    // ниже с пометкой «нет» и причиной — там им и место, потому что цитатой ответа они не стали.
+    const confirmed = grounded.quotes.filter((quote) => quote.found);
+    if (!confirmed.length) {
+        return `<p class="missing">Цитат нет — подтверждать нечего.</p>`;
+    }
+    const items = confirmed
+        .map(
+            (quote) => `<li>«${esc(quote.quote)}»
+            <span class="question-meta"> — утверждение: ${esc(quote.claim)}; фрагмент [${quote.fragment}]</span></li>`
+        )
+        .join("");
+    return `<ul class="rank-list">${items}</ul>`;
+}
+
+function groundedCheckTable(grounded) {
+    if (!grounded.quotes.length) {
+        return `<p class="missing">Проверять нечего: модель не привела ни одной цитаты.</p>`;
+    }
+    const rows = grounded.quotes
+        .map(
+            (quote) => `<tr>
+            <td class="mono">[${quote.fragment}]</td>
+            <td>${esc(quote.claim)}<br><span class="question-meta">«${esc(quote.quote)}»</span></td>
+            <td class="mono">${quote.chunkId == null ? "—" : esc(quote.chunkId)}</td>
+            <td>${quote.found ? "да" : "нет"}</td>
+            <td>${quote.reason == null ? "—" : esc(quote.reason)}</td>
+        </tr>`
+        )
+        .join("");
+    return `<table class="sources">
+        <thead><tr>
+            <th>фрагм.</th><th>утверждение и цитата</th><th>chunk_id</th><th>цитата в чанке</th><th>причина</th>
+        </tr></thead>
+        <tbody>${rows}</tbody></table>`;
+}
+
+function groundedDecision(grounded) {
+    // Проверка на `== null`, а не `=== null`: сервер не пишет пустые поля в JSON, и «поля нет»
+    // здесь означает то же, что «поле пустое», иначе прочерк превращался бы в ноль.
+    const confidence = grounded.confidence;
+    const parts = [
+        `решение: ${confidence.decision || "—"}`,
+        `фрагментов в контексте: ${confidence.considered}`,
+        `лучшая близость: ${confidence.bestSimilarity == null ? "—" : ru(confidence.bestSimilarity, 3)}`,
+        `порог: ${ru(confidence.threshold, 2)}`,
+    ];
+    const refusal = grounded.refusalTitle
+        ? `<p class="missing">Отказ: ${esc(grounded.refusalTitle)}${grounded.note ? ` — ${esc(grounded.note)}` : ""}</p>`
+        : grounded.note
+          ? `<p class="question-meta">Замечание этапа: ${esc(grounded.note)}</p>`
+          : "";
+    return `<p class="cited">${parts.join(" · ")}</p>${refusal}`;
+}
+
+// Итог словами, а не пересчётом: признаки приходят посчитанными, страница только выбирает
+// формулировку — «подтверждён», «не подтверждён» или отказ с его уместностью.
+function groundedVerdict(grounded) {
+    let badge;
+    if (grounded.abstained) {
+        badge = grounded.validAbstention
+            ? `<span class="loss loss-warn">отказ (уместный)</span>`
+            : `<span class="loss loss-bad">отказ (лишний)</span>`;
+    } else if (grounded.grounded) {
+        badge = `<span class="loss loss-good">подтверждён</span>`;
+    } else {
+        badge = `<span class="loss loss-bad">не подтверждён</span>`;
+    }
+    const extra = [];
+    if (grounded.fabricatedSources > 0) extra.push(`выдуманных ссылок: ${grounded.fabricatedSources}`);
+    if (grounded.invalidQuotes > 0) extra.push(`невалидных цитат: ${grounded.invalidQuotes}`);
+    const note = extra.length ? ` <span class="question-meta">${esc(extra.join(", "))}</span>` : "";
+    return `<p>${badge}${note}</p>`;
+}
+
+function groundedBlock(question, result) {
+    const grounded = result?.grounded;
+    const key = `grounded-${question.id}`;
+    if (!grounded) {
+        return fold(
+            key,
+            "Grounded-ответ (день 24) — не прогонялся",
+            `<p class="missing">Нажмите «Прогнать» у вопроса — появятся ответ, источники, цитаты и проверка.</p>`
+        );
+    }
+    // Сбой этапа — не отказ системы: показывается причина, а не пустые поля проверок, которые
+    // выглядели бы как измеренный ноль.
+    if (grounded.state === "failed") {
+        return fold(
+            key,
+            "Grounded-ответ (день 24) — этап отказал",
+            `<div class="error-box">${esc(grounded.error || "этап отказал")}</div>`
+        );
+    }
+    // У отказа ответа нет: показывается его текст жирным — та самая формулировка §8, — а вслед
+    // идут пустые источники и цитаты, чтобы отсутствие подтверждений было видно, а не подразумевалось.
+    const answer = grounded.refusal
+        ? `<p><b>${esc(grounded.refusal)}</b></p>`
+        : grounded.answer && grounded.answer.trim()
+          ? `<pre>${esc(grounded.answer)}</pre>`
+          : `<p class="missing">Ответ пустой: модель не сказала ничего.</p>`;
+    const body = [
+        stage("Ответ", answer),
+        stage("Источники", groundedSourceTable(grounded)),
+        stage("Цитаты", groundedQuotes(grounded)),
+        stage("Достаточность контекста", groundedDecision(grounded)),
+        stage("Проверка цитат", groundedCheckTable(grounded)),
+        stage("Итог по вопросу", groundedVerdict(grounded)),
+    ].join("");
+    return fold(key, "Grounded-ответ (день 24)", body);
+}
+
+function renderGrounding() {
+    const panel = document.getElementById("grounding-panel");
+    const grounding = state.grounding;
+    if (!grounding) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    // Порог достаточности берётся из настроек прогона, а не пересчитывается: это тот же порог,
+    // что у фильтра, и в шапке сводки он называется явно.
+    const threshold = state.config?.threshold ?? setup.groundingThreshold;
+    document.getElementById("grounding-hint").textContent =
+        `Grounded-режим дня 24 идёт на той же выдаче, что улучшенный: вопросов ${grounding.questions}, ` +
+        `обычных ответов ${grounding.answered}, отказов ${grounding.abstained} ` +
+        `(уместных ${grounding.validAbstentions}, лишних ${grounding.wrongAbstentions}). ` +
+        `Порог достаточности — тот же, что у фильтра: ${thresholdLabel(threshold)}.`;
+    document.getElementById("grounding-metrics").innerHTML = [
+        metric(
+            "Answer Accuracy",
+            rate(grounding.rightAnswers, grounding.questions),
+            `верных ответов ${grounding.correct} и уместных отказов ${grounding.validAbstentions}`
+        ),
+        metric(
+            "Source Coverage",
+            rate(grounding.withSource, grounding.answered),
+            "ответы с источником из обычных ответов"
+        ),
+        metric(
+            "Quote Coverage",
+            rate(grounding.withQuote, grounding.answered),
+            "ответы с цитатой из обычных ответов"
+        ),
+        metric(
+            "Grounded Answer Rate",
+            rate(grounding.grounded, grounding.answered),
+            "ответы, подтверждённые цитатами из процитированных чанков"
+        ),
+        metric(
+            "Correct Abstention Rate",
+            rate(grounding.validAbstentions, grounding.abstainNeeded),
+            `лишних отказов: ${grounding.wrongAbstentions}`
+        ),
+        metric(
+            "Факты в ответах",
+            `${grounding.factsGrounded} из ${grounding.factsTotal}`,
+            `grounded против ${grounding.factsPrevious} у предыдущего режима`
+        ),
+        metric(
+            "Выдуманные ссылки",
+            `${grounding.fabricatedSources}`,
+            "ссылки на фрагменты, которых модель не получала"
+        ),
+        metric(
+            "Невалидные цитаты",
+            `${grounding.invalidQuotes}`,
+            "цитаты, которых нет в процитированном чанке"
+        ),
+    ].join("");
+}
+
 function renderPipeline() {
     const element = document.getElementById("pipeline");
     const hint = document.getElementById("pipeline-hint");
@@ -579,6 +795,7 @@ function render() {
     renderQuestions();
     renderMetrics();
     renderStages();
+    renderGrounding();
     renderPipeline();
 }
 
@@ -599,6 +816,7 @@ function renderSetup() {
         ["Векторы", `${setup.provider.name} — ${setup.provider.dimension} измерений`],
         ["Провайдер", setup.provider.note],
         ["Этапы по умолчанию", `поиск Top-${setup.retrievalTopK}, в контекст Top-${setup.finalTopK}, порог ${setup.threshold}, переписывание ${setup.rewrite}, второй этап ${setup.rerank}`],
+        ["Grounded (день 24)", `порог достаточности ${ru(setup.groundingThreshold, 2)} — то же число, что у фильтра; ответ, источники и цитаты на той же выдаче`],
     ]
         .map(([term, value]) => `<div><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`)
         .join("");

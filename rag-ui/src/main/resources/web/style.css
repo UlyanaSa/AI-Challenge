@@ -265,6 +265,14 @@ table.questions tr.question-row {
     cursor: pointer;
 }
 
+/* Строка grounded-ответа дня 24 идёт под вопросом во всю ширину таблицы: в колонках сравнения
+   ответ, источники, цитаты и их проверка не помещаются, поэтому блок дня 24 раскрывается
+   отдельной строкой — разметка и вид трёх режимов при этом остаются прежними. */
+table.questions tr.grounded-row td {
+    padding: 0.2rem 0.5rem 0.9rem 0;
+    background: #191c23;
+}
+
 .question-text {
     display: block;
     margin-bottom: 0.25rem;

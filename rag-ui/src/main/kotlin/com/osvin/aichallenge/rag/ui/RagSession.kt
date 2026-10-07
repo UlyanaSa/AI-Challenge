@@ -10,6 +10,10 @@ import com.osvin.aichallenge.rag.ControlQuestion
 import com.osvin.aichallenge.rag.Controls
 import com.osvin.aichallenge.rag.Corpus
 import com.osvin.aichallenge.rag.DayBase
+import com.osvin.aichallenge.rag.GroundedAgent
+import com.osvin.aichallenge.rag.GroundedReport
+import com.osvin.aichallenge.rag.GroundedTrial
+import com.osvin.aichallenge.rag.Grounding
 import com.osvin.aichallenge.rag.HeuristicReranker
 import com.osvin.aichallenge.rag.LlmQueryRewriter
 import com.osvin.aichallenge.rag.LlmReranker
@@ -30,7 +34,9 @@ import com.osvin.aichallenge.rag.Summary
 import com.osvin.aichallenge.rag.Trial
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
@@ -141,6 +147,12 @@ data class RunSettings(
  * этапом. Все три идут по одному индексу и одной модели, и порядок вызовов внутри вопроса
  * фиксирован: иначе разница между колонками была бы разницей настроек, а не этапов.
  *
+ * Четвёртым к вопросу добавляется день 24 — grounded-ответ ([GroundedAgent]) на **той же выдаче**,
+ * что улучшенный режим: проверка достаточности до обращения к модели, требование цитат в ответе
+ * и программная проверка каждой цитаты. Блок дня 24 не заменяет три режима и не спорит с ними:
+ * он показывает то, чего в них нет, — ответ, который можно проверить по источнику, и честный отказ
+ * там, где подтверждать нечем ([Grounding], [GroundedReport]).
+ *
  * Сессия держит ровно то, чего нет в конвейере: индекс рабочего каталога, набор результатов
  * и состояние прогона. Сами ответы получает [RagAgent], сверка — [Check], метрики — [Report]
  * и [Stages]: страница не считает ни одного числа сама, иначе её числа разошлись бы с отчётом
@@ -177,7 +189,15 @@ class RagSession(
     private data class ResultPair(
         val without: ModeResult? = null,
         val baseline: ModeResult? = null,
-        val improved: ModeResult? = null
+        val improved: ModeResult? = null,
+        /**
+         * Grounded-ответ дня 24: он уже готовым DTO, а не парой «ответ — сверка».
+         *
+         * Сверка дня 24 живёт в [RagSession.groundedTrials] вместе с предыдущим ответом: из неё
+         * считается сводка §17, и странице она не нужна по частям — ей нужен исход, названный
+         * признаками [GroundedDto].
+         */
+        val grounded: GroundedDto? = null
     )
 
     private val lock = Any()
@@ -210,6 +230,29 @@ class RagSession(
      */
     private var stageConfig: StageConfig? = null
 
+    /**
+     * Единственный слот длительной работы: прогон или пересборка индекса.
+     *
+     * Слот один, потому что работы пишут одни и те же поля: состояние, индекс и файлы отчётов.
+     * Две работы сразу показали бы на странице смесь двух прогонов, а отчёт описывал бы один из них,
+     * и понять, какой именно, было бы невозможно.
+     */
+    private var job: Job? = null
+
+    /**
+     * Номер текущей работы: по нему отменённая работа узнаёт, что её записи больше не нужны.
+     *
+     * Отмена корутины кооперативная: запрос к модели может вернуться уже после отмены, и без номера
+     * вытесненный прогон дописал бы свой вопрос поверх очищенного состояния — рядом с вопросами
+     * нового набора. Поле читается и вне замка ([RagSession.alive] в цикле вопросов), поэтому оно
+     * летучее: без этого проверка могла бы не увидеть чужую запись.
+     */
+    @Volatile
+    private var runId = 0L
+
+    /** Начало текущей работы: по нему считается время, если прогон остановили до конца. */
+    private var startedAt = 0L
+
     private var state = StateDto.IDLE
     private var stage: String? = null
     private var stageTitle: String? = null
@@ -227,6 +270,17 @@ class RagSession(
 
     /** Метрики этапов дня 23: считаются [Stages.summary] по тем же вопросам. */
     private var stageSummary: StagesDto? = null
+
+    /**
+     * Вопросы дня 24 целиком: предыдущий ответ, grounded-ответ и их сверка.
+     *
+     * Отдельно от [completed], потому что набор другой: сверке дня 24 нужен ответ **предыдущего**
+     * режима, и без него вопрос в этот список не попадает, даже если три режима дня 23 ответили.
+     */
+    private val groundedTrials = ArrayList<GroundedTrial>()
+
+    /** Метрики дня 24 (§17): считаются [Grounding.summary] по тем же вопросам, без пересчёта на странице. */
+    private var grounding: GroundingDto? = null
 
     private var reports = emptyList<ReportDto>()
 
@@ -261,6 +315,9 @@ class RagSession(
             retrievalTopK = RunSettings.DEFAULT.retrievalTopK,
             finalTopK = RunSettings.DEFAULT.finalTopK,
             threshold = RunSettings.DEFAULT.threshold,
+            // Порог достаточности дня 24 — то же число, что у фильтра (§8): отдельное значение
+            // разошлось бы с порогом фильтра, и отказ нельзя было бы объяснить одним условием.
+            groundingThreshold = RunSettings.DEFAULT.threshold,
             rewrite = RunSettings.DEFAULT.rewrite,
             rerank = RunSettings.DEFAULT.rerank,
             keyNote = when {
@@ -311,12 +368,14 @@ class RagSession(
                     without = pair.without?.toDto("without", "без базы"),
                     baseline = pair.baseline?.toDto("baseline", "базовый RAG"),
                     improved = pair.improved?.toDto("improved", "улучшенный RAG"),
+                    grounded = pair.grounded,
                     trace = trace?.toDto(),
                     stageCheck = if (control == null) null else Stages.evaluate(control, trace)?.toDto()
                 )
             },
             summary = summary,
             stages = stageSummary,
+            grounding = grounding,
             config = stageConfig?.toDto(),
             reports = reports,
             elapsedMs = elapsedMs
@@ -334,24 +393,33 @@ class RagSession(
     fun rebuildIndex(): StartOutcome {
         val current = base ?: return StartOutcome.Rejected(Corpus.MISSING_MESSAGE)
         synchronized(lock) {
-            if (state == StateDto.RUNNING || indexState == IndexDto.BUILDING) {
-                return StartOutcome.Rejected(BUSY_MESSAGE)
-            }
-            indexState = IndexDto.BUILDING
-            indexChunks = 0
-            indexTotal = 0
+            // Пересборку поверх идущего прогона отвергаем, а не вытесняем: новый индекс подменил бы
+            // базу посреди прогона, и вопросы ответились бы по одному индексу, а проверялись по другому.
+            if (state == StateDto.RUNNING) return StartOutcome.Rejected(RUNNING_MESSAGE)
+            if (indexState == IndexDto.BUILDING) return StartOutcome.Rejected(BUILDING_MESSAGE)
+            val token = occupy()
+            job = scope.launch { rebuild(token, current) }
         }
-        scope.launch {
-            try {
-                build(current)
-            } catch (cause: Exception) {
-                synchronized(lock) {
+        return StartOutcome.Accepted
+    }
+
+    /** Сборка индекса как работа страницы: причина отказа уходит в состояние, слот освобождается. */
+    private suspend fun rebuild(token: Long, current: DayBase) {
+        try {
+            build(token, current)
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            synchronized(lock) {
+                if (token == runId) {
                     indexState = IndexDto.IDLE
                     error = "Индекс не собрался: ${message(cause)}"
                 }
             }
+        } finally {
+            // Слот освобождает только текущая работа: вытесненная оставила бы поле чужим.
+            synchronized(lock) { if (token == runId) job = null }
         }
-        return StartOutcome.Accepted
     }
 
     /**
@@ -373,19 +441,87 @@ class RagSession(
         }
 
         synchronized(lock) {
-            if (state == StateDto.RUNNING || indexState == IndexDto.BUILDING) {
-                return StartOutcome.Rejected(BUSY_MESSAGE)
-            }
+            // Начатый прогон не отвергается, а вытесняется: страница даёт кнопку остановки, и ждать
+            // конца чужого набора, чтобы запустить свой, незачем. Вытеснение отменяет работу и чистит
+            // её данные — новый прогон описывает другой набор вопросов и другие настройки, и числа
+            // двух прогонов рядом читались бы как один прогон.
+            val token = occupy()
+            clear()
             state = StateDto.RUNNING
             stage = StateDto.INDEX_STAGE
             stageTitle = "Подготовка индекса"
-            done = 0
             total = ids.size
-            error = null
-            elapsedMs = 0L
+            job = scope.launch { runJob(token, ids, current, settings) }
         }
-        scope.launch { runJob(ids, current, settings) }
         return StartOutcome.Accepted
+    }
+
+    /**
+     * Останавливает текущую работу: прогон или пересборку индекса.
+     *
+     * Данные при остановке не чистятся: остановка — это «хватит считать», а не «забудь посчитанное».
+     * Ответы и сверки, которые успели пройти, остаются на странице вместе с уже записанными файлами,
+     * и по ним видно, где прогон встал. Чистит данные новый запуск ([start]) — там это уместно, потому
+     * что он и описывает другой прогон.
+     *
+     * Номер работы увеличивается до отмены: записи отменённого прогона после этого не принимаются,
+     * и его запоздавший ответ не попадёт ни в состояние, ни в файлы. Неполный индекс, оставшийся
+     * от прерванной сборки, удаляет сама сборка ([build]): файл после каждого чанка — это ещё не индекс.
+     */
+    fun stop(): Boolean = synchronized(lock) {
+        val current = job?.takeIf { it.isActive } ?: return false
+        current.cancel()
+        job = null
+        runId++
+        if (state == StateDto.RUNNING) {
+            state = StateDto.STOPPED
+            stage = null
+            stageTitle = null
+            elapsedMs = if (startedAt > 0) (System.nanoTime() - startedAt) / 1_000_000 else elapsedMs
+        }
+        true
+    }
+
+    /**
+     * Занимает слот работы: предыдущая отменяется, номер увеличивается.
+     *
+     * Номер берётся здесь, а не в [start], потому что он принадлежит слоту, а не прогону: вытеснить
+     * работу может и пересборка индекса, и тогда записи вытесненного прогона так же не нужны.
+     */
+    private fun occupy(): Long {
+        job?.cancel()
+        job = null
+        startedAt = System.nanoTime()
+        return ++runId
+    }
+
+    /**
+     * Освобождает данные предыдущего прогона: ответы, сверки, метрики и список файлов.
+     *
+     * Файлы на диске не удаляются: прогон перепишет их своими, а до этого лежащий файл описывает
+     * последний прогон — после остановки это ровно то, что успело посчитаться. Настройки этапов
+     * чистятся вместе с данными: они описывают прогон, которого на странице больше нет.
+     */
+    private fun clear() {
+        results.clear()
+        completed.clear()
+        groundedTrials.clear()
+        summary = null
+        stageSummary = null
+        grounding = null
+        reports = emptyList()
+        stageConfig = null
+        stage = null
+        stageTitle = null
+        done = 0
+        total = 0
+        error = null
+        elapsedMs = 0L
+    }
+
+    /** Проверка «эта работа всё ещё текущая»: отменённая своих записей не делает. */
+    private fun alive(token: Long) {
+        if (token != runId) throw CancellationException("Прогон заменён новым запуском")
     }
 
     /**
@@ -393,7 +529,8 @@ class RagSession(
      *
      * Внутри вопроса режимы идут в фиксированном порядке — без базы, базовый, улучшенный, — и он
      * одинаков для всех вопросов: обращения к модели идут по очереди, и разный порядок для разных
-     * вопросов сделал бы числа несравнимыми между собой.
+     * вопросов сделал бы числа несравнимыми между собой. День 24 идёт последним и делит выдачу
+     * с улучшенным режимом: один поиск на два ответа — условие честного сравнения ([askDay24]).
      *
      * Результат режима показывается сразу, не дожидаясь следующего: обращение к модели идёт
      * секундами, и человеку видно, где прогон находится.
@@ -402,10 +539,10 @@ class RagSession(
      * чанков, конвейеру — [RunSettings.retrievalTopK] кандидатов. Индекс читается дважды, но
      * остаётся одним файлом: сравнение режимов не зависит от того, какой из них собрал хранилище.
      */
-    private suspend fun runJob(ids: List<String>, current: DayBase, settings: RunSettings) {
+    private suspend fun runJob(token: Long, ids: List<String>, current: DayBase, settings: RunSettings) {
         val started = System.nanoTime()
         try {
-            val prepared = prepareIndex(current)
+            val prepared = prepareIndex(token, current)
             val llm = llm(requireNotNull(apiKey))
             val rewriter = settings.rewriterOf(llm, model)
             val reranker = settings.rerankerOf(llm, model)
@@ -429,18 +566,27 @@ class RagSession(
                 finalTopK = settings.finalTopK
             )
             val improvedAgent = RagAgent(llm, pipeline, model)
+            // Порог достаточности — тот же, что у фильтра (§8): второе число для «хватает ли
+            // контекста» разошлось бы с первым, и объяснить отказ разными порогами было бы нечем.
+            val groundedAgent = GroundedAgent(llm, model, settings.threshold)
             for (id in ids) {
+                // Проверка на каждой итерации, а не только у записей: вытеснённый прогон должен
+                // перестать спрашивать модель, а не просто перестать показывать ответы.
+                alive(token)
                 val control = requireNotNull(Controls.byId(id))
                 synchronized(lock) {
                     stage = id
                     stageTitle = control.question
                 }
                 val without = ask(baseAgent, control, Mode.WITHOUT_RAG)
-                record(id, without = without)
+                record(token, id, without = without)
                 val baseline = ask(baseAgent, control, Mode.WITH_RAG)
-                record(id, baseline = baseline)
-                val improved = ask(improvedAgent, control, Mode.WITH_RAG)
-                val pair = record(id, improved = improved)
+                record(token, id, baseline = baseline)
+                val day24 = askDay24(id, control, improvedAgent, groundedAgent, pipeline, settings.threshold)
+                val pair = record(token, id, improved = day24.improved, grounded = day24.grounded)
+                // Список под тем же замком, что и его чтение в [publish]: страница опрашивает
+                // состояние параллельно прогону, и незакрытая запись видна ей как обрывок списка.
+                day24.trial?.let { trial -> synchronized(lock) { groundedTrials += trial } }
                 if (pair.without?.failed == false &&
                     pair.baseline?.failed == false &&
                     pair.improved?.failed == false
@@ -451,6 +597,10 @@ class RagSession(
                         baseline = run(pair.baseline),
                         improved = run(pair.improved)
                     )
+                    publish()
+                } else if (day24.trial != null) {
+                    // День 24 может состояться и без трёх режимов дня 23: у него своя сверка,
+                    // и при отказе предыдущего режима писать всё равно нужно — его файлы.
                     publish()
                 }
             }
@@ -490,18 +640,111 @@ class RagSession(
     private fun run(result: ModeResult): Run =
         Run(result.control, requireNotNull(result.answer), requireNotNull(result.check))
 
+    /**
+     * День 24 на одном вопросе: одна выдача, ответ предыдущего режима и grounded-ответ.
+     *
+     * Выдача ищется **один раз** ([RagPipeline.find]) и уходит в оба ответа. Это условие сравнения,
+     * а не экономия: второй поиск дал бы другую выдачу, и разницу между ответами можно было бы
+     * списать на этапы дня 24, хотя её породил бы поиск. Та же схема, что у прогона в консоли
+     * ([RagCli.runGrounding]): поиск → предыдущий режим на готовой выдаче → grounded на ней же.
+     *
+     * Отказ любого из двух ответов не прерывает прогон: причина уходит в свой DTO и видна странице
+     * там, где случилась. Если поиск не выполнился, оба ответа дня 24 отметить нечем, и причина
+     * у них одна: второй раз искать нельзя, не сломав то самое сравнение на одной выдаче.
+     *
+     * Сверка ([Grounding.check]) требует ответа предыдущего режима: без него сравнивать grounded
+     * не с чем, и этап дня 24 показывает причину, а не нулевые метрики — ноль здесь был бы суждением,
+     * которого никто не выносил.
+     */
+    private suspend fun askDay24(
+        id: String,
+        control: ControlQuestion,
+        agent: RagAgent,
+        groundedAgent: GroundedAgent,
+        pipeline: RagPipeline,
+        threshold: Double
+    ): Day24 {
+        val found = try {
+            pipeline.find(control.question)
+        } catch (cause: Exception) {
+            val error = "Поиск не выполнился: ${message(cause)}"
+            return Day24(
+                improved = ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = error),
+                grounded = failedGrounded(id, control, threshold, error),
+                trial = null
+            )
+        }
+        val improved = try {
+            val answer = agent.askWith(control.question, Mode.WITH_RAG, found)
+            ModeResult(
+                control = control,
+                mode = Mode.WITH_RAG,
+                answer = answer,
+                check = Check.evaluate(control, answer.text, answer.sources),
+                error = null
+            )
+        } catch (cause: Exception) {
+            ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = message(cause))
+        }
+        val groundedAnswer = try {
+            groundedAgent.answer(control.question, found)
+        } catch (cause: Exception) {
+            return Day24(
+                improved = improved,
+                grounded = failedGrounded(id, control, threshold, "Grounded-ответ не получен: ${message(cause)}"),
+                trial = null
+            )
+        }
+        val previous = improved.answer?.let { answer ->
+            improved.check?.let { check -> Run(control, answer, check) }
+        }
+        if (previous == null) {
+            return Day24(
+                improved = improved,
+                grounded = failedGrounded(
+                    id = id,
+                    control = control,
+                    threshold = threshold,
+                    error = "Предыдущий режим не ответил: ${improved.error ?: "нет ответа"} — сверять grounded не с чем"
+                ),
+                trial = null
+            )
+        }
+        val check = Grounding.check(control, previous, groundedAnswer)
+        return Day24(
+            improved = improved,
+            grounded = groundedAnswer.toDto(check, id),
+            trial = GroundedTrial(control, previous, groundedAnswer, check)
+        )
+    }
+
+    /**
+     * Итог дня 24 по одному вопросу: ответ предыдущего режима, grounded-ответ как DTO и сверка.
+     *
+     * Три части, потому что у них три потребителя: [improved] уходит колонкой дня 23, [grounded] —
+     * блоком дня 24 на странице, а [trial] собирается в отчёт и сводку §17. [trial] пуст там, где
+     * сверка не состоялась: отчёт дня 24 не может показать вопрос, по которому нет сравнения.
+     */
+    private data class Day24(
+        val improved: ModeResult,
+        val grounded: GroundedDto,
+        val trial: GroundedTrial?
+    )
+
     /** Записывает результат режима и отдаёт пару целиком: по ней видно, чего ещё не было. */
     private fun record(
         id: String,
         without: ModeResult? = null,
         baseline: ModeResult? = null,
-        improved: ModeResult? = null
+        improved: ModeResult? = null,
+        grounded: GroundedDto? = null
     ): ResultPair = synchronized(lock) {
         val previous = results[id] ?: ResultPair()
         val pair = ResultPair(
             without = without ?: previous.without,
             baseline = baseline ?: previous.baseline,
-            improved = improved ?: previous.improved
+            improved = improved ?: previous.improved,
+            grounded = grounded ?: previous.grounded
         )
         results[id] = pair
         if (improved != null) done++
@@ -551,29 +794,67 @@ class RagSession(
         return index
     }
 
-    /** Считает метрики и пишет отчёты: файл всегда описывает прогон целиком, а не один вопрос. */
+    /**
+     * Считает метрики и пишет отчёты: файл всегда описывает прогон целиком, а не один вопрос.
+     *
+     * Отчётов два набора, и файлы у них разные. День 23 ведёт [StageReport] — сравнение трёх режимов,
+     * разбор этапов и лог запросов; день 24 ведёт [GroundedReport] — ответы с источниками и цитатами,
+     * проверка цитат и решение о достаточности. Отдельные файлы здесь не формальность: отчёт дня 24
+     * не переписывает сравнение трёх режимов, а ложится рядом, и прочитать одно, не потеряв другое,
+     * можно только так.
+     *
+     * Наборы считаются по своим вопросам: метрики этапов — по [completed], день 24 — по
+     * [groundedTrials]. Смешать их нельзя: у дня 24 вопрос без ответа предыдущего режима выпадает
+     * из сверки, а у дня 23 он же остаётся полноправным вопросом сравнения.
+     */
     private fun publish() {
         val trials = synchronized(lock) { completed.toList() }
-        if (trials.isEmpty()) return
+        val day24 = synchronized(lock) { groundedTrials.toList() }
+        if (trials.isEmpty() && day24.isEmpty()) return
         val header = header()
         val config = synchronized(lock) { requireNotNull(stageConfig) }
-        val stages = Stages.summary(trials)
-        // Отчёт дня 23 ведёт [StageReport]: в нём сравнение трёх режимов, разбор этапов и лог запросов.
-        val report = StageReport(header, config, Report(header))
-        val comparisonFile = workDir.resolve(REPORT_FILE)
-        val logFile = workDir.resolve(LOG_FILE)
-        Files.writeString(comparisonFile, report.markdown(trials, stages))
-        Files.writeString(logFile, report.log(trials))
-        // Метрики дня 22 считает тот же [Report.summary], что и в дне 22: второй набор формул
-        // разошёлся бы с первым, и сверять отчёты стало бы нечем.
-        val day22 = Report(header).summary(trials.map { it.day22 })
-        synchronized(lock) {
-            summary = day22
-            stageSummary = stages.toDto()
-            reports = listOf(
-                ReportDto("Сравнение и этапы", comparisonFile.toAbsolutePath().toString()),
-                ReportDto("Лог запросов", logFile.toAbsolutePath().toString())
+        val written = ArrayList<ReportDto>()
+        var day22Summary: Summary? = null
+        var stagesDto: StagesDto? = null
+        var groundingDto: GroundingDto? = null
+        if (trials.isNotEmpty()) {
+            val stages = Stages.summary(trials)
+            // Отчёт дня 23 ведёт [StageReport]: в нём сравнение трёх режимов, разбор этапов и лог запросов.
+            val report = StageReport(header, config, Report(header))
+            val comparisonFile = workDir.resolve(REPORT_FILE)
+            val logFile = workDir.resolve(LOG_FILE)
+            Files.writeString(comparisonFile, report.markdown(trials, stages))
+            Files.writeString(logFile, report.log(trials))
+            // Метрики дня 22 считает тот же [Report.summary], что и в дне 22: второй набор формул
+            // разошёлся бы с первым, и сверять отчёты стало бы нечем.
+            day22Summary = Report(header).summary(trials.map { it.day22 })
+            stagesDto = stages.toDto()
+            written += ReportDto("Сравнение и этапы", comparisonFile.toAbsolutePath().toString())
+            written += ReportDto("Лог запросов", logFile.toAbsolutePath().toString())
+        }
+        if (day24.isNotEmpty()) {
+            val report = GroundedReport(header, config, jsonFormat = true)
+            // Знаменатель фактов считается по вопросам самой сводки, а не по всему запуску: вопросы
+            // без сверки в отчёт не попали, и держать их в знаменателе значило бы занижать охват.
+            val groundingSummary = Grounding.summary(
+                checks = day24.map { it.check },
+                factsTotal = day24.sumOf { it.control.facts.size }
             )
+            val comparisonFile = workDir.resolve(GROUNDED_REPORT_FILE)
+            val logFile = workDir.resolve(GROUNDED_LOG_FILE)
+            Files.writeString(comparisonFile, report.markdown(day24, groundingSummary))
+            Files.writeString(logFile, report.log(day24))
+            groundingDto = groundingSummary.toDto()
+            written += ReportDto("Grounding: ответы, источники и цитаты", comparisonFile.toAbsolutePath().toString())
+            written += ReportDto("Grounding: путь запроса", logFile.toAbsolutePath().toString())
+        }
+        // Поля состояния переписываются только тем, что посчитано сейчас: иначе отчёт об одном
+        // вопросе стирал бы сводку по всем уже прогнанным.
+        synchronized(lock) {
+            if (day22Summary != null) summary = day22Summary
+            if (stagesDto != null) stageSummary = stagesDto
+            if (groundingDto != null) grounding = groundingDto
+            reports = written
         }
     }
 
@@ -623,6 +904,16 @@ class RagSession(
 
         const val REPORT_FILE = "report.md"
         const val LOG_FILE = "log.md"
+
+        /**
+         * Отчёты дня 24 — отдельные файлы рядом с отчётами дня 23.
+         *
+         * Имена с пометкой дня, а не общие, потому что это другой отчёт (ответы с источниками
+         * и цитатами против сравнения трёх режимов): общий файл переписывал бы сравнение, и один
+         * из двух отчётов исчезал бы при каждом прогоне.
+         */
+        const val GROUNDED_REPORT_FILE = "report-day24.md"
+        const val GROUNDED_LOG_FILE = "log-day24.md"
 
         const val BUSY_MESSAGE = "Прогон уже идёт: дождитесь его конца"
         const val NO_QUESTIONS_MESSAGE = "Не выбрано ни одного вопроса"

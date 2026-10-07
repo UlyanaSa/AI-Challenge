@@ -47,7 +47,7 @@ fun main(args: Array<String>) {
     }
 
     try {
-        runBlocking { run(options, apiKey) }
+        runBlocking { if (options.grounded) runGrounding(options, apiKey) else run(options, apiKey) }
     } catch (cause: PdfLoadException) {
         println("База дня не разобралась: ${cause.message}")
         exitProcess(1)
@@ -185,6 +185,123 @@ private suspend fun run(options: Options, apiKey: String) {
 }
 
 /**
+ * Прогон дня 24: grounded-ответы против ответов предыдущего дня на одних и тех же выдачах.
+ *
+ * Главное решение прогона — **выдача ищется один раз на вопрос** и уходит в оба режима. Предыдущий
+ * отвечает по ней так же, как отвечал в дне 23 (тот же промпт, тот же контекст), grounded — по ней же,
+ * но с проверкой достаточности и требованием цитат. Именно это делает сравнение сравнением дня 24:
+ * разница между колонками — разница проверок, а не поиска, и вопрос «стало ли проверяемо» отделяется
+ * от вопроса «стало ли точнее». Второй поиск дал бы другую выдачу, и разницу можно было бы списать
+ * на шум эмбеддингов.
+ *
+ * Правило «модель не отвечает при слабом контексте» проверяется порядком вызовов, а не обещанием:
+ * при недостаточном контексте [GroundedAgent] возвращает отказ, не обращаясь к модели, и в логе
+ * такого вопроса контекста нет вовсе. Предыдущий режим при этом спрашивается всегда — иначе
+ * сравнивать было бы не с чем, и «grounded отказался» ничего не говорило бы о том, отвечал ли
+ * на этот вопрос обычный RAG.
+ *
+ * Порог достаточности — тот же, что у фильтра (задание §8): второе число для «хватает ли контекста»
+ * разошлось бы с первым, и объяснить отказ разными порогами было бы нечем.
+ */
+private suspend fun runGrounding(options: Options, apiKey: String) {
+    val embedding = EmbeddingProviders.fromEnv()
+    println("Векторы: ${embedding.name} (${embedding.note})")
+
+    val base = Corpus.read(options.dir)
+    if (base == null) {
+        println(Corpus.MISSING_MESSAGE)
+        return
+    }
+    println("База: ${base.text} — ${base.chars} символов, ${base.tokens} токенов, страниц ${base.pages.size}")
+
+    val index = RagIndex(options.dir, embedding, options.strategy)
+    val reuse = index.exists && !options.rebuild
+    val built = if (reuse) null else index.build(base) { done, total ->
+        if (done == total || done % PROGRESS_STEP == 0) println("  индексация: $done из $total")
+    }
+    val chunks = built?.chunks?.size ?: index.chunkCount()
+    val indexMillis = built?.elapsedMillis ?: 0L
+    println(
+        if (reuse) "Индекс уже собран: ${index.file} — $chunks чанков, переиндексации нет (--rebuild пересоберёт)"
+        else "Индекс: ${index.file} — $chunks чанков, ${"%.1f".format(indexMillis / 1000.0)} с"
+    )
+
+    val llm = Api.model(apiKey)
+    val model = options.model
+    val rewriter = options.rewriterOf(llm, model)
+    val reranker = options.rerankerOf(llm, model)
+    val pipeline = RagPipeline(
+        finder = index.retriever(options.retrievalTopK),
+        rewriter = rewriter,
+        filter = SimilarityFilter(options.threshold),
+        reranker = reranker,
+        finalTopK = options.finalTopK
+    )
+    val previous = RagAgent(llm, pipeline, model)
+    val grounded = GroundedAgent(llm, model, options.threshold, jsonFormat = !options.plainText)
+
+    val questions = options.questions()
+    val trials = questions.map { control ->
+        // Одна выдача на два ответа: [RagPipeline.find] вызывается здесь, а не внутри агента,
+        // чтобы grounded-режим не искал второй раз и в сравнение не попала разница выдач.
+        val found = pipeline.find(control.question)
+        val answer = previous.askWith(control.question, Mode.WITH_RAG, found)
+        val previousRun = Run(control, answer, Check.evaluate(control, answer.text, answer.sources))
+        val groundedAnswer = grounded.answer(control.question, found)
+        val trial = GroundedTrial(
+            control = control,
+            previous = previousRun,
+            grounded = groundedAnswer,
+            check = Grounding.check(control, previousRun, groundedAnswer)
+        )
+        println(
+            "${control.id}: предыдущий ${if (trial.check.previousCorrect) "верно" else "нет"}, " +
+                "grounded ${if (trial.check.correct) "верно" else "нет"}, " +
+                "источников ${groundedAnswer.sources.size}, цитат ${groundedAnswer.claims.size}" +
+                (groundedAnswer.refusal?.let { ", отказ: ${it.title}" } ?: "") +
+                (groundedAnswer.note?.let { " ($it)" } ?: "")
+        )
+        trial
+    }
+
+    val header = RunHeader(
+        model = model,
+        embedding = embedding.name,
+        strategy = options.strategy,
+        topK = options.topK,
+        baseChars = base.chars,
+        baseTokens = base.tokens,
+        basePages = base.pages.size,
+        chunks = chunks,
+        reused = reuse,
+        indexMillis = indexMillis
+    )
+    val report = GroundedReport(
+        header = header,
+        stages = StageConfig(
+            baselineTopK = options.topK,
+            retrievalTopK = options.retrievalTopK,
+            finalTopK = options.finalTopK,
+            threshold = options.threshold,
+            rewrite = rewriter?.name,
+            rerank = reranker?.name
+        ),
+        jsonFormat = !options.plainText
+    )
+
+    val summary = Grounding.summary(trials.map { it.check }, questions.sumOf { it.facts.size })
+    println()
+    println(report.console(trials, summary))
+
+    val comparison = options.dir.resolve(REPORT_FILE)
+    Files.writeString(comparison, report.markdown(trials, summary))
+    val log = options.dir.resolve(LOG_FILE)
+    Files.writeString(log, report.log(trials))
+    println("Ответы, источники и цитаты: $comparison")
+    println("Путь запроса по этапам: $log")
+}
+
+/**
  * Подбор порога (§18): таблица значений на одной выдаче, с ответами модели на каждом пороге.
  *
  * Отсутствие порогов в запуске — не ошибка: обычный прогон их не считает. Когда пороги заданы,
@@ -314,7 +431,11 @@ private data class Options(
     /** Пороги для подбора (§18): пусто — подбор не запускается. */
     val thresholds: List<Double>,
     /** Проверять ли переписывание сравнением двух выдач (§16). */
-    val rewriteCheck: Boolean
+    val rewriteCheck: Boolean,
+    /** Режим дня 24: ответы с источниками, цитатами и проверкой достаточности вместо сравнения моделей. */
+    val grounded: Boolean,
+    /** Не просить у API ответ строго в виде JSON: проверка формата остаётся, но модель её не видит. */
+    val plainText: Boolean
 ) {
 
     /** Вопросы прогона: набор целиком или выбранные по номерам. */
@@ -358,6 +479,8 @@ private data class Options(
             var rebuild = false
             var thresholds = emptyList<Double>()
             var rewriteCheck = false
+            var grounded = false
+            var plainText = false
 
             for (arg in args) {
                 if (arg == "--rebuild") {
@@ -366,6 +489,14 @@ private data class Options(
                 }
                 if (arg == "--rewrite-check") {
                     rewriteCheck = true
+                    continue
+                }
+                if (arg == "--grounded") {
+                    grounded = true
+                    continue
+                }
+                if (arg == "--plain-text") {
+                    plainText = true
                     continue
                 }
                 val (name, value) = split(arg)
@@ -416,7 +547,9 @@ private data class Options(
                 only = only,
                 rebuild = rebuild,
                 thresholds = thresholds,
-                rewriteCheck = rewriteCheck
+                rewriteCheck = rewriteCheck,
+                grounded = grounded,
+                plainText = plainText
             )
         }
 
@@ -547,6 +680,8 @@ private val USAGE = """
       --rerank=heuristic         второй этап: none, heuristic или llm
       --sweep=0.40,0.50,0.60     подобрать порог: таблица по значениям (идёт после сравнения)
       --rewrite-check            сравнить поиск по исходному и переписанному запросу
+      --grounded                 день 24: ответы с источниками, цитатами и режимом «не знаю»
+      --plain-text               день 24: не требовать у API ответ объектом JSON
       --strategy=structural      нарезка корпуса: structural или fixed
       --model=deepseek-v4-flash  модель, которой отвечают все режимы
       --only=q03,q04             прогнать часть набора

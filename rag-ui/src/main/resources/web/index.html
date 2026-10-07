@@ -3,12 +3,12 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>День 23. Три режима RAG: переписывание, фильтр и реранкинг</title>
+    <title>День 23–24. RAG: три режима и grounded-ответ с цитатами</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-    <h1>День 23. RAG: без базы, базовый и улучшенный</h1>
+    <h1>День 23–24. RAG: без базы, базовый, улучшенный и grounded</h1>
     <p class="subtitle" id="run-title">Загрузка прогона…</p>
 </header>
 
@@ -67,6 +67,12 @@
         <ul class="reports" id="reports" hidden></ul>
     </section>
 
+    <section class="panel" id="grounding-panel" hidden>
+        <h2>Сводка дня 24: grounded-ответы, источники и цитаты</h2>
+        <p class="hint" id="grounding-hint"></p>
+        <div class="metrics" id="grounding-metrics"></div>
+    </section>
+
     <section class="panel">
         <h2><span class="step">2</span> Десять контрольных вопросов</h2>
         <p class="hint">
@@ -76,7 +82,10 @@
             порогом и вторым этапом. Оценка 0–2 у всех одна: 0 — ответа нет или он неверен, 1 — часть
             ожидаемых фактов, 2 — все. «Источник» — попал ли ожидаемый текст в Top-K базового режима;
             «Hit@K» — дошёл ли он до финального контекста улучшенного, а «Потеря» называет этап,
-            на котором правильный фрагмент пропал.
+            на котором правильный фрагмент пропал. Под вопросом раскрывается блок
+            «Grounded-ответ (день 24)»: ответ grounded-режима на той же выдаче, его источники,
+            цитаты с программной проверкой, решение о достаточности и итог по вопросу. Там, где
+            подтверждать нечем, правильным исходом считается отказ, а не ответ по памяти.
         </p>
         <table class="questions">
             <thead>
