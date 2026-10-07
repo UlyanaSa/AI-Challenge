@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>День 22. Два агента: с базой и без базы</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+    <h1>День 22. RAG: один вопрос — два агента</h1>
+    <p class="subtitle" id="run-title">Загрузка прогона…</p>
+</header>
+
+<main>
+    <section class="panel">
+        <h2><span class="step">1</span> Прогон и индекс</h2>
+        <p class="hint">
+            Вопросы набора не редактируются: вместе с каждым заранее известен ответ, ключевые факты
+            и место в книге — по ним и считается оценка. Индекс базы строится один раз: поиск идёт
+            по готовому файлу, и в шапке видно, был он собран заново или взят готовым.
+        </p>
+        <div class="controls settings">
+            <label class="field">
+                <span>top_k — сколько фрагментов уходит в запрос</span>
+                <input type="number" id="topk" min="1" max="20" step="1" inputmode="numeric">
+            </label>
+            <button id="run-all" type="button">Прогнать все десять</button>
+            <button id="rebuild" type="button" class="secondary">Пересобрать индекс</button>
+        </div>
+        <p class="status" id="state-status">Загрузка…</p>
+        <div class="progress" id="progress-wrap" hidden>
+            <div class="progress-bar" id="progress-bar"></div>
+        </div>
+        <p class="note" id="key-note" hidden></p>
+        <dl class="facts-grid" id="setup-facts"></dl>
+        <ul class="reports" id="reports" hidden></ul>
+    </section>
+
+    <section class="panel">
+        <h2><span class="step">2</span> Десять контрольных вопросов</h2>
+        <p class="hint">
+            Каждый вопрос прогоняется дважды: сначала агент без базы — он отвечает по памяти,
+            потом агент с базой — он отвечает по найденным фрагментам. Оценка 0–2 у обоих одна:
+            0 — ответа нет или он неверен, 1 — часть ожидаемых фактов, 2 — все. «Источник» —
+            попал ли ожидаемый текст в Top-K: это отдельная проверка поиска, она не входит
+            в оценку ответа и отделяет ошибку поиска от ошибки генерации.
+        </p>
+        <table class="questions">
+            <thead>
+            <tr>
+                <th>#</th>
+                <th>Вопрос, ожидание и место в книге</th>
+                <th>Без RAG</th>
+                <th>С RAG</th>
+                <th>Источник</th>
+                <th>Итог</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody id="questions-body"></tbody>
+        </table>
+    </section>
+
+    <section class="panel" id="metrics-panel" hidden>
+        <h2>Итоговые метрики</h2>
+        <p class="hint" id="metrics-hint"></p>
+        <div class="metrics" id="metrics"></div>
+    </section>
+
+    <section class="panel">
+        <h2><span class="step">3</span> Конвейер вопроса</h2>
+        <p class="hint" id="pipeline-hint">
+            Выберите вопрос в таблице — здесь появятся оба конвейера: вопрос, вектор вопроса,
+            выдача поиска с идентификаторами и близостями, контекст, ушедший в модель, ответ
+            и сверка с ожиданием. Звенья показываются так, как они выполнялись.
+        </p>
+        <div class="agents" id="pipeline"></div>
+    </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
