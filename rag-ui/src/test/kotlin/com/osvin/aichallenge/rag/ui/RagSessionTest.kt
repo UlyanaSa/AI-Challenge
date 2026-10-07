@@ -1,12 +1,14 @@
 package com.osvin.aichallenge.rag.ui
 
 import com.osvin.aichallenge.agent.LlmClient
+import com.osvin.aichallenge.indexing.embedding.EmbeddingProvider
 import com.osvin.aichallenge.indexing.embedding.HashingEmbeddingProvider
 import com.osvin.aichallenge.indexing.model.ChunkingStrategyType
 import com.osvin.aichallenge.indexing.ollama.Embedding
 import com.osvin.aichallenge.models.ChatMessage
 import com.osvin.aichallenge.models.DeepSeekRequest
 import com.osvin.aichallenge.models.DeepSeekResponse
+import com.osvin.aichallenge.rag.RagIndex
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -82,6 +84,23 @@ class RagSessionTest {
         note = "тест",
         features = null
     )
+
+    /**
+     * Провайдер, который считает вектор небыстро: на нём индекс собирается секундами.
+     *
+     * Нужен ровно для одного случая — остановки посреди сборки. Хеширование считает вектор без
+     * задержек и без единой точки приостановки, и остановку на нём проверить нечем: сборка успевает
+     * закончиться раньше, чем тест её заметит.
+     */
+    private class SlowProvider(private val pauseMillis: Long) : EmbeddingProvider {
+
+        override val dimension = 32
+
+        override suspend fun embed(text: String): List<Float> {
+            delay(pauseMillis)
+            return List(dimension) { index -> ((text.length + index) % 7).toFloat() }
+        }
+    }
 
     private fun session(dir: Path, scope: CoroutineScope, llm: LlmClient) = RagSession(
         workDir = dir,
@@ -261,6 +280,46 @@ class RagSessionTest {
         assertEquals(StateDto.DONE, state.state)
         assertEquals(listOf("q03"), state.results.map { it.id }, "остались только результаты нового прогона")
         assertEquals(1, requireNotNull(state.summary).questions)
+        scope.cancel()
+    }
+
+    @Test
+    fun `остановка во время сборки индекса не оставляет неполного индекса`() = runBlocking {
+        val dir = Files.createTempDirectory("rag-ui-stop-index")
+        val scope = CoroutineScope(Dispatchers.Default)
+        val embedding = Embedding(
+            provider = SlowProvider(pauseMillis = 40),
+            kind = "slow",
+            model = null,
+            note = "тест",
+            features = null
+        )
+        val session = RagSession(
+            workDir = dir,
+            scope = scope,
+            embedding = embedding,
+            strategy = ChunkingStrategyType.STRUCTURAL,
+            model = "test-model",
+            apiKey = "test-key",
+            llm = { FakeLlm(answer) }
+        )
+        if (session.setup().base.chars == 0) return@runBlocking
+
+        assertEquals(StartOutcome.Accepted, session.start(listOf("q01"), settings))
+        // Ждём середину сборки: останавливать её до первого чанка значило бы проверять пустое место.
+        withTimeout(120_000) {
+            while (session.state().index.state != IndexDto.BUILDING || session.state().index.chunks == 0) delay(20)
+        }
+        assertTrue(session.stop(), "сборку индекса тоже можно остановить")
+
+        val stopped = session.state()
+        assertEquals(StateDto.STOPPED, stopped.state)
+        assertEquals(IndexDto.IDLE, stopped.index.state, "индекс не собран: сборку прервали")
+        assertEquals(0, stopped.index.chunks)
+        // Недописанный индекс не остаётся на диске: хранилище пишет файл после каждого чанка, и его
+        // обрывок следующий прогон принял бы за готовый индекс и ответил бы по неполной базе.
+        assertTrue(!RagIndex(dir, embedding, ChunkingStrategyType.STRUCTURAL).exists, "обрывок индекса удалён")
+        assertTrue(!session.stop(), "останавливать больше нечего")
         scope.cancel()
     }
 }

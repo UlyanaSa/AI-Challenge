@@ -39,6 +39,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Чем кончился запуск прогона: принято или отвергнуто с причиной. */
 sealed interface StartOutcome {
@@ -434,8 +435,12 @@ class RagSession(
      * и заставлять человека останавливать прошлый набор руками значило бы требовать двух нажатий
      * там, где одно очевидно. Проверки при этом идут до вытеснения: отвергнутый запуск не должен
      * стирать данные того прогона, который продолжает идти.
+     *
+     * Прежняя работа отменяется и дожидается (как в [stop]): она должна успеть убрать за собой —
+     * прерванная сборка индекса удаляет свой недописанный файл, — и только после этого стираются
+     * данные и занимается слот. Иначе её уборка прошла бы по файлам нового прогона.
      */
-    fun start(ids: List<String>, settings: RunSettings): StartOutcome {
+    suspend fun start(ids: List<String>, settings: RunSettings): StartOutcome {
         val current = base ?: return StartOutcome.Rejected(Corpus.MISSING_MESSAGE)
         if (apiKey == null) return StartOutcome.Rejected(NO_KEY_MESSAGE)
         if (ids.isEmpty()) return StartOutcome.Rejected(NO_QUESTIONS_MESSAGE)
@@ -445,6 +450,10 @@ class RagSession(
             return StartOutcome.Rejected("В наборе нет вопросов: ${unknown.joinToString(", ")}")
         }
 
+        synchronized(lock) { job?.takeIf { it.isActive } }?.let { previous ->
+            previous.cancel()
+            withTimeoutOrNull(STOP_TIMEOUT_MS) { previous.join() }
+        }
         synchronized(lock) {
             // Начатый прогон не отвергается, а вытесняется: страница даёт кнопку остановки, и ждать
             // конца чужого набора, чтобы запустить свой, незачем. Вытеснение отменяет работу и чистит
@@ -469,22 +478,34 @@ class RagSession(
      * и по ним видно, где прогон встал. Чистит данные новый запуск ([start]) — там это уместно, потому
      * что он и описывает другой прогон.
      *
-     * Номер работы увеличивается до отмены: записи отменённого прогона после этого не принимаются,
-     * и его запоздавший ответ не попадёт ни в состояние, ни в файлы. Неполный индекс, оставшийся
-     * от прерванной сборки, удаляет сама сборка ([build]): файл после каждого чанка — это ещё не индекс.
+     * Работа отменяется и **дожидается**: прерванная сборка индекса удаляет свой недописанный файл
+     * ([build]) и знает, что делать, ровно пока её номер текущий. Менять номер до её конца значило бы
+     * оставить на диске обрывок индекса, а состояние — в «собирается» навсегда. Ожидание ограничено
+     * ([STOP_TIMEOUT_MS]): работа, которая не отреагировала на отмену, всё равно перестаёт приниматься
+     * — по номеру, — а состояние и индекс лечит следующий прогон ([prepareIndex] не доверяет файлу,
+     * оставленному сборкой).
+     *
+     * Состояние переводится в [StateDto.STOPPED] до отмены: работу закрывает её собственный `finally`,
+     * и без этого он объявил бы остановленный прогон законченным.
      */
-    fun stop(): Boolean = synchronized(lock) {
-        val current = job?.takeIf { it.isActive } ?: return false
-        current.cancel()
-        job = null
-        runId++
-        if (state == StateDto.RUNNING) {
-            state = StateDto.STOPPED
-            stage = null
-            stageTitle = null
-            elapsedMs = if (startedAt > 0) (System.nanoTime() - startedAt) / 1_000_000 else elapsedMs
+    suspend fun stop(): Boolean {
+        val current = synchronized(lock) {
+            val running = job?.takeIf { it.isActive } ?: return false
+            if (state == StateDto.RUNNING) {
+                state = StateDto.STOPPED
+                stage = null
+                stageTitle = null
+                elapsedMs = if (startedAt > 0) (System.nanoTime() - startedAt) / 1_000_000 else elapsedMs
+            }
+            running
         }
-        true
+        current.cancel()
+        withTimeoutOrNull(STOP_TIMEOUT_MS) { current.join() }
+        synchronized(lock) {
+            job = null
+            runId++
+        }
+        return true
     }
 
     /**
@@ -634,7 +655,9 @@ class RagSession(
                     stage = null
                     stageTitle = null
                     job = null
-                    if (state != StateDto.FAILED) state = StateDto.DONE
+                    // STOPPED ставит [stop] до отмены: без этой проверки `finally` объявил бы
+                    // остановленный прогон законченным.
+                    if (state != StateDto.FAILED && state != StateDto.STOPPED) state = StateDto.DONE
                 }
             }
         }
@@ -785,17 +808,26 @@ class RagSession(
      *
      * Проверка идёт на диске ([RagIndex.exists]), а не по состоянию страницы: файл мог появиться
      * или пропасть между запусками, и решение должно опираться на то, что есть сейчас.
+     *
+     * Исключение одно: файл, оставленный **идущей** сборкой, готовым не считается. Индекс пишется
+     * по чанкам, и если сборку остановили в середине, на диске лежит её обрывок — он не пуст,
+     * поэтому выглядел бы готовым индексом, и прогон ответил бы по неполной базе, не сказав об этом.
+     * Такая сборка удаляет свой файл сама ([build]); эта проверка — на случай, когда она не успела
+     * этого сделать до конца ожидания в [stop], и состояние осталось «собирается».
      */
     private suspend fun prepareIndex(token: Long, current: DayBase): RagIndex {
-        synchronized(lock) {
-            if (index.exists) {
+        val usable = synchronized(lock) {
+            if (index.exists && indexState != IndexDto.BUILDING) {
                 indexState = IndexDto.READY
                 indexChunks = runCatching { index.chunkCount() }.getOrDefault(indexChunks)
                 indexReused = true
                 indexMillis = 0L
+                true
+            } else {
+                false
             }
         }
-        return if (index.exists) index else build(token, current)
+        return if (usable) index else build(token, current)
     }
 
     /**
@@ -837,8 +869,10 @@ class RagSession(
             return index
         } catch (cause: CancellationException) {
             synchronized(lock) {
-                // Файл трогаем только у текущей работы: у вытесненной сборки на диске уже пишет
-                // следующая, и удаление отняло бы у неё готовый индекс.
+                // Файл трогаем, только пока эта работа текущая. Обычно так и есть: [stop] и [start]
+                // отменяют работу и дожидаются её конца, а номер меняют после. Но ожидание ограничено,
+                // и работа, не отреагировавшая на отмену, к этому моменту уже теряет номер — тогда
+                // файл ей не принадлежит: на диске может писать следующая сборка.
                 if (token == runId) {
                     runCatching { Files.deleteIfExists(index.file) }
                     indexState = IndexDto.IDLE
@@ -982,6 +1016,16 @@ class RagSession(
          */
         const val GROUNDED_REPORT_FILE = "report-day24.md"
         const val GROUNDED_LOG_FILE = "log-day24.md"
+
+        /**
+         * Сколько ждём конца отменённой работы: прогона или сборки индекса.
+         *
+         * Отмена в корутине кооперативная, и работа может не отреагировать мгновенно (запрос к модели
+         * или запись файла доводятся до конца). Ждать бесконечно нельзя — страница ждёт ответа
+         * на нажатие, — а не ждать вовсе значило бы оставить за прерванной сборкой её недописанный
+         * файл. Пять секунд покрывают уборку, а не отреагировавшую работу добирает номер прогона.
+         */
+        const val STOP_TIMEOUT_MS = 5_000L
 
         /**
          * Отказ пересборки при идущем прогоне: пересборку вытеснить прогоном можно, а наоборот — нет.
