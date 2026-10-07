@@ -116,7 +116,7 @@ object ChatPrompt {
         question: String,
         sources: List<Source>,
         memory: TaskMemory,
-        window: List<ChatTurn>,
+        window: List<DialogueMessage>,
         emptyContext: Boolean = false
     ): List<ChatMessage> {
         val messages = ArrayList<ChatMessage>()
@@ -136,13 +136,12 @@ object ChatPrompt {
      * не было, — иначе модель ответит на него второй раз как на новый. Текст берётся общий
      * ([GroundedAnswer.REFUSAL_TEXT]), чтобы чат не завёл формулировку отказа, отличную от дня 24.
      */
-    fun history(window: List<ChatTurn>): List<ChatMessage> {
+    fun history(window: List<DialogueMessage>): List<ChatMessage> {
         if (window.isEmpty()) return emptyList()
         val messages = ArrayList<ChatMessage>()
         messages += ChatMessage(role = SYSTEM, content = HISTORY_NOTE)
-        window.forEach { turn ->
-            messages += ChatMessage(role = USER, content = turn.question)
-            messages += ChatMessage(role = ASSISTANT, content = turn.answer ?: GroundedAnswer.REFUSAL_TEXT)
+        window.forEach { replica ->
+            messages += ChatMessage(role = replica.role.modelRole(), content = replica.content)
         }
         return messages
     }
@@ -171,8 +170,10 @@ object ChatPrompt {
         "последнего вопроса. Если цель уже была сформулирована и человек её не менял, верни её же " +
         "слово в слово.\n" +
         "- clarifications: что человек уточнил по ходу разговора — короткие фразы, по одной мысли.\n" +
-        "- constraints: правила и рамки, которые человек установил для ответов, " +
-        "например «отвечай только по первой главе» или «не больше трёх пунктов».\n" +
+        "- constraints: только те правила и рамки, которые человек установил сам в этом разговоре, " +
+        "например «отвечай только по первой главе» или «не больше трёх пунктов». Правила из твоего " +
+        "собственного задания (цитировать, не выдумывать, признавать нехватку сведений) сюда " +
+        "не попадают: их установил не человек, и в памяти они выглядели бы как его требования.\n" +
         "- terms: термины этого разговора и их значения — пары " +
         "{\"term\": \"слово\", \"meaning\": \"что оно значит в разговоре\"}.\n" +
         "Ничего не выдумывай: то, чего в разговоре не было, в память не попадает. Пустые списки — " +
@@ -190,10 +191,8 @@ object ChatPrompt {
      * но память меняется именно ею, и повторять её как «новое сообщение» дешевле, чем объяснять
      * модели, какая из реплик окна новая.
      */
-    fun memory(memory: TaskMemory, window: List<ChatTurn>, question: String): List<ChatMessage> {
-        val dialogue = window.joinToString("\n") { turn ->
-            "человек: ${turn.question}\nассистент: ${turn.answer ?: GroundedAnswer.REFUSAL_TEXT}"
-        }
+    fun memory(memory: TaskMemory, window: List<DialogueMessage>, question: String): List<ChatMessage> {
+        val dialogue = window.joinToString("\n") { replica -> "${replica.role.title}: ${replica.content}" }
         val previous = memory.render().takeIf { it.isNotEmpty() } ?: "(память пока пуста)"
         return listOf(
             ChatMessage(role = SYSTEM, content = MEMORY_SYSTEM),
@@ -233,8 +232,12 @@ object ChatPrompt {
      * Память идёт и сюда: значение термина меняет запрос к поиску («сын» → «Пётр Степанович»),
      * и без блока памяти переписывание вернуло бы слово в первом попавшемся значении.
      */
-    fun rewrite(question: String, memory: TaskMemory, window: List<ChatTurn>): List<ChatMessage> {
-        val dialogue = window.joinToString("\n") { turn -> "человек: ${turn.question}" }
+    fun rewrite(question: String, memory: TaskMemory, window: List<DialogueMessage>): List<ChatMessage> {
+        // Переписывателю идут только реплики человека, а не весь разговор: его задача — раскрыть
+        // неполный вопрос по тому, что человек уже назвал, а ответы ассистента — это уже выводы
+        // системы, и подставлять их в запрос значило бы искать по своим же словам, а не по репликам.
+        val dialogue = window.filter { replica -> replica.role == DialogueRole.USER }
+            .joinToString("\n") { replica -> "${replica.role.title}: ${replica.content}" }
         val terms = memory.render().takeIf { it.isNotEmpty() } ?: "(память пока пуста)"
         return listOf(
             ChatMessage(role = SYSTEM, content = REWRITE_SYSTEM),
@@ -250,4 +253,16 @@ object ChatPrompt {
     private const val SYSTEM = "system"
     private const val USER = "user"
     private const val ASSISTANT = "assistant"
+
+    /**
+     * Роль реплики разговора в ролях запроса к модели.
+     *
+     * Перевод стоит здесь, а не в [DialogueMessage], потому что слова «user» и «assistant» — это
+     * словарь запроса к модели, и он принадлежит промпту: истории про роли знать не нужно, чем
+     * именно называет их API.
+     */
+    private fun DialogueRole.modelRole(): String = when (this) {
+        DialogueRole.USER -> USER
+        DialogueRole.ASSISTANT -> ASSISTANT
+    }
 }

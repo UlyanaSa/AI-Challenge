@@ -28,6 +28,8 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 data class ChatStateDto(
+    /** Имя разговора (`ChatSession.sessionId`): по нему разговор называют в отчёте и транскрипте. */
+    val sessionId: String,
     /** Можно ли вести разговор: есть и ключ, и построенный индекс. */
     val available: Boolean,
     /** Почему чат недоступен; `null` — доступен. Причина уходит человеку строкой, а не пустой лентой. */
@@ -83,6 +85,8 @@ data class ChatScenarioDto(
 data class ChatTurnDto(
     /** Номер хода в разговоре, с единицы. */
     val index: Int,
+    /** Время реплики человека (ISO-8601): по нему видно, когда разговор шёл. */
+    val at: String,
     /** Вопрос человека так, как он его задал. */
     val question: String,
     /** Запрос, которым искали: у неполного вопроса он раскрыт по истории и отличается от вопроса. */
@@ -198,6 +202,8 @@ data class ChatSummaryDto(
     val sourcesEverywhere: Boolean,
     /** Цель зафиксирована и не менялась. */
     val goalKept: Boolean,
+    /** У каждого отказа названа причина — вторая половина требования «источники всегда». */
+    val refusalsNamed: Boolean,
     /** Строка итога для страницы: те же числа, что в полях. */
     val line: String
 )
@@ -266,6 +272,7 @@ internal fun ChatScenario.toDto(): ChatScenarioDto = ChatScenarioDto(
 /** Ход разговора переводится поле в поле; время берётся полное — так его читает человек. */
 internal fun ChatTurn.toDto(): ChatTurnDto = ChatTurnDto(
     index = index,
+    at = at.toString(),
     question = question,
     query = query,
     queryNote = queryNote,
@@ -339,6 +346,7 @@ internal fun ChatSummary.toDto(): ChatSummaryDto = ChatSummaryDto(
     memoryFailed = memoryFailed,
     sourcesEverywhere = sourcesEverywhere,
     goalKept = goalKept,
+    refusalsNamed = refusalsNamed,
     line = line
 )
 

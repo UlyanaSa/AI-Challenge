@@ -53,7 +53,7 @@ class ChatRewriter(
     )
 
     /** Готовит запрос по текущему вопросу, памяти задачи и последним репликам. */
-    suspend fun rewrite(question: String, memory: TaskMemory, window: List<ChatTurn>): Query {
+    suspend fun rewrite(question: String, memory: TaskMemory, window: List<DialogueMessage>): Query {
         val messages = ChatPrompt.rewrite(question, memory, window)
         val started = System.nanoTime()
         val response = try {

@@ -597,6 +597,9 @@ class RagSession(
         val session = if (reason == null) chat else null
         val turns = session?.turns().orEmpty()
         ChatStateDto(
+            // Имя разговора отдаётся и у недоступного чата, если разговор уже собран: разговор
+            // остаётся собой, пока идёт пересборка индекса, и терять его имя незачем.
+            sessionId = (session ?: chat)?.sessionId.orEmpty(),
             available = session != null,
             note = reason,
             error = chatError,
@@ -677,8 +680,12 @@ class RagSession(
      * называют, что именно идёт. Неизвестное имя сюда не доходит — маршрут отвергает его с перечнем
      * имён ([ChatScenarios.names]), и здесь оно означает уже разобранный сценарий.
      *
-     * Сценарий идёт на том же разговоре, что и реплики человека: память задачи и история у них одни,
-     * и это условие сравнения — иначе числа сценария описывали бы другой разговор.
+     * Сценарий начинается с **чистого разговора**: прежняя лента и память задачи стираются.
+     * Иначе приговор сценария описывал бы чужую историю — и, что хуже, мерка дня перестала бы
+     * что-либо значить: «цель держится» проверяется тем, что цель разговора, поставленная человеком
+     * в первой реплике, не менялась до последней, а если в памяти лежит цель предыдущего разговора,
+     * это утверждение проверяет уже не сценарий, а остатки прошлого прогона. Так же и повторное
+     * нажатие кнопки: два прогона одного сценария не должны складываться в разговор вдвое длиннее.
      */
     suspend fun chatScenario(name: String): ChatStateDto {
         val scenario = ChatScenarios.byName(name) ?: return chatState()
@@ -738,10 +745,21 @@ class RagSession(
      * и признаки дня считает `:rag`, и второго набора правил проверки на странице нет. Шаги при этом
      * видны по ходу: пока runner спрашивает сессию, сторож переписывает транскрипт на каждый новый
      * ход — по прерванному сценарию на диске должен остаться разговор, а не прошлый файл.
+     *
+     * Разговор стирается здесь, а не в [chatScenario], по порядку, а не по смыслу: между этими
+     * двумя вызовами фоновая задача не выполняется, и стирание должно попасть в тот же промежуток,
+     * в котором сценарий начинает спрашивать, — иначе первый же ход человека, попавший между
+     * запуском и стиранием, остался бы в памяти задачи, а сценарий считал бы не свой разговор.
+     * Приговор прошлого сценария убирается вместе с разговором: пока новый идёт, страница не должна
+     * показывать результат предыдущего как свой.
      */
     private suspend fun runScenario(scenario: ChatScenario) {
         try {
-            val session = synchronized(lock) { chatLocked() } ?: return
+            val session = synchronized(lock) {
+                chatScenarioResult = null
+                chatLocked()
+            } ?: return
+            session.reset()
             val run = coroutineScope {
                 val work = async { ChatScenarioRunner.run(session, scenario) }
                 var seen = session.turns().size
@@ -758,7 +776,7 @@ class RagSession(
             publishChat(session)
             Files.writeString(
                 workDir.resolve(CHAT_SCENARIO_PREFIX + scenario.name + ".md"),
-                ChatScenarioRunner.markdown(run, chatSettings, model)
+                ChatScenarioRunner.markdown(session.sessionId, run, chatSettings, model)
             )
             synchronized(lock) { chatScenarioResult = run.toDto() }
         } catch (cause: CancellationException) {
@@ -783,8 +801,14 @@ class RagSession(
      */
     private fun publishChat(session: ChatSession) {
         val turns = session.turns()
-        Files.writeString(workDir.resolve(CHAT_FILE), ChatReport.markdown(turns, chatSettings, model))
-        Files.writeString(workDir.resolve(CHAT_LOG_FILE), ChatReport.log(turns, chatSettings, model))
+        Files.writeString(
+            workDir.resolve(CHAT_FILE),
+            ChatReport.markdown(session.sessionId, turns, chatSettings, model)
+        )
+        Files.writeString(
+            workDir.resolve(CHAT_LOG_FILE),
+            ChatReport.log(session.sessionId, turns, chatSettings, model)
+        )
     }
 
     /**

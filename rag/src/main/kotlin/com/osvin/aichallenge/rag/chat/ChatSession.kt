@@ -9,6 +9,8 @@ import com.osvin.aichallenge.rag.SourceFinder
 import com.osvin.aichallenge.rag.Sufficiency
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.Instant
+import java.util.UUID
 
 /**
  * Настройки разговора: поиск, окно истории и порог достаточности — одним объектом.
@@ -108,6 +110,19 @@ class ChatSession(
     private val mutex = Mutex()
     private val turns = ArrayList<ChatTurn>()
 
+    /**
+     * Имя разговора: по нему разговор называют в отчёте и на странице.
+     *
+     * Идентификатор короткий и случайный, а не порядковый: на одной странице разговоров идёт несколько
+     * подряд (человек нажал «начать заново», прогнал сценарий), и «разговор №1» после сброса означал бы
+     * уже другой разговор. **Новый разговор получает новое имя** ([reset]): задание дня называет сессией
+     * именно разговор с его историей и памятью, а сброс заканчивает один разговор и начинает другой —
+     * и по имени в шапке транскрипта видно, к какому из них относится файл. Случайное имя не повторяется
+     * и между перезапусками страницы, поэтому транскрипты двух прогонов одного сценария различимы.
+     */
+    var sessionId: String = newSessionId()
+        private set
+
     /** Память задачи: то, что разговор зафиксировал и что уходит в каждый запрос к модели. */
     var memory: TaskMemory = TaskMemory()
         private set
@@ -117,6 +132,15 @@ class ChatSession(
 
     /** Полная история разговора — для отчёта и страницы. */
     fun turns(): List<ChatTurn> = turns.toList()
+
+    /**
+     * История разговора репликами: вопрос человека и ответ ассистента на каждый ход.
+     *
+     * Это та история, которую называет задание дня (`role`, `content`, `timestamp`), и из неё же
+     * собирается окно для промпта ([window]). Ходы остаются единицей состояния — в них есть память
+     * до и после, найденные фрагменты и запрос, — а реплики из них выводятся.
+     */
+    fun messages(): List<DialogueMessage> = turns.flatMap { turn -> turn.messages() }
 
     /** Последний ход: странице он нужен, чтобы показать ответ до следующего опроса. */
     fun lastTurn(): ChatTurn? = turns.lastOrNull()
@@ -128,6 +152,7 @@ class ChatSession(
      * и промежуточное состояние между «память обновлена» и «ход записан» не должно быть видно никому.
      */
     suspend fun ask(question: String): ChatTurn = mutex.withLock {
+        val at = Instant.now()
         val before = memory
         val window = window()
         val update = keeper.update(before, window, question)
@@ -163,7 +188,8 @@ class ChatSession(
             completionTokens = answer.completionTokens,
             millis = answer.millis,
             memoryMillis = update.millis,
-            rewriteMillis = query.millis
+            rewriteMillis = query.millis,
+            at = at
         )
         memory = update.memory
         turns += turn
@@ -180,9 +206,24 @@ class ChatSession(
     suspend fun reset() = mutex.withLock {
         turns.clear()
         memory = TaskMemory()
+        sessionId = newSessionId()
     }
 
-    /** Окно истории для промпта: последние реплики, не считая текущей (её добавляет промпт). */
-    private fun window(): List<ChatTurn> =
-        if (settings.windowTurns <= 0) emptyList() else turns.takeLast(settings.windowTurns)
+    /**
+     * Окно истории для промпта: последние реплики, не считая текущей (её добавляет промпт).
+     *
+     * Считается репликами, а не ходами, начиная с хода: «окно истории 5» из настроек — это пять
+     * реплик человека с ответами на них (те же десять сообщений, что окно генерации в `:agent`),
+     * и обрезать его посередине хода значило бы показать модели ответ без вопроса или вопрос
+     * без ответа.
+     */
+    private fun window(): List<DialogueMessage> =
+        if (settings.windowTurns <= 0) emptyList()
+        else turns.takeLast(settings.windowTurns).flatMap { turn -> turn.messages() }
+
+    private companion object {
+
+        /** Имя разговора: восемь знаков случайного идентификатора — их хватает и читать, и различать. */
+        fun newSessionId(): String = "s" + UUID.randomUUID().toString().replace("-", "").take(8)
+    }
 }

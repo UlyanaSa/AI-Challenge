@@ -55,7 +55,7 @@ class MemoryKeeper(
     )
 
     /** Читает разговор и возвращает память задачи после этого хода. */
-    suspend fun update(memory: TaskMemory, window: List<ChatTurn>, question: String): Update {
+    suspend fun update(memory: TaskMemory, window: List<DialogueMessage>, question: String): Update {
         val messages = ChatPrompt.memory(memory, window, question)
         val started = System.nanoTime()
         val response = try {

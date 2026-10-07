@@ -23,6 +23,8 @@ data class ChatSummary(
     /** Из них по памяти задачи — о самом разговоре. */
     val fromMemory: Int,
     val refusals: Int,
+    /** Отказы без названной причины: должно быть ноль. */
+    val refusalsWithoutReason: Int,
     /** Сбои обращения к модели: не отказ, а недошедший запрос. */
     val errors: Int,
     /** Ответы без источника: должно быть ноль. */
@@ -52,6 +54,15 @@ data class ChatSummary(
 
     /** Цель зафиксирована и с тех пор не менялась — то, что задание называет «не теряет цель». */
     val goalKept: Boolean get() = !goal.isNullOrBlank() && goalChanges.isEmpty()
+
+    /**
+     * У каждого отказа названа причина — вторая половина требования «источники всегда».
+     *
+     * У отказа источника нет и быть не может, и его источник — сказанная причина; отказ без причины
+     * был бы ответом без источника, то есть прямым нарушением задания. Пустой список отказов эту
+     * проверку проходит (нарушать нечего) — поэтому она и считается по отказам, а не по ходам.
+     */
+    val refusalsNamed: Boolean get() = refusalsWithoutReason == 0
 
     /** Строка итога для отчёта и страницы: те же числа, что в полях. */
     val line: String
@@ -85,6 +96,7 @@ object ChatReport {
             fromBase = turns.count { it.kind == ChatAnswerKind.BASE },
             fromMemory = turns.count { it.fromMemory },
             refusals = turns.count { it.refusal != null },
+            refusalsWithoutReason = turns.count { it.refusal != null && it.refusalReason.isNullOrBlank() },
             errors = turns.count { it.error != null },
             answersWithoutSource = turns.count { it.answered && !it.hasSource },
             sourcesTotal = turns.sumOf { it.sources.size },
@@ -95,10 +107,16 @@ object ChatReport {
                 .sumOf { it.checks.size - it.claims.size },
             goal = memory.goal,
             goalFixedAt = turns.firstOrNull { !it.memory.goal.isNullOrBlank() }?.index,
+            // Переформулировкой считается только смена непустой цели на другую непустую.
+            // Первое появление цели ею не является: до него цели не было вовсе, и записать это
+            // в «переформулировки» значило бы объявить провалом дня то, что цель как раз и появилась.
+            // Пустая цель после непустой тоже не переформулировка, а потеря — но её в этом разговоре
+            // быть не может: слияние памяти пустой целью прежнюю не затирает ([TaskMemory.merge]).
             goalChanges = turns.mapNotNull { turn ->
                 val before = turn.memoryBefore.goal
                 val after = turn.memory.goal
-                if (before == after) null else "ход ${turn.index}: «${before ?: "цели нет"}» → «$after»"
+                val reformulated = !before.isNullOrBlank() && !after.isNullOrBlank() && before != after
+                if (!reformulated) null else "ход ${turn.index}: «$before» → «$after»"
             },
             clarifications = memory.clarifications.size,
             constraints = memory.constraints.size,
@@ -116,12 +134,12 @@ object ChatReport {
      * важно, что знала система **на момент** реплики, поэтому память печатается на ходе, а не одной
      * таблицей в конце.
      */
-    fun markdown(turns: List<ChatTurn>, settings: ChatSettings, model: String): String {
+    fun markdown(sessionId: String, turns: List<ChatTurn>, settings: ChatSettings, model: String): String {
         val summary = summarize(turns)
         return buildString {
             appendLine("# Мини-чат с RAG и памятью задачи")
             appendLine()
-            appendLine("Модель: $model. Настройки поиска: ${settings.description}.")
+            appendLine("Разговор: $sessionId. Модель: $model. Настройки поиска: ${settings.description}.")
             appendLine()
             appendLine("## Итог")
             appendLine()
@@ -130,6 +148,8 @@ object ChatReport {
                 "отказов: ${summary.refusals}; сбоев: ${summary.errors}")
             appendLine("- ответов без источника: ${summary.answersWithoutSource} " +
                 "(источников названо всего: ${summary.sourcesTotal})")
+            appendLine("- отказов без причины: ${summary.refusalsWithoutReason} " +
+                "(отказов всего: ${summary.refusals})")
             appendLine("- подтверждённых утверждений: ${summary.claims}, " +
                 "отброшенных цитат: ${summary.quotesDropped}")
             appendLine("- цель: ${summary.goal ?: "не зафиксирована"}" +
@@ -153,10 +173,10 @@ object ChatReport {
      * поведения. Ответы модели печатаются сырыми ([ChatTurn.raw], [ChatTurn.memoryRaw]): разбор
      * формата — это то, что по логу и проверяют.
      */
-    fun log(turns: List<ChatTurn>, settings: ChatSettings, model: String): String = buildString {
+    fun log(sessionId: String, turns: List<ChatTurn>, settings: ChatSettings, model: String): String = buildString {
         appendLine("# Лог мини-чата")
         appendLine()
-        appendLine("Модель: $model. Настройки поиска: ${settings.description}.")
+        appendLine("Разговор: $sessionId. Модель: $model. Настройки поиска: ${settings.description}.")
         appendLine()
         turns.forEach { turn ->
             appendLine("## Ход ${turn.index}: ${turn.question}")
@@ -206,6 +226,8 @@ object ChatReport {
 
     private fun turn(turn: ChatTurn, settings: ChatSettings): String = buildString {
         appendLine("## Ход ${turn.index}: ${turn.question}")
+        appendLine()
+        appendLine("Реплика человека: ${turn.at}")
         appendLine()
         if (turn.query != turn.question) {
             appendLine("Запрос поиска: ${turn.query}" + (turn.queryNote?.let { " ($it)" } ?: ""))

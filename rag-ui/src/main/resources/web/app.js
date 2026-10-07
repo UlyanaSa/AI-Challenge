@@ -850,6 +850,16 @@ function chatSources(turn) {
 
 // Один ход разговора: реплика человека и ответ ассистента. Вид ответа вынесен в пометку, чтобы
 // отличить ответ по базе от ответа по памяти задачи и от честного отказа, не читая текст ответа.
+// Время реплики показывается местными часами: ISO-8601 из ответа человеку не читается, а «ход 3»
+// без времени не отличает разговор, шедший полторы минуты, от разговора, шедшего полчаса.
+function clock(at) {
+    if (!at) return "—";
+    const time = new Date(at);
+    return Number.isNaN(time.getTime())
+        ? "—"
+        : time.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
 function chatTurn(turn) {
     const kind = turn.kindTitle
         ? `<span class="loss loss-good">${esc(turn.kindTitle)}</span>`
@@ -869,7 +879,7 @@ function chatTurn(turn) {
     return `<div class="chat-turn">
         <div class="chat-q"><span class="chat-who">человек</span>${esc(turn.question)}</div>
         <div class="chat-a">
-            <div class="chat-a-head">${kind}<span class="question-meta">ход ${turn.index} · ${seconds(turn.elapsedMillis)}</span></div>
+            <div class="chat-a-head">${kind}<span class="question-meta">ход ${turn.index} · ${clock(turn.at)} · ${seconds(turn.elapsedMillis)}</span></div>
             ${query}${answer}${chatSources(turn)}${memory}
         </div>
     </div>`;
@@ -964,10 +974,12 @@ function renderChat() {
 
     const status = document.getElementById("chat-status");
     status.className = "status" + (chat.error ? " error" : chat.busy ? " stopped" : "");
+    // Имя разговора в строке состояния: по нему транскрипт на диске (chat.md) соотносится с тем,
+    // что видно на странице, — после сброса разговор уже другой, и имя это показывает.
     status.textContent = chat.available
         ? chat.busy
             ? `Идёт ${chat.activity || "ход"}…`
-            : `Разговор доступен. Настройки поиска: ${chat.settings}`
+            : `Разговор ${chat.sessionId} доступен. Настройки поиска: ${chat.settings}`
         : "Чат недоступен.";
 
     // Причина недоступности и сбой хода идут одной строкой: и то и другое — то, что мешает говорить,
@@ -982,6 +994,7 @@ function renderChat() {
         summary.hidden = false;
         summary.textContent =
             `${chat.summary.line} · источники у каждого ответа: ${chat.summary.sourcesEverywhere ? "да" : "нет"}` +
+            ` · причина у каждого отказа: ${chat.summary.refusalsNamed ? "да" : "нет"}` +
             ` · цель держится: ${chat.summary.goalKept ? "да" : "нет"}` +
             ` · подтверждённых утверждений ${chat.summary.claims}, отброшенных цитат ${chat.summary.quotesDropped}`;
     } else {
