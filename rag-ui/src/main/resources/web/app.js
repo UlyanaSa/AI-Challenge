@@ -13,6 +13,7 @@
 
 let setup = null;
 let state = null;
+let chat = null;
 let selected = null;
 let signature = "";
 
@@ -35,6 +36,16 @@ async function api(path, options) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.message || `Запрос не удался: ${response.status}`);
     return body;
+}
+
+// Мутирующие маршруты чата принимают тело JSON: `api` для них тот же — ответ и ошибку страница
+// разбирает одинаково, и второго способа читать ответ сервера на странице быть не должно.
+async function postJson(path, body) {
+    return api(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
 }
 
 function esc(value) {
@@ -804,7 +815,186 @@ function renderQuestions() {
         .join("");
 }
 
+// День 25: мини-чат. Лента реплик, память задачи, сводка и итог сценария — всё из состояния
+// `/api/chat`. Страница не считает ни одного числа сама: и строку сводки, и приговор сценария
+// и признаки хода (есть ли источник, ответ по памяти или отказ) считает `:rag`, а сюда они
+// приходят посчитанными — второй набор правил в браузере разошёлся бы с отчётом.
+
+// Источники ответа: из метаданных чанка, как их собрал движок. Отказ и ответ по памяти фрагментов
+// не имеют по построению — у них источником служит причина или сама память, и её называет sourcesLine.
+function chatSources(turn) {
+    if (turn.sources.length) {
+        const items = turn.sources
+            .map((source) => {
+                const place = [
+                    source.source,
+                    source.section,
+                    source.pages.length ? `стр. ${source.pages.join(", ")}` : null,
+                    `чанк #${source.chunkIndex}`,
+                ]
+                    .filter(Boolean)
+                    .join(" · ");
+                const rerank = source.rerankScore == null ? "" : ` · этап ${ru(source.rerankScore, 3)}`;
+                return `<li><span class="mono">[${source.fragment}]</span> ${esc(place)}` +
+                    `<span class="question-meta"> · близость ${ru(source.similarity, 3)}${rerank}</span></li>`;
+            })
+            .join("");
+        return `<ul class="chat-sources">${items}</ul>`;
+    }
+    const note = turn.refusalReason ?? turn.error ?? turn.sourcesLine;
+    return `<p class="question-meta">Источник: ${esc(note)}</p>`;
+}
+
+// Один ход разговора: реплика человека и ответ ассистента. Вид ответа вынесен в пометку, чтобы
+// отличить ответ по базе от ответа по памяти задачи и от честного отказа, не читая текст ответа.
+function chatTurn(turn) {
+    const kind = turn.kindTitle
+        ? `<span class="loss loss-good">${esc(turn.kindTitle)}</span>`
+        : turn.refusal
+          ? `<span class="loss loss-bad">отказ</span>`
+          : `<span class="loss loss-bad">сбой</span>`;
+    const answer = turn.answer
+        ? `<pre class="chat-answer">${esc(turn.answer)}</pre>`
+        : turn.error
+          ? `<div class="error-box">Ответ не получен: ${esc(turn.error)}</div>`
+          : `<p class="missing">Отказ: ${esc(turn.refusalReason || "причина не записана")}</p>`;
+    const query =
+        turn.query !== turn.question
+            ? `<p class="question-meta">Поиск: ${esc(turn.query)}${turn.queryNote ? ` (${esc(turn.queryNote)})` : ""}</p>`
+            : "";
+    const memory = turn.memoryNote ? `<p class="question-meta">Память: ${esc(turn.memoryNote)}</p>` : "";
+    return `<div class="chat-turn">
+        <div class="chat-q"><span class="chat-who">человек</span>${esc(turn.question)}</div>
+        <div class="chat-a">
+            <div class="chat-a-head">${kind}<span class="question-meta">ход ${turn.index} · ${seconds(turn.elapsedMillis)}</span></div>
+            ${query}${answer}${chatSources(turn)}${memory}
+        </div>
+    </div>`;
+}
+
+// Панель памяти задачи: цель, уточнения, правила и термины. Пока память пуста, панель говорит это
+// словами, а не рисует заголовки без строк — они читались бы как память, в которой ничего нет.
+function renderChatMemory(memory) {
+    const body = document.getElementById("chat-memory-body");
+    if (memory.empty) {
+        body.innerHTML = `<div><dt>память</dt><dd>пока пуста — разговор ещё не зафиксировал цель, правила и термины</dd></div>`;
+        return;
+    }
+    const cells = [];
+    if (memory.goal) cells.push(["цель", esc(memory.goal)]);
+    if (memory.clarifications.length) cells.push(["уточнено", memory.clarifications.map(esc).join("; ")]);
+    if (memory.constraints.length) cells.push(["ограничения", memory.constraints.map(esc).join("; ")]);
+    if (memory.terms.length) {
+        cells.push(["термины", memory.terms.map((term) => `«${esc(term.term)}» — ${esc(term.meaning)}`).join("; ")]);
+    }
+    body.innerHTML = cells.map(([term, value]) => `<div><dt>${term}</dt><dd>${value}</dd></div>`).join("");
+}
+
+// Сценарий показывается приговором и проверками по шагам. Приговор приходит строками от движка:
+// страница их печатает, а не выводит из чисел заново.
+function renderChatScenario(result) {
+    const panel = document.getElementById("chat-result");
+    if (!result) {
+        panel.hidden = true;
+        panel.innerHTML = "";
+        return;
+    }
+    panel.hidden = false;
+    const badge = result.accepted
+        ? `<span class="loss loss-good">принято</span>`
+        : `<span class="loss loss-bad">есть нарушения</span>`;
+    const mark = (value) => (value == null ? "—" : value ? "да" : "нет");
+    const rows = result.checks
+        .map(
+            (check) => `<tr>
+            <td class="mono">${check.index}</td>
+            <td>${esc(check.question)}${
+                check.failures.length
+                    ? `<br><span class="chat-fail">${check.failures.map(esc).join("<br>")}</span>`
+                    : ""
+            }</td>
+            <td>${mark(check.kindOk)}</td>
+            <td>${mark(check.goalOk)}</td>
+            <td>${mark(check.refusalOk)}</td>
+            <td>${check.factsMatched}/${check.factsTotal}</td>
+            <td>${check.passed ? "да" : "нет"}</td>
+        </tr>`
+        )
+        .join("");
+    panel.innerHTML = `
+        <h3>Сценарий ${esc(result.name)}: ${esc(result.title)} ${badge}</h3>
+        <p class="question-meta">Сведений названо: ${result.factsMatched} из ${result.factsTotal} — мера качества ответов, а не приговор.</p>
+        <ul class="rank-list">${result.verdict.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>
+        <table class="sources">
+            <thead><tr>
+                <th>#</th><th>реплика и нарушения</th><th>вид</th><th>цель</th><th>отказ</th><th>сведения</th><th>шаг</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+}
+
+// Кнопки сценариев берутся из состояния: имена и заголовки движок присылает сам, и второй список
+// сценариев в разметке разошёлся бы с ним при первой правке.
+function renderChatScenarios(chatState) {
+    const enabled = chatState.available && !chatState.busy;
+    document.getElementById("chat-scenarios").innerHTML = chatState.scenarios
+        .map(
+            (scenario) => `<button class="secondary chat-scenario" data-name="${esc(scenario.name)}" type="button"${
+                enabled ? "" : " disabled"
+            }>
+            <span>Прогнать сценарий: ${esc(scenario.title)}</span>
+            <small>${esc(scenario.goal)} · реплик ${scenario.steps}</small>
+        </button>`
+        )
+        .join("");
+}
+
+function renderChat() {
+    if (!chat) return;
+    renderChatScenarios(chat);
+    renderChatMemory(chat.memory);
+    renderChatScenario(chat.scenario);
+
+    document.getElementById("chat-feed").innerHTML =
+        chat.turns.map(chatTurn).join("") ||
+        `<p class="missing">Разговор пуст: напишите первую реплику или прогоните сценарий.</p>`;
+
+    const status = document.getElementById("chat-status");
+    status.className = "status" + (chat.error ? " error" : chat.busy ? " stopped" : "");
+    status.textContent = chat.available
+        ? chat.busy
+            ? `Идёт ${chat.activity || "ход"}…`
+            : `Разговор доступен. Настройки поиска: ${chat.settings}`
+        : "Чат недоступен.";
+
+    // Причина недоступности и сбой хода идут одной строкой: и то и другое — то, что мешает говорить,
+    // и человеку одинаково нужно прочитать, чем именно.
+    const note = document.getElementById("chat-note");
+    const message = chat.error || chat.note;
+    note.hidden = !message;
+    note.textContent = message || "";
+
+    const summary = document.getElementById("chat-summary");
+    if (chat.summary && chat.turns.length) {
+        summary.hidden = false;
+        summary.textContent =
+            `${chat.summary.line} · источники у каждого ответа: ${chat.summary.sourcesEverywhere ? "да" : "нет"}` +
+            ` · цель держится: ${chat.summary.goalKept ? "да" : "нет"}` +
+            ` · подтверждённых утверждений ${chat.summary.claims}, отброшенных цитат ${chat.summary.quotesDropped}`;
+    } else {
+        summary.hidden = true;
+    }
+
+    // Пока идёт ход или сценарий, ввод и кнопки выключены: второй разговор не начинается поверх
+    // первого, и обещание кнопки совпадает с тем, что действительно можно сделать.
+    const blocked = !chat.available || chat.busy;
+    document.getElementById("chat-send").disabled = blocked;
+    document.getElementById("chat-clear").disabled = blocked;
+    document.getElementById("chat-text").disabled = blocked;
+}
+
 function render() {
+    renderChat();
     renderStatus();
     renderQuestions();
     renderMetrics();
@@ -841,7 +1031,10 @@ function renderSetup() {
 
 async function refresh() {
     state = await api("/api/state");
-    const next = JSON.stringify({ state, selected });
+    // Разговор опрашивается тем же циклом, что и прогон: пока идёт сценарий, лента растёт по ходам,
+    // и именно этот опрос показывает прогресс — страница на время сценария не блокируется.
+    chat = await api("/api/chat");
+    const next = JSON.stringify({ state, chat, selected });
     if (next !== signature) {
         signature = next;
         render();
@@ -886,6 +1079,56 @@ document.getElementById("rebuild").addEventListener("click", async () => {
         render();
     } catch (cause) {
         alert(cause.message);
+    }
+});
+
+// Реплика чата: ответ приходит состоянием целиком, и страница рисует его сразу — ждать следующего
+// опроса, чтобы показать ход, значит показывать паузу, которой не было.
+async function chatSend() {
+    const field = document.getElementById("chat-text");
+    const text = field.value.trim();
+    if (!text) return;
+    try {
+        field.value = "";
+        chat = await postJson("/api/chat/message", { text });
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+}
+
+// Сценарий идёт в фоне: ответ на запуск — состояние «занято», а прогресс приносят опросы `refresh`.
+async function chatScenario(name) {
+    try {
+        chat = await postJson("/api/chat/scenario", { name });
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+}
+
+document.getElementById("chat-send").addEventListener("click", chatSend);
+document.getElementById("chat-text").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+        event.preventDefault();
+        chatSend();
+    }
+});
+document.getElementById("chat-clear").addEventListener("click", async () => {
+    try {
+        chat = await api("/api/chat/reset", { method: "POST" });
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+});
+document.addEventListener("click", (event) => {
+    const scenario = event.target.closest(".chat-scenario");
+    if (scenario) {
+        chatScenario(scenario.dataset.name);
     }
 });
 document.addEventListener("click", (event) => {

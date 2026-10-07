@@ -3,18 +3,47 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>День 23–24. RAG: три режима и grounded-ответ с цитатами</title>
+    <title>Дни 23–25. RAG: три режима, grounded-ответ и мини-чат с памятью задачи</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-    <h1>День 23–24. RAG: без базы, базовый, улучшенный и grounded</h1>
+    <h1>Дни 23–25. RAG: три режима, grounded-ответ и мини-чат</h1>
     <p class="subtitle" id="run-title">Загрузка прогона…</p>
 </header>
 
 <main>
+    <section class="panel" id="chat-panel">
+        <h2><span class="step">1</span> Мини-чат с RAG и памятью задачи</h2>
+        <p class="hint">
+            Разговор по книге: каждая реплика ищет фрагменты тем же поиском дня 24 и отвечает
+            с источниками и дословными цитатами, которые система проверяет по тексту чанка. Отдельно
+            от истории идёт память задачи — цель разговора, уточнения, правила и термины; она
+            не обрезается окном истории и уходит в каждый запрос к модели. Вопрос о самом разговоре
+            («что мы разбираем», «какие правила ты держишь») отвечается по памяти задачи, без цитат;
+            вопрос о книге — по фрагментам. Где подтверждать нечем, система отказывает с причиной,
+            а не отвечает по памяти. Сценарий — тринадцать реплик разговора с проверкой поведения:
+            он идёт в фоне, и лента растёт по ходу, не блокируя страницу.
+        </p>
+        <div class="chat-scenarios" id="chat-scenarios"></div>
+        <p class="status" id="chat-status">Загрузка…</p>
+        <p class="note" id="chat-note" hidden></p>
+        <div class="chat-feed" id="chat-feed"></div>
+        <div class="chat-memory" id="chat-memory">
+            <h3>Память задачи</h3>
+            <dl class="memory-grid" id="chat-memory-body"></dl>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="chat-text" placeholder="Спросите о романе или о разговоре…" autocomplete="off">
+            <button id="chat-send" type="button">Отправить</button>
+            <button id="chat-clear" type="button" class="secondary">Очистить разговор</button>
+        </div>
+        <p class="hint" id="chat-summary"></p>
+        <div class="chat-result" id="chat-result" hidden></div>
+    </section>
+
     <section class="panel">
-        <h2><span class="step">1</span> Прогон и настройки этапов</h2>
+        <h2><span class="step">2</span> Прогон и настройки этапов</h2>
         <p class="hint">
             Вопросы набора не редактируются: вместе с каждым заранее известен ответ, ключевые факты
             и место в книге — по ним и считается оценка. Каждый вопрос прогоняется в трёх режимах
@@ -80,7 +109,7 @@
     </section>
 
     <section class="panel">
-        <h2><span class="step">2</span> Десять контрольных вопросов</h2>
+        <h2><span class="step">3</span> Десять контрольных вопросов</h2>
         <p class="hint">
             Три режима отвечают на разные вопросы сравнения. «Без базы» — нижняя граница: что модель
             помнит сама. «Базовый RAG» — то, что дал поиск дня 22 (Top-K по близости), и он же учтён
@@ -124,7 +153,7 @@
     </section>
 
     <section class="panel">
-        <h2><span class="step">3</span> Конвейер вопроса</h2>
+        <h2><span class="step">4</span> Конвейер вопроса</h2>
         <p class="hint" id="pipeline-hint">
             Выберите вопрос в таблице — здесь появятся все три конвейера: вопрос, вектор вопроса,
             выдача поиска с идентификаторами и близостями, этапы улучшенного конвейера (переписанный

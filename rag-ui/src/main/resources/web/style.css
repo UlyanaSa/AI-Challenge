@@ -564,3 +564,154 @@ table.sources td {
     border-radius: 0 6px 6px 0;
     font-size: 0.9rem;
 }
+
+/* Мини-чат дня 25. Панель повторяет вид остальных: те же рамки и подписи, чтобы разговор читался
+   как ещё один блок страницы, а не как отдельное приложение внутри неё. */
+
+.chat-scenarios {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+}
+
+.chat-scenario {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+    text-align: left;
+    max-width: 32rem;
+}
+
+.chat-scenario small {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 400;
+}
+
+.chat-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    margin: 0.75rem 0;
+}
+
+.chat-turn {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+/* Реплика человека — короткая строка слева: в разговоре важно, что спросили, а не как это выглядит. */
+.chat-q {
+    align-self: flex-start;
+    max-width: 90%;
+    padding: 0.5rem 0.8rem;
+    background: #202531;
+    border-left: 3px solid var(--accent-strong);
+    border-radius: 0 6px 6px 0;
+    font-size: 0.92rem;
+}
+
+.chat-who {
+    display: block;
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.15rem;
+}
+
+/* Ответ ассистента — отдельный блок с рамкой: под ним источники и пометка о памяти, и вместе
+   они должны читаться как один ход, а не как три случайные строки. */
+.chat-a {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    background: #191c23;
+}
+
+.chat-a-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+}
+
+.chat-answer {
+    margin: 0;
+    max-height: 24rem;
+}
+
+.chat-sources {
+    margin: 0.4rem 0 0;
+    padding-left: 1.1rem;
+    font-size: 0.85rem;
+}
+
+.chat-sources li {
+    margin-bottom: 0.2rem;
+    overflow-wrap: anywhere;
+}
+
+.chat-fail {
+    color: var(--bad);
+    font-size: 0.82rem;
+}
+
+.chat-memory {
+    margin-top: 0.75rem;
+    border-top: 1px solid var(--line);
+    padding-top: 0.6rem;
+}
+
+.memory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: 0.5rem 1.25rem;
+    margin: 0;
+}
+
+.memory-grid div {
+    border-top: 1px solid var(--line);
+    padding-top: 0.4rem;
+}
+
+.memory-grid dt {
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.memory-grid dd {
+    margin: 0.15rem 0 0;
+    font-size: 0.9rem;
+    overflow-wrap: anywhere;
+}
+
+.chat-input {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.75rem;
+}
+
+.chat-input input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    background: #12141a;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.55rem 0.7rem;
+    font: inherit;
+}
+
+.chat-result {
+    margin-top: 0.85rem;
+    border-top: 1px solid var(--line);
+    padding-top: 0.6rem;
+}

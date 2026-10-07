@@ -148,7 +148,7 @@ class GroundedAgent(
             retrieval = found,
             confidence = confidence,
             answer = parsed.answer,
-            sources = sourcesOf(confirmed, found),
+            sources = SourceRef.of(confirmed, found),
             claims = confirmed,
             checks = checks,
             refusal = null,
@@ -160,25 +160,6 @@ class GroundedAgent(
             millis = millis,
             note = if (dropped > 0) "отброшено цитат: $dropped из ${checks.size}" else null
         )
-    }
-
-    /**
-     * Источники подтверждённых утверждений — из метаданных чанков, а не из текста модели.
-     *
-     * Порядок — по номеру фрагмента в контексте: читатель отчёта видит источники в том же порядке,
-     * в каком их видела модель, и сопоставить цитату с источником можно по номеру. Повторные
-     * упоминания одного фрагмента схлопываются: источник, названный дважды, — это один источник,
-     * и «два источника» в отчёте были бы неправдой.
-     */
-    private fun sourcesOf(claims: List<Claim>, found: Retrieval): List<SourceRef> {
-        val candidates = found.trace?.candidates.orEmpty().associateBy { it.source.id }
-        return claims
-            .mapNotNull { claim ->
-                found.sources.firstOrNull { it.rank == claim.fragment }?.let { claim.fragment to it }
-            }
-            .distinctBy { (_, source) -> source.id }
-            .sortedBy { (fragment, _) -> fragment }
-            .map { (fragment, source) -> SourceRef.of(source, fragment, candidates[source.id]) }
     }
 
     private companion object {

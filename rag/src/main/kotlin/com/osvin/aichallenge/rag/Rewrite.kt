@@ -85,35 +85,11 @@ class LlmQueryRewriter(
         val millis = (System.nanoTime() - started) / 1_000_000
 
         val choice = response.choices.firstOrNull()
-        val query = choice?.message?.content?.let(::tidy)
+        val query = choice?.message?.content?.let(::tidyQuery)
         return Rewrite(question, query ?: question, millis)
     }
 
     private companion object {
-
-        /**
-         * Строка запроса из ответа модели: снимается метка, склеиваются строки, сжимаются пробелы.
-         *
-         * Метки снимаются списком, потому что модель выбирает их сама («Запрос:», «Поисковый
-         * запрос:», «Query:»); непонятую метку удалять нечем, и она остаётся частью запроса —
-         * одно лишнее слово в embedding весит меньше, чем выброшенная по ошибке половина запроса.
-         */
-        fun tidy(raw: String): String? {
-            val text = raw.lines()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .joinToString(" ")
-                .replace(SPACES, " ")
-                .trim()
-            val withoutLabel = LABELS.fold(text) { acc, label ->
-                if (acc.startsWith(label, ignoreCase = true)) acc.substring(label.length).trim() else acc
-            }
-            return withoutLabel.ifEmpty { null }
-        }
-
-        val LABELS = listOf("Поисковый запрос:", "Запрос:", "Query:", "Rewritten query:")
-
-        val SPACES = Regex("\\s+")
 
         /** Бюджет на строку запроса: см. KDoc класса (на прогоне — 9–16 токенов). */
         const val DEFAULT_MAX_TOKENS = 512
@@ -124,3 +100,32 @@ class LlmQueryRewriter(
         const val DEFAULT_TEMPERATURE = 0.0
     }
 }
+
+/**
+ * Строка запроса из ответа модели: снимается метка, склеиваются строки, сжимаются пробелы.
+ *
+ * Метки снимаются списком, потому что модель выбирает их сама («Запрос:», «Поисковый запрос:»,
+ * «Query:»); непонятую метку удалять нечем, и она остаётся частью запроса — одно лишнее слово
+ * в embedding весит меньше, чем выброшенная по ошибке половина запроса.
+ *
+ * Функция вынесена из класса дня 22 и объявлена общей не ради экономии строк: чистку делает
+ * и переписыватель дня 25 ([com.osvin.aichallenge.rag.chat.ChatRewriter]), а разойтись эти два
+ * правила не должны — иначе запрос одного и того же вида приходил бы в поиск в двух разных формах,
+ * и «чат ищет хуже» объяснялось бы разбором ответа, а не качеством запроса.
+ */
+internal fun tidyQuery(raw: String?): String? {
+    val text = (raw ?: return null).lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(" ")
+        .replace(REWRITE_SPACES, " ")
+        .trim()
+    val withoutLabel = REWRITE_LABELS.fold(text) { acc, label ->
+        if (acc.startsWith(label, ignoreCase = true)) acc.substring(label.length).trim() else acc
+    }
+    return withoutLabel.ifEmpty { null }
+}
+
+private val REWRITE_LABELS = listOf("Поисковый запрос:", "Запрос:", "Query:", "Rewritten query:")
+
+private val REWRITE_SPACES = Regex("\\s+")

@@ -5,6 +5,7 @@ import com.osvin.aichallenge.indexing.ollama.Embedding
 import com.osvin.aichallenge.indexing.ollama.EmbeddingProviders
 import com.osvin.aichallenge.rag.Api
 import com.osvin.aichallenge.rag.Controls
+import com.osvin.aichallenge.rag.chat.ChatScenarios
 import com.osvin.aichallenge.models.config.AppConfig
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -15,6 +16,7 @@ import io.ktor.server.http.content.staticResources
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -108,6 +110,23 @@ fun Application.module(
         }
     }
 
+    /**
+     * Причина, по которой реплику нельзя принять, или `null`.
+     *
+     * Общей проверкой на четыре маршрута чата, потому что причина у отказа одна и та же, и повторять
+     * её в каждом маршруте значило бы завести четыре места, где она формулируется. Недоступность
+     * и занятость — разные ответы: первая не изменится от повтора запроса, вторая пройдёт, когда
+     * кончится текущий ход, — и человеку нужно видеть, чего именно ждать.
+     */
+    suspend fun chatBlocked(): ErrorDto? {
+        val state = session.chatState()
+        return when {
+            state.note != null -> ErrorDto(state.note)
+            state.busy -> ErrorDto(RagSession.CHAT_BUSY_MESSAGE)
+            else -> null
+        }
+    }
+
     routing {
         staticResources("/", "web")
 
@@ -174,6 +193,64 @@ fun Application.module(
             } else {
                 call.respond(HttpStatusCode.BadRequest, ErrorDto("Останавливать нечего: работа не идёт"))
             }
+        }
+
+        /** Состояние мини-чата дня 25: лента ходов, память задачи, сводка и итог сценария. */
+        get("/api/chat") { call.respond(session.chatState()) }
+
+        /**
+         * Реплика человека: тело `{text}`.
+         *
+         * Пустая реплика отвергается до всякой работы: ход разговора без вопроса — не ход. Ответ —
+         * то же состояние, что у `/api/chat`: страница не ждёт следующего опроса, чтобы показать
+         * новый ход, — иначе между нажатием и ответом на экране была бы заметная пауза.
+         */
+        post("/api/chat/message") {
+            val text = runCatching { call.receive<ChatSendDto>() }.getOrNull()?.text?.trim().orEmpty()
+            if (text.isEmpty()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorDto(RagSession.CHAT_EMPTY_MESSAGE))
+                return@post
+            }
+            chatBlocked()?.let { blocked ->
+                call.respond(HttpStatusCode.BadRequest, blocked)
+                return@post
+            }
+            call.respond(session.chatSend(text))
+        }
+
+        /**
+         * Очистка разговора и памяти задачи. Ответ — состояние, как у остальных мутирующих маршрутов:
+         * страница рисует пустую ленту сразу по ответу, а не по следующему опросу.
+         */
+        post("/api/chat/reset") {
+            chatBlocked()?.let { blocked ->
+                call.respond(HttpStatusCode.BadRequest, blocked)
+                return@post
+            }
+            call.respond(session.chatReset())
+        }
+
+        /**
+         * Запуск сценария дня 25: тело `{name}`.
+         *
+         * Неизвестное имя отвергается с перечнем имён из [ChatScenarios.names] — страница печатает
+         * его человеку, и второй список сценариев в разметке разошёлся бы с движком. Запуск не ждёт
+         * конца сценария: состояние отдаётся сразу, прогресс виден через `/api/chat`.
+         */
+        post("/api/chat/scenario") {
+            val name = runCatching { call.receive<ChatScenarioRequestDto>() }.getOrNull()?.name?.trim().orEmpty()
+            chatBlocked()?.let { blocked ->
+                call.respond(HttpStatusCode.BadRequest, blocked)
+                return@post
+            }
+            if (ChatScenarios.byName(name) == null) {
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorDto("Сценарий «$name» неизвестен: доступны ${ChatScenarios.names.joinToString(", ")}")
+                )
+                return@post
+            }
+            call.respond(session.chatScenario(name))
         }
     }
 }

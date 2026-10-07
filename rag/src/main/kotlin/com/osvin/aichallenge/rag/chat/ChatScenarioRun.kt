@@ -1,0 +1,258 @@
+package com.osvin.aichallenge.rag.chat
+
+import com.osvin.aichallenge.rag.Check
+
+/**
+ * Итог одного шага сценария: что ожидалось и что вышло.
+ *
+ * Разделение на обязательное и содержательное здесь то же, что в [ChatScenarioStep], но уже числами:
+ * [failures] перечисляет только нарушения поведения (вид ответа, отсутствие отказа, не названная
+ * цель), а [facts] — сведения ответа. Поэтому шаг может быть `passed` и при незасчитанном факте:
+ * сценарий проверяет, что разговор не потерял предмет, а не что модель пересказала текст.
+ *
+ * Причины в [failures] называются словами, а не флагом: «ожидался ответ по базе, получен отказ» —
+ * это то, что нужно прочитать в отчёте, чтобы понять, чинить память, поиск или промпт.
+ */
+data class ChatScenarioCheck(
+    /** Номер шага в сценарии, с единицы. */
+    val index: Int,
+    val question: String,
+    /** Вид ответа совпал с ожиданием; `null` — вид не проверялся. */
+    val kindOk: Boolean?,
+    /** Отказ был там, где ожидался; `null` — отказ не ожидался. */
+    val refusalOk: Boolean?,
+    /** Ответ назвал цель разговора; `null` — не проверялось. */
+    val goalOk: Boolean?,
+    /** По факту на ожидаемое сведение ответа. */
+    val facts: List<Boolean>,
+    val failures: List<String>
+) {
+
+    /** Обязательная часть пройдена: поведение дня, а не содержание ответа. */
+    val passed: Boolean get() = failures.isEmpty()
+
+    /** Сколько ожидаемых сведений ответ назвал. */
+    val factsMatched: Int get() = facts.count { it }
+
+    val factsTotal: Int get() = facts.size
+}
+
+/**
+ * Прогон сценария: ходы, проверки и приговор.
+ *
+ * Приговор собирается из трёх вещей, и все три — требования задания. Источники: у каждого ответа
+ * назван источник ([ChatSummary.sourcesEverywhere]). Цель: она зафиксирована и не менялась
+ * ([ChatSummary.goalKept]). Поведение на каждом шаге: вопросы о разговоре отвечены по памяти,
+ * там, где базы не хватает, — отказ с причиной ([checks]). Отдельно считаются сведения ([factsMatched]):
+ * они мера качества ответов, но не приговор — иначе один неполный ответ («трость назвал, про волосы
+ * промолчал») валил бы день, который задания не провалил.
+ */
+data class ChatScenarioRun(
+    val scenario: ChatScenario,
+    val turns: List<ChatTurn>,
+    val summary: ChatSummary,
+    val checks: List<ChatScenarioCheck>,
+    /** Держатся ли памятью задачи ограничения и термины, названные в сценарии. */
+    val memoryKept: Boolean
+) {
+
+    val factsMatched: Int get() = checks.sumOf { it.factsMatched }
+    val factsTotal: Int get() = checks.sumOf { it.factsTotal }
+
+    /** Шаги, где поведение не совпало с ожиданием. */
+    val failedSteps: List<ChatScenarioCheck> get() = checks.filter { !it.passed }
+
+    /** День принят: источники у каждого ответа, цель держится, поведение сходится с ожиданиями. */
+    val accepted: Boolean
+        get() = summary.sourcesEverywhere && summary.goalKept && memoryKept && failedSteps.isEmpty()
+
+    /** Строки приговора для отчёта и страницы: каждая — проверка и её результат. */
+    val verdict: List<String>
+        get() = listOf(
+            "источники у каждого ответа: ${answer(summary.sourcesEverywhere)} " +
+                "(ответов ${summary.answered}, без источника ${summary.answersWithoutSource})",
+            "цель разговора держится: ${answer(summary.goalKept)} " +
+                "(«${summary.goal ?: "не зафиксирована"}»" +
+                (summary.goalFixedAt?.let { ", зафиксирована на ходу $it" } ?: "") + ")",
+            "память задачи удержала ограничения и термины: ${answer(memoryKept)} " +
+                "(ограничений ${summary.constraints}, терминов ${summary.terms})",
+            "поведение по шагам: ${answer(failedSteps.isEmpty())} " +
+                "(шагов ${checks.size}, нарушений ${failedSteps.size})",
+            "сведения ответов: $factsMatched из $factsTotal ожидаемых названо " +
+                "(мера качества, а не приговор)",
+            "итог: ${if (accepted) "принято" else "есть нарушения"}"
+        )
+
+    private fun answer(ok: Boolean): String = if (ok) "да" else "нет"
+}
+
+/**
+ * Прогон сценария по сессии чата: реплика — ход — проверка.
+ *
+ * Работает поверх [ChatSession], а не внутри неё, и это разделение существенно: сессия не знает
+ * ни о сценариях, ни об ожиданиях. Иначе в движке появилось бы знание о проверке, и «чат отвечает
+ * так, потому что так проверяют» перестало бы быть отличимо от «чат отвечает так, потому что умеет».
+ * Здесь же сессия спрашивается ровно так, как её спросит человек со страницы.
+ *
+ * Проверка фактов идёт тем же сверщиком, что в дне 22 ([Check.contains]): признак — основа слова,
+ * и ответ «тростью» засчитывается так же, как «трость». Иначе сценарий мерил бы слог модели.
+ */
+object ChatScenarioRunner {
+
+    /**
+     * Прогоняет сценарий целиком и возвращает ходы с проверками.
+     *
+     * Ходы берутся из сессии ([ChatSession.turns]) после прогона, а не собираются по ходу: сессия
+     * нумерует ходы и ведёт память, и второй список тех же ходов разошёлся бы с первым.
+     */
+    suspend fun run(session: ChatSession, scenario: ChatScenario): ChatScenarioRun {
+        val before = session.turns().size
+        scenario.steps.forEach { step -> session.ask(step.text) }
+        val turns = session.turns().drop(before)
+        val checks = scenario.steps.mapIndexed { position, step ->
+            check(position + 1, step, turns.getOrNull(position), scenario)
+        }
+        val summary = ChatReport.summarize(session.turns())
+        return ChatScenarioRun(
+            scenario = scenario,
+            turns = turns,
+            summary = summary,
+            checks = checks,
+            memoryKept = summary.constraints >= scenario.expectedConstraints &&
+                summary.terms >= scenario.expectedTerms
+        )
+    }
+
+    /** Проверка одного шага: обязательная часть — нарушениями, содержательная — числами. */
+    fun check(
+        index: Int,
+        step: ChatScenarioStep,
+        turn: ChatTurn?,
+        scenario: ChatScenario
+    ): ChatScenarioCheck {
+        if (turn == null) {
+            return ChatScenarioCheck(
+                index = index,
+                question = step.text,
+                kindOk = null,
+                refusalOk = null,
+                goalOk = null,
+                facts = emptyList(),
+                failures = listOf("хода нет: сценарий оборвался")
+            )
+        }
+
+        val failures = ArrayList<String>()
+        val kind = turn.kind
+        val kindOk = step.kind?.let { expected ->
+            (kind == expected).also { matched ->
+                if (!matched) {
+                    failures += "вид ответа: ожидался «${expected.title}», получен " +
+                        (kind?.title ?: turn.refusal?.let { "отказ" } ?: turn.error?.let { "сбой" } ?: "ничего")
+                }
+            }
+        }
+        val refusalOk = if (!step.refusal) {
+            null
+        } else {
+            val refused = turn.refusal != null && !turn.refusalReason.isNullOrBlank()
+            refused.also { matched ->
+                if (!matched) {
+                    failures += if (turn.refusal == null) {
+                        "ожидался отказ, получен ответ" + (kind?.let { " (${it.title})" } ?: "")
+                    } else {
+                        "отказ без причины: причина обязана быть названа"
+                    }
+                }
+            }
+        }
+        val goalOk = if (!step.goal) null else goalRestated(turn, scenario).also { matched ->
+            if (!matched) {
+                failures += "в ответе не названа цель разговора " +
+                    "(ожидались слова: ${scenario.goalKeywords.joinToString(", ")})"
+            }
+        }
+
+        val answer = turn.answer.orEmpty()
+        return ChatScenarioCheck(
+            index = index,
+            question = step.text,
+            kindOk = kindOk,
+            refusalOk = refusalOk,
+            goalOk = goalOk,
+            facts = step.facts.map { fact -> Check.contains(answer, fact) },
+            failures = failures
+        )
+    }
+
+    /**
+     * Названа ли в ответе цель разговора.
+     *
+     * Проверяются слова сценария ([ChatScenario.goalKeywords]), а не формулировка памяти: память
+     * пишет модель, и сверять её с ней же — значит проверять, что модель согласна сама с собой.
+     * Достаточно [MIN_GOAL_WORDS] слов, а не всех: цель человек называет и своими словами, и порядок
+     * слов в ответе свободный; требование всех слов мерило бы формулировку.
+     */
+    fun goalRestated(turn: ChatTurn, scenario: ChatScenario): Boolean {
+        val answer = turn.answer ?: return false
+        val matched = scenario.goalKeywords.count { keyword -> Check.matches(answer, keyword) }
+        return matched >= minOf(MIN_GOAL_WORDS, scenario.goalKeywords.size)
+    }
+
+    /**
+     * Отчёт о прогоне сценария: приговор, проверки по шагам и разговор целиком.
+     *
+     * Печатается и то, что сошлось, и то, что нет: отчёт, в котором видно только провалы, читается
+     * как список придирок, а отчёт, где видно только успехи, ничего не доказывает. Содержание ответов
+     * печатается целиком — по нему читатель и судит, держался ли разговор предмета.
+     */
+    fun markdown(run: ChatScenarioRun, settings: ChatSettings, model: String): String = buildString {
+        val scenario = run.scenario
+        appendLine("# Сценарий ${scenario.name}: ${scenario.title}")
+        appendLine()
+        appendLine("Цель разговора: ${scenario.goal}.")
+        appendLine("Реплик: ${scenario.length}. Модель: $model. Настройки поиска: ${settings.description}.")
+        appendLine()
+        appendLine("## Приговор")
+        appendLine()
+        run.verdict.forEach { appendLine("- $it") }
+        appendLine()
+        appendLine("## Проверки по шагам")
+        appendLine()
+        appendLine("| # | реплика | вид ответа | цель | отказ | сведения |")
+        appendLine("|---|---|---|---|---|---|")
+        run.checks.forEach { check ->
+            appendLine(
+                "| ${check.index} | ${check.question.replace(Regex("\\s+"), " ").take(60)} | " +
+                    "«${check.kindOk?.let { if (it) "да" else "нет" } ?: "—"}» | " +
+                    "${check.goalOk?.let { if (it) "да" else "нет" } ?: "—"} | " +
+                    "${check.refusalOk?.let { if (it) "да" else "нет" } ?: "—"} | " +
+                    "${check.factsMatched}/${check.factsTotal} |"
+            )
+        }
+        appendLine()
+        run.checks.filter { !it.passed }.forEach { check ->
+            appendLine("Шаг ${check.index} — нарушения:")
+            check.failures.forEach { appendLine("- $it") }
+            appendLine()
+        }
+        appendLine("## Разговор")
+        appendLine()
+        run.turns.forEach { turn ->
+            appendLine("### ${turn.index}. ${turn.question}")
+            appendLine()
+            appendLine(turn.answer ?: turn.error?.let { "Ответ не получен: $it" }
+                ?: "Отказ: ${turn.refusalReason}")
+            appendLine()
+            appendLine("Источники: ${turn.sourcesLine}")
+            appendLine()
+            appendLine("Память задачи (${turn.memoryNote}):")
+            appendLine()
+            appendLine(turn.memory.render().ifEmpty { "— пуста" })
+            appendLine()
+        }
+    }
+
+    /** Сколько слов цели достаточно, чтобы считать её названной. */
+    private const val MIN_GOAL_WORDS = 2
+}

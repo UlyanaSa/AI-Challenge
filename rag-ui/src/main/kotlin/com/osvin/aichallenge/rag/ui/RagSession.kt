@@ -32,11 +32,20 @@ import com.osvin.aichallenge.rag.StageReport
 import com.osvin.aichallenge.rag.Stages
 import com.osvin.aichallenge.rag.Summary
 import com.osvin.aichallenge.rag.Trial
+import com.osvin.aichallenge.rag.chat.ChatReport
+import com.osvin.aichallenge.rag.chat.ChatScenario
+import com.osvin.aichallenge.rag.chat.ChatScenarioRunner
+import com.osvin.aichallenge.rag.chat.ChatScenarios
+import com.osvin.aichallenge.rag.chat.ChatSession
+import com.osvin.aichallenge.rag.chat.ChatSettings
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -184,7 +193,17 @@ class RagSession(
      * а прогон начинается позже запуска сервера. Умолчание — живой клиент ([Api.model]),
      * и это же место позволяет прогнать сессию без сети: подставной клиент отвечает заготовкой.
      */
-    private val llm: (String) -> LlmClient = Api::model
+    private val llm: (String) -> LlmClient = Api::model,
+    /**
+     * Настройки разговора дня 25: поиск, окно истории и порог достаточности.
+     *
+     * Параметром, а не константой, по той же причине, что и фабрика клиента ([llm]): тест прогоняет
+     * разговор без сети и с нулевым порогом, чтобы контекст был достаточным всегда, — а на странице
+     * стоит значение дня 24 ([ChatSettings] по умолчанию). Второе место, где порог превращается
+     * в число, разошлось бы с настройками сценариев, и разговор мерился бы не тем условием,
+     * что прогон.
+     */
+    private val chatSettings: ChatSettings = ChatSettings()
 ) {
 
     private data class ResultPair(
@@ -284,6 +303,38 @@ class RagSession(
     private var grounding: GroundingDto? = null
 
     private var reports = emptyList<ReportDto>()
+
+    /**
+     * Разговор дня 25: собирается лениво, когда есть и ключ, и готовый индекс.
+     *
+     * Хранится, а не создаётся на каждый запрос: память задачи и история ходов и есть разговор,
+     * и второй экземпляр начинал бы с чистого листа — то есть переставал бы быть тем же разговором.
+     * Поэтому пересборка индекса при начатом разговоре отвергается ([rebuildIndex]), а не стирает
+     * разговор молча: подменить поиск под идущим разговором значило бы отвечать не по тому индексу,
+     * по которому отвечали предыдущие ходы, и не сказать об этом.
+     */
+    private var chat: ChatSession? = null
+
+    /**
+     * Клиент модели разговора: тот же, что у прогонов (та же фабрика и та же модель), но общий
+     * на весь разговор — второй клиент означал бы второй набор соединений к одной и той же модели.
+     */
+    private var chatLlm: LlmClient? = null
+
+    /** Итог последнего прогона сценария на странице; `null` — сценарий не прогоняли. */
+    private var chatScenarioResult: ChatScenarioResultDto? = null
+
+    /** Почему разговор не собрался по индексу: причина остаётся, пока её не исправят. */
+    private var chatFailure: String? = null
+
+    /** Идёт ход или сценарий: второй разговор не начинается, пока не кончился первый. */
+    private var chatBusy = false
+
+    /** Что именно идёт: «разговор» или сценарий с именем — по этому видно, чего ждёт страница. */
+    private var chatActivity: String? = null
+
+    /** Сбой последнего хода или сценария: причина для человека, а не тихо пропавшая реплика. */
+    private var chatError: String? = null
 
     init {
         // Число чанков готового индекса нужно уже в шапке страницы: это первое, что человек
@@ -398,6 +449,12 @@ class RagSession(
             // базу посреди прогона, и вопросы ответились бы по одному индексу, а проверялись по другому.
             if (state == StateDto.RUNNING) return StartOutcome.Rejected(RUNNING_MESSAGE)
             if (indexState == IndexDto.BUILDING) return StartOutcome.Rejected(BUILDING_MESSAGE)
+            // Начатый разговор держит индекс так же, как прогон: новый файл подменил бы базу
+            // посреди разговора, и следующие ходы отвечались бы по чужому индексу, а память
+            // и история остались бы от прежнего. Отвергаем, а не стираем разговор молча.
+            if (chat?.turns()?.isNotEmpty() == true) {
+                return StartOutcome.Rejected(CHAT_REBUILD_MESSAGE)
+            }
             val token = occupy()
             job = scope.launch { rebuild(token, current) }
         }
@@ -506,6 +563,214 @@ class RagSession(
             runId++
         }
         return true
+    }
+
+    /**
+     * Состояние разговора дня 25: лента ходов, память задачи, сводка и итог сценария.
+     *
+     * Разговор отдаётся целиком, как и состояние прогона: страница опрашивает один ответ и рисует
+     * из него и реплики, и память, и числа — собрать их из разных запросов значило бы показать
+     * разговор из разных моментов времени. Сводку считает [ChatReport.summarize] по ходам: тот же
+     * счёт, что у отчёта, и второй счётчик на странице разошёлся бы с файлом при первой правке.
+     *
+     * Чат недоступен без ключа и без индекса: первому нечем отвечать, второму не по чему искать.
+     * Причина уходит [ChatStateDto.note] отдельной строкой — неработающий чат и пустой разговор
+     * выглядят одинаково, если причину не назвать.
+     */
+    fun chatState(): ChatStateDto = synchronized(lock) {
+        chatLocked()
+        val reason = chatReasonLocked()
+        val session = if (reason == null) chat else null
+        val turns = session?.turns().orEmpty()
+        ChatStateDto(
+            available = session != null,
+            note = reason,
+            error = chatError,
+            busy = chatBusy,
+            activity = chatActivity,
+            settings = chatSettings.description,
+            scenarios = ChatScenarios.all.map { it.toDto() },
+            turns = turns.map { it.toDto() },
+            // Память пустая — тот же пустой объект, что и у разговора без единого хода: панель
+            // по нему пишет «память пока пуста», а не рисует заголовки без строк.
+            memory = session?.memory?.toDto() ?: ChatMemoryDto(),
+            summary = session?.let { ChatReport.summarize(turns).toDto() },
+            scenario = if (session == null) null else chatScenarioResult
+        )
+    }
+
+    /**
+     * Очередная реплика человека: ответ, обновление памяти задачи и перепись транскрипта.
+     *
+     * Ход выполняется здесь же, а не в фоне: ответ на реплику — это результат нажатия, и странице
+     * незачем опрашивать состояние, чтобы его получить. Пока ход идёт, [ChatStateDto.busy] поднят,
+     * и второй ход не начинается — разговор один, как и прогон.
+     */
+    suspend fun chatSend(text: String): ChatStateDto {
+        val session = synchronized(lock) {
+            if (chatBusy) return chatState()
+            val current = chatLocked() ?: return chatState()
+            chatBusy = true
+            chatError = null
+            chatActivity = CHAT_ACTIVITY
+            current
+        }
+        try {
+            session.ask(text.trim())
+            publishChat(session)
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            // Сбой хода не отменяет разговор: причина уходит в состояние, а лента и память остаются
+            // такими, какими были до него, — человек может повторить реплику.
+            synchronized(lock) { chatError = "Реплика не выполнена: ${message(cause)}" }
+        } finally {
+            synchronized(lock) {
+                chatBusy = false
+                chatActivity = null
+            }
+        }
+        return chatState()
+    }
+
+    /**
+     * Стирает разговор и память задачи: новый разговор начинается с чистого листа.
+     *
+     * Память стирается вместе с историей не случайно: она описывает **этот** разговор, и, оставшись
+     * от прошлого, превратилась бы в правило, которого человек не устанавливал. Транскрипт на диске
+     * переписывается тут же: файл обязан описывать текущий разговор, а не тот, который стёрли.
+     */
+    suspend fun chatReset(): ChatStateDto {
+        val session = synchronized(lock) {
+            if (chatBusy) return chatState()
+            chatLocked() ?: return chatState()
+        }
+        session.reset()
+        synchronized(lock) {
+            chatScenarioResult = null
+            chatError = null
+        }
+        publishChat(session)
+        return chatState()
+    }
+
+    /**
+     * Запускает сценарий дня 25 в фоне.
+     *
+     * Возвращает состояние сразу, а не через минуту: сценарий — тринадцать реплик, и ждать его конца
+     * в ответе на нажатие значило бы держать страницу без ответа всё это время. Прогресс виден через
+     * [chatState]: лента растёт по мере ходов, а [ChatStateDto.busy] и [ChatStateDto.activity]
+     * называют, что именно идёт. Неизвестное имя сюда не доходит — маршрут отвергает его с перечнем
+     * имён ([ChatScenarios.names]), и здесь оно означает уже разобранный сценарий.
+     *
+     * Сценарий идёт на том же разговоре, что и реплики человека: память задачи и история у них одни,
+     * и это условие сравнения — иначе числа сценария описывали бы другой разговор.
+     */
+    suspend fun chatScenario(name: String): ChatStateDto {
+        val scenario = ChatScenarios.byName(name) ?: return chatState()
+        synchronized(lock) {
+            if (chatBusy) return chatState()
+            chatLocked() ?: return chatState()
+            chatBusy = true
+            chatError = null
+            chatActivity = "сценарий ${scenario.name}: ${scenario.title}"
+            scope.launch { runScenario(scenario) }
+        }
+        return chatState()
+    }
+
+    /** Разговор на текущем индексе; `null` — его пока нельзя собрать (нет ключа или индекса). */
+    private fun chatLocked(): ChatSession? {
+        chat?.let { return it }
+        if (chatReasonLocked() != null) return null
+        return try {
+            // Клиент общий на разговор, а поиск берётся у того же индекса, что у прогонов:
+            // второй поиск по другому файлу дал бы другие источники при тех же настройках.
+            val client = chatLlm ?: llm(requireNotNull(apiKey)).also { chatLlm = it }
+            ChatSession(
+                llm = client,
+                model = model,
+                pipeline = chatSettings.pipeline(index.retriever(chatSettings.retrievalTopK), client, model),
+                settings = chatSettings
+            ).also { chat = it }
+        } catch (cause: Exception) {
+            // Индекс есть, но не читается (обрывок сборки, чужой файл): причина остаётся, пока
+            // её не исправят, — иначе каждый опрос пытался бы открыть тот же битый файл.
+            chatFailure = "Чат не собрался по индексу: ${message(cause)}"
+            null
+        }
+    }
+
+    /**
+     * Почему чат недоступен; `null` — доступен.
+     *
+     * Собранный разговор считается доступным, даже когда индекс пересобирается: он держит поиск
+     * по тому файлу, с которым начался, и отвечает по нему до конца разговора. Причины называются
+     * словами, а не кодом: ключ и индекс лечатся по-разному, и подсказка должна говорить, чем.
+     */
+    private fun chatReasonLocked(): String? = when {
+        apiKey == null -> NO_KEY_MESSAGE
+        chatFailure != null -> chatFailure
+        chat != null -> null
+        indexState == IndexDto.BUILDING -> CHAT_BUILDING_MESSAGE
+        !index.exists -> CHAT_INDEX_MESSAGE
+        else -> null
+    }
+
+    /**
+     * Прогон сценария шаг за шагом: ходы через движок, транскрипт по ходу и файл с приговором.
+     *
+     * Сценарий исполняет [ChatScenarioRunner] — тот же запуск, что в консоли: проверки, приговор
+     * и признаки дня считает `:rag`, и второго набора правил проверки на странице нет. Шаги при этом
+     * видны по ходу: пока runner спрашивает сессию, сторож переписывает транскрипт на каждый новый
+     * ход — по прерванному сценарию на диске должен остаться разговор, а не прошлый файл.
+     */
+    private suspend fun runScenario(scenario: ChatScenario) {
+        try {
+            val session = synchronized(lock) { chatLocked() } ?: return
+            val run = coroutineScope {
+                val work = async { ChatScenarioRunner.run(session, scenario) }
+                var seen = session.turns().size
+                while (!work.isCompleted) {
+                    delay(CHAT_WATCH_MS)
+                    val now = session.turns().size
+                    if (now != seen) {
+                        seen = now
+                        publishChat(session)
+                    }
+                }
+                work.await()
+            }
+            publishChat(session)
+            Files.writeString(
+                workDir.resolve(CHAT_SCENARIO_PREFIX + scenario.name + ".md"),
+                ChatScenarioRunner.markdown(run, chatSettings, model)
+            )
+            synchronized(lock) { chatScenarioResult = run.toDto() }
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            synchronized(lock) { chatError = "Сценарий не доигран: ${message(cause)}" }
+        } finally {
+            synchronized(lock) {
+                chatBusy = false
+                chatActivity = null
+            }
+        }
+    }
+
+    /**
+     * Переписывает транскрипт разговора: `chat.md` для человека и `chat-log.md` для разбора.
+     *
+     * Файлы переписываются после каждого хода, а не в конце: транскрипт — это то, что остаётся
+     * от разговора, и обрывок прогона (остановка, закрытая страница) не должен оставлять на диске
+     * описание прошлого разговора вместо текущего. Лог отдельно от отчёта по той же причине, что
+     * и в днях 23–24: отчёт читает человек, лог — тот, кто разбирает сбой формата.
+     */
+    private fun publishChat(session: ChatSession) {
+        val turns = session.turns()
+        Files.writeString(workDir.resolve(CHAT_FILE), ChatReport.markdown(turns, chatSettings, model))
+        Files.writeString(workDir.resolve(CHAT_LOG_FILE), ChatReport.log(turns, chatSettings, model))
     }
 
     /**
@@ -1016,6 +1281,51 @@ class RagSession(
          */
         const val GROUNDED_REPORT_FILE = "report-day24.md"
         const val GROUNDED_LOG_FILE = "log-day24.md"
+
+        /**
+         * Транскрипт мини-чата и лог его запросов: то, что остаётся от разговора дня 25.
+         *
+         * Отдельные файлы от отчётов прогонов: разговор и прогон — разные работы, и общий файл
+         * переписывал бы один отчёт другим. Сценарий пишется ещё и своим файлом на каждый запуск
+         * ([CHAT_SCENARIO_PREFIX] + имя), потому что приговор сценария нужен отдельно от ленты.
+         */
+        const val CHAT_FILE = "chat.md"
+        const val CHAT_LOG_FILE = "chat-log.md"
+        const val CHAT_SCENARIO_PREFIX = "chat-"
+
+        /**
+         * Сколько ждём между проверками ходов сценария: сторож переписывает транскрипт по ходу.
+         *
+         * Пять ходов в секунду — это дешевле, чем один пропущенный ход в транскрипте: файл маленький,
+         * а польза в том, что прерванный сценарий оставляет на диске то, что успел сказать.
+         */
+        const val CHAT_WATCH_MS = 200L
+
+        /** Что идёт: имя длительной работы для [ChatStateDto.activity]. */
+        const val CHAT_ACTIVITY = "разговор"
+
+        /** Причина недоступности: индекс не построен — чату не по чему искать. */
+        const val CHAT_INDEX_MESSAGE =
+            "Чат ищет по индексу: соберите индекс кнопкой «Пересобрать индекс» — тогда разговор заработает"
+
+        /** Причина недоступности: индекс собирается прямо сейчас. */
+        const val CHAT_BUILDING_MESSAGE = "Индекс собирается: разговор начнётся, когда поиск будет готов"
+
+        /**
+         * Отказ пересборки индекса при начатом разговоре: тот же довод, что у [RUNNING_MESSAGE].
+         *
+         * Новый индекс подменил бы базу посреди разговора, а память и история остались бы от прежнего:
+         * следующие ходы отвечались бы по одному индексу, а предыдущие — по другому. Решение остаётся
+         * за человеком — очистить разговор кнопкой и пересобрать.
+         */
+        const val CHAT_REBUILD_MESSAGE =
+            "Идёт разговор: пересборка подменила бы индекс посреди разговора — сначала очистите разговор"
+
+        /** Отказ пустой реплики: пустой вопрос не ход разговора. */
+        const val CHAT_EMPTY_MESSAGE = "Пустая реплика: напишите вопрос"
+
+        /** Отказ второго хода поверх идущего: разговор один, как и прогон. */
+        const val CHAT_BUSY_MESSAGE = "Разговор занят: дождитесь конца хода или сценария"
 
         /**
          * Сколько ждём конца отменённой работы: прогона или сборки индекса.

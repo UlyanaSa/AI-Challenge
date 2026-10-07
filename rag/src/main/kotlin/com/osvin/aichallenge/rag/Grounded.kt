@@ -93,6 +93,31 @@ data class SourceRef(
             similarity = source.similarity,
             rerankScore = candidate?.rerankScore
         )
+
+        /**
+         * Источники подтверждённых утверждений — из метаданных чанков, а не из текста модели.
+         *
+         * Порядок — по номеру фрагмента в контексте: читатель отчёта видит источники в том же
+         * порядке, в каком их видела модель, и сопоставить цитату с источником можно по номеру.
+         * Повторные упоминания одного фрагмента схлопываются: источник, названный дважды, — это
+         * один источник, и «два источника» в отчёте были бы неправдой.
+         *
+         * Функция вынесена в тип и объявлена общей для двух режимов: одиночного ответа дня 24
+         * ([com.osvin.aichallenge.rag.GroundedAgent]) и чата дня 25
+         * ([com.osvin.aichallenge.rag.chat.ChatAnswerer]). Собрать источники можно было бы в каждом
+         * по-своему, но расхождение здесь — это расхождение в том, что видит пользователь, а именно
+         * источники задание и требует показывать.
+         */
+        fun of(claims: List<Claim>, found: Retrieval): List<SourceRef> {
+            val candidates = found.trace?.candidates.orEmpty().associateBy { it.source.id }
+            return claims
+                .mapNotNull { claim ->
+                    found.sources.firstOrNull { it.rank == claim.fragment }?.let { claim.fragment to it }
+                }
+                .distinctBy { (_, source) -> source.id }
+                .sortedBy { (fragment, _) -> fragment }
+                .map { (fragment, source) -> of(source, fragment, candidates[source.id]) }
+        }
     }
 }
 
