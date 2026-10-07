@@ -32,7 +32,7 @@
 | Логирование пути запроса | `Report.log` | `build/rag/log.md` |
 
 `./gradlew :rag:test` — 19 проверок (`PromptTest`, `CheckTest`, `RagAgentTest`, `ControlsTest`),
-`./gradlew :rag-ui:test` — 2 (`RagSessionTest`).
+`./gradlew :rag-ui:test` — 4 (`RagSessionTest`).
 
 ## 2. База и индекс: корпус дня 21, без переиндексации
 
@@ -340,7 +340,7 @@ Similarity в этой картине не метрика и метрикой н
 - **Страница** — `./gradlew :rag-ui:run`, http://127.0.0.1:8098; порт и каталог задаются
   `RAG_UI_PORT` и `RAG_UI_DIR`.
 - **Проверки** — `./gradlew :rag:test` (19 проверок: промпты, проверка фактов и исходов, агент,
-  сами вопросы) и `./gradlew :rag-ui:test` (2: прогон сессии на подставном клиенте модели).
+  сами вопросы) и `./gradlew :rag-ui:test` (4: прогон сессии на подставном клиенте модели, остановка прогона и сборки индекса, вытеснение прогона новым).
 - **Ключ модели** — `DEEPSEEK_API_KEY` в окружении или в `server/.env`; без него отчёт скажет,
   чего не хватает, а страница покажет поиск без ответов модели.
 - **Векторы** — демон Ollama на `127.0.0.1:11434` (`brew services start ollama`, `ollama pull bge-m3`);
