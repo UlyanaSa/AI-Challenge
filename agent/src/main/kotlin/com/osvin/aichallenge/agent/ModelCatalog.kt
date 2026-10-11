@@ -48,10 +48,20 @@ object ModelCatalog {
     /** Экспериментальная vision-модель: тариф не опубликован. */
     val FLASH_VISION = ModelSpec(CONTEXT_WINDOW, MAX_OUTPUT_TOKENS, null, null)
 
+    /**
+     * Локальная модель Qwen3 1.7B (Ollama): окно 40 960 токенов — так его называет
+     * карточка модели (`ollama show`), и бюджет ответа ограничен 8 192, потому что
+     * столько же по умолчанию просит агент. Тарифа нет: модель работает на своей
+     * машине, и цена за токены не начисляется, поэтому `null` вместо нуля — в отчёте
+     * видно «тариф не опубликован», а не «бесплатно», и ноль не притворяется фактом.
+     */
+    val QWEN_1_7B = ModelSpec(40_960, 8_192, null, null)
+
     /** Границы и тариф модели по её идентификатору. */
     fun spec(model: String): ModelSpec = when {
         model.contains("vision") -> FLASH_VISION
         model.contains("pro") -> PRO
+        model.startsWith("qwen") -> QWEN_1_7B
         else -> FLASH
     }
 }

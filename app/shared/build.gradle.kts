@@ -88,6 +88,13 @@ kotlin {
         }
         jsMain.dependencies {
             implementation(libs.wrappers.browser)
+            // Репозиторий сам создаёт HttpClient, поэтому движку нужно лежать
+            // на classpath целевой платформы
+            implementation(libs.ktor.client.js)
+        }
+        // Тот же артефакт подходит и wasmJs: ktor-client-js публикует wasm-js-вариант
+        wasmJsMain.dependencies {
+            implementation(libs.ktor.client.js)
         }
     }
 }

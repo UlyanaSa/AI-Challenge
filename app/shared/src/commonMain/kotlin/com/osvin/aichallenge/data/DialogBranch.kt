@@ -1,5 +1,6 @@
 package com.osvin.aichallenge.data
 
+import com.osvin.aichallenge.nowMillis
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 
@@ -20,7 +21,7 @@ data class DialogBranch(
     val id: String,
     val parentId: String? = null,
     val forkedAfter: Int = 0,
-    @Transient val createdAt: Long = System.currentTimeMillis()
+    @Transient val createdAt: Long = nowMillis()
 )
 
 /**

@@ -1,5 +1,6 @@
 package com.osvin.aichallenge.data
 
+import com.osvin.aichallenge.nowMillis
 import kotlinx.serialization.Serializable
 
 /**
@@ -20,7 +21,7 @@ import kotlinx.serialization.Serializable
 data class ChatMessage(
     val role: MessageRole,
     val content: String,
-    val timestamp: Long = System.currentTimeMillis(),
+    val timestamp: Long = nowMillis(),
     val branchId: String? = null,
     val tools: List<ToolCallRecord> = emptyList()
 )

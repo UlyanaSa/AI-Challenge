@@ -1,6 +1,7 @@
 package com.osvin.aichallenge.repository
 
 import com.osvin.aichallenge.data.*
+import com.osvin.aichallenge.nowMillis
 import com.osvin.aichallenge.platformLog
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -219,6 +220,16 @@ class ChatRepository(
     private val _isServerOnline = MutableStateFlow<Boolean?>(null)
     val isServerOnline: StateFlow<Boolean?> = _isServerOnline.asStateFlow()
 
+    // Провайдер выбирает сервер, а не клиент, поэтому модель последнего ответа
+    // приходит в теле ответа и хранится здесь: в шапке чата видно, кто ответил
+    // на самом деле, а не что выбрано в настройках. В облачном режиме это та же
+    // модель, что в настройках, в локальном — загруженная модель Ollama.
+    private val _answerModel = MutableStateFlow<String?>(null)
+    val answerModel: StateFlow<String?> = _answerModel.asStateFlow()
+
+    private val _answerProvider = MutableStateFlow<String?>(null)
+    val answerProvider: StateFlow<String?> = _answerProvider.asStateFlow()
+
     /**
      * Проверка доступности сервера.
      */
@@ -239,20 +250,11 @@ class ChatRepository(
     }
 
     /**
-     * Настройки генерации из шторки: модель, бюджет, температура и стратегия.
-     * Стратегия из них становится стратегией нового чата ([createChat]); дальше
-     * её меняют уже у чата ([updateStrategy]).
-     */
-    fun updateSettings(settings: GenerationSettings) {
-        _settings.value = settings
-    }
-
-    /**
      * Новый чат со своей историей и своей сессией агента. Стратегия контекста
-     * берётся из текущих настроек шторки и остаётся в самом чате ([Chat.strategy]):
-     * дальше её меняют у чата ([updateStrategy]), и она переживает перезапуск
-     * приложения. Диалог начинается с основной линии: веток ещё нет, активной
-     * ветки тоже.
+     * берётся из настроек ([GenerationSettings]) и остаётся в самом чате
+     * ([Chat.strategy]): дальше её меняют у чата ([updateStrategy]), и она
+     * переживает перезапуск приложения. Диалог начинается с основной линии:
+     * веток ещё нет, активной ветки тоже.
      */
     suspend fun createChat(): Chat {
         val chat = Chat(id = newHexId(), title = NEW_CHAT_TITLE, strategy = _settings.value.strategy.wire)
@@ -482,7 +484,10 @@ class ChatRepository(
                 setBody(
                     ChatRequest(
                         message = message,
-                        model = settings.model,
+                        // Модель не называется: её выбирает конфигурация сервера
+                        // (`LLM_PROVIDER`), и в локальном режиме присланное имя всё равно
+                        // было бы подменено загруженной моделью Ollama. Отчёт и шапка
+                        // берут имя из ответа — оно и есть настоящее
                         maxTokens = settings.maxTokens,
                         stop = settings.stopWords.ifEmpty { null },
                         temperature = settings.temperature,
@@ -521,7 +526,9 @@ class ChatRepository(
                 // Память агента оттуда же попадает в шторку на экране чата, а состояние
                 // задачи — в полосу над полем ввода: и то, и другое без перезапроса.
                 chatResponse.tokens?.let { report ->
-                    platformLog("agent", report.logEntry(settings.model))
+                    // Имя модели берём из ответа: клиент модель не выбирает, и только ответ
+                    // знает, кто отвечал — в локальном режиме это загруженная модель Ollama
+                    platformLog("agent", report.logEntry(chatResponse.model ?: MODEL_NOT_NAMED))
                     _memory.value = report.memory
                     applyTaskReport(report.task)
                 }
@@ -541,6 +548,8 @@ class ChatRepository(
 
                 _state.value = ChatUiState.Success(chatResponse.reply)
                 _isServerOnline.value = true
+                _answerModel.value = chatResponse.model
+                _answerProvider.value = chatResponse.provider
 
                 // Агент мог дописать память сам: панель показывает то, что теперь
                 // лежит в слоях на сервере, а не только то, что ушло в этот ответ
@@ -1214,7 +1223,7 @@ class ChatRepository(
      * @param wait Пауза до следующего удара в миллисекундах.
      */
     suspend fun runCurrencyMonitor(
-        now: () -> Long = { System.currentTimeMillis() },
+        now: () -> Long = { nowMillis() },
         wait: suspend (Long) -> Unit = { delay(it) }
     ) {
         // Начало сетки — запуск цикла: первый удар идёт сразу, остальные — по его точкам
@@ -1432,6 +1441,15 @@ class ChatRepository(
     private companion object {
         /** Заголовок чата до первого сообщения. */
         const val NEW_CHAT_TITLE = "Новый чат"
+
+        /**
+         * Имя модели в записи лога, когда ответ его не назвал.
+         *
+         * Так бывает только у старого сервера: современный ответ несёт и модель,
+         * и провайдера. Прочерк вместо имени честнее подстановки выбранной в настройках
+         * модели — её клиент больше не выбирает, и называть её значило бы выдумать ответ.
+         */
+        const val MODEL_NOT_NAMED = "модель не названа"
 
         /** Сколько символов первого сообщения попадает в заголовок списка. */
         const val TITLE_LIMIT = 40

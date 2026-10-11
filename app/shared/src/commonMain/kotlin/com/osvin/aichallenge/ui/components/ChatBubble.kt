@@ -2,75 +2,65 @@ package com.osvin.aichallenge.ui.components
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.osvin.aichallenge.data.ChatMessage
-import com.osvin.aichallenge.data.DialogBranches
 import com.osvin.aichallenge.data.MessageRole
 import com.osvin.aichallenge.data.ToolCallRecord
 
 /**
- * Пузырек сообщения в списке чата.
+ * Сообщение ленты чата.
  *
- * Вызовы инструментов печатаются карточками рядом с речью, а не строкой в пузыре: у ответа
- * инструмента текста нет вовсе ([MessageRole.TOOL] приходит с пустым `content`), и пузырь
+ * Текст печатается разобранной разметкой ([MessageText]), а не как есть: модели отвечают
+ * Markdown, и звёздочки жирного шрифта в ленте выглядели бы испорченным текстом.
+ *
+ * Печатается блоком во всю ширину строки, а не пузырём по размеру текста: пузырь —
+ * язык мобильного мессенджера, где лента узкая, а сообщения короткие. В браузере окно
+ * широкое и ответ модели длинный: пузырь шириной 300 dp оставлял бы справа пустое поле
+ * и рвал бы абзац на короткие строки. Поэтому роль участника названа строкой над текстом,
+ * а сам текст занимает строку целиком и выделяется мышью ([SelectionContainer]) — в браузере
+ * ответ копируют.
+ *
+ * Вызовы инструментов печатаются карточками рядом с речью, а не строкой в блоке: у ответа
+ * инструмента текста нет вовсе ([MessageRole.TOOL] приходит с пустым `content`), и блок
  * на его месте был бы пустым. Заодно видно, откуда взяты данные ответа ассистента.
  *
  * Строки монитора ([MessageRole.MONITOR]) печатаются той же служебной карточкой: их тоже
- * писало приложение, а не человек, и пузырь пользователя на их месте приписал бы курс
- * человеку. Свой стиль у них разошёлся бы с соседними служебными блоками на первой же
- * правке оформления.
+ * писало приложение, а не человек, и подпись «Вы» на их месте приписала бы курс человеку.
+ * Свой стиль у них разошёлся бы с соседними служебными блоками на первой же правке
+ * оформления.
  *
  * @param message Данные сообщения.
- * @param choice Варианты продолжения после этого сообщения: null или один вариант —
- *        переключать нечего.
- * @param onSelectOption Переход к варианту: null — основная линия или родительская ветка.
- * @param onBranchFrom Действие «ветка от этого сообщения»; null — ветвить нечего
- *        (сообщение вне активного пути).
  */
 @Composable
 fun ChatBubble(
     message: ChatMessage,
-    choice: DialogBranches.BranchChoice? = null,
-    onSelectOption: (String?) -> Unit = {},
-    onBranchFrom: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    // Роль подписывается словом: в веб-ленте у сообщений нет «своей» стороны, по которой
+    // читатель узнавал бы автора, — а подпись называет его прямо
     val isUser = message.role == MessageRole.USER
-    
-    val bubbleColor = if (isUser) {
-        MaterialTheme.colorScheme.primary
+    val blockColor = if (isUser) {
+        MaterialTheme.colorScheme.primaryContainer
     } else {
-        MaterialTheme.colorScheme.secondaryContainer
+        MaterialTheme.colorScheme.surfaceVariant
     }
-    
     val textColor = if (isUser) {
-        MaterialTheme.colorScheme.onPrimary
+        MaterialTheme.colorScheme.onPrimaryContainer
     } else {
-        MaterialTheme.colorScheme.onSecondaryContainer
+        MaterialTheme.colorScheme.onSurfaceVariant
     }
 
-    // Разные углы для пользователя и ИИ
-    val shape = if (isUser) {
-        RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)
-    } else {
-        RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)
-    }
-
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
-    ) {
-        // Ответ на вызов инструмента — не речь участника, а след работы: вместо пузыря
-        // с пустым текстом печатается карточка вызова. Ветвить такой ответ нечем,
-        // поэтому дальше ветка не выполняется вовсе
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Ответ на вызов инструмента — не речь участника, а след работы: вместо блока
+        // с пустым текстом печатается карточка вызова
         if (message.role == MessageRole.TOOL) {
             message.tools.forEach { call ->
                 ToolCallCard(call)
@@ -80,26 +70,33 @@ fun ChatBubble(
 
         // Строка монитора — тоже не речь участника, а показание прибора: её напечатало
         // приложение по расписанию ([MessageRole.MONITOR]). Печатается она служебной
-        // карточкой, а не пузырём: человек её не писал, и пузырь пользователя приписал бы
-        // ему чужие слова. Дальше ход не идёт и по той же причине, что у записи о вызове:
-        // ветвить ленту курсов нечем — она линейна
+        // карточкой, а не блоком речи: человек её не писал
         if (message.role == MessageRole.MONITOR) {
             MonitorCard(message.content)
             return@Column
         }
 
+        Text(
+            text = if (isUser) "Вы" else "Ассистент",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(4.dp))
+
         Surface(
-            color = bubbleColor,
-            shape = shape,
+            color = blockColor,
+            shape = RoundedCornerShape(12.dp),
             tonalElevation = 1.dp,
-            modifier = Modifier.widthIn(max = 300.dp)
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text(
-                text = message.content,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = textColor
-            )
+            SelectionContainer {
+                MessageText(
+                    text = message.content,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                )
+            }
         }
 
         // Вызовы модели идут под её ответом: по ним видно, откуда взяты данные, и что
@@ -107,46 +104,6 @@ fun ChatBubble(
         message.tools.forEach { call ->
             Spacer(Modifier.height(4.dp))
             ToolCallCard(call)
-        }
-
-        // Варианты продолжения и точка ветвления: «‹ 2/3 ›» и «ветка от этого сообщения»
-        if ((choice != null && choice.size > 1) || onBranchFrom != null) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (choice != null && choice.size > 1) {
-                    TextButton(
-                        onClick = { onSelectOption(choice.neighbour(-1)) },
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                    ) {
-                        Text(text = "‹", style = MaterialTheme.typography.labelSmall)
-                    }
-                    Text(
-                        text = "${choice.current + 1}/${choice.size}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    TextButton(
-                        onClick = { onSelectOption(choice.neighbour(1)) },
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                    ) {
-                        Text(text = "›", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-
-                if (onBranchFrom != null) {
-                    TextButton(
-                        onClick = onBranchFrom,
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                    ) {
-                        Text(
-                            text = "Ветка от этого сообщения",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-            }
         }
     }
 }

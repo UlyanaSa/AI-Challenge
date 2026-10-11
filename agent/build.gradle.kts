@@ -17,6 +17,8 @@ dependencies {
     // Живой прогон демонстрации (`:agent:demoLogs -Pdemo.live=1`): тот же стек, что у сервера.
     testImplementation(libs.bundles.ktor.client)
     testImplementation(libs.ktor.serialization.kotlinx.json)
+    // Подставной HTTP-движок: преобразование запроса и ответа Ollama проверяется без демона.
+    testImplementation(libs.ktor.client.mock)
 }
 
 /**
@@ -28,6 +30,8 @@ dependencies {
  */
 tasks.withType<Test>().configureEach {
     (project.findProperty("demo.live") as String?)?.let { systemProperty("demo.live", it) }
+    // Живой прогон против локального демона Ollama: без флага тест пропускается.
+    (project.findProperty("ollama.live") as String?)?.let { systemProperty("ollama.live", it) }
     val keyFromEnvFile = rootProject.file("server/.env").takeIf { it.isFile }
         ?.readLines()
         ?.map { it.trim() }

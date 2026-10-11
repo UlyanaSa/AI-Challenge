@@ -10,3 +10,6 @@ actual fun getPlatform(): Platform = AndroidPlatform()
 
 /** На эмуляторе хост-машина доступна по адресу 10.0.2.2. */
 actual fun serverBaseUrl(): String = "http://10.0.2.2:8080"
+
+/** На Android время epoch дают системные часы JVM. */
+actual fun nowMillis(): Long = System.currentTimeMillis()

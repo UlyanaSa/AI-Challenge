@@ -39,6 +39,8 @@ dependencies {
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.ktor.server.test.host)
+    // Подставной HTTP-движок: локальный режим маршрута проверяется без демона Ollama.
+    testImplementation(libs.ktor.client.mock)
 }
 
 // ✅ Альтернативный способ создания fat JAR (без Shadow)

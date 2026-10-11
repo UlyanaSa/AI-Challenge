@@ -24,33 +24,42 @@ import androidx.compose.ui.unit.sp
  *
  * @param title Заголовок активного чата; null — чат ещё не выбран.
  * @param isOnline Статус подключения сервера.
+ * @param model Модель, которой ответил сервер на последний вопрос; null — ответов ещё не было.
+ * @param provider Провайдер последнего ответа: `local` — запрос не покидал эту машину.
  * @param onBack Возврат к списку чатов.
  * @param onTitleClick Обработчик нажатия на заголовок (для ручной проверки связи).
- * @param onNewChat Создание нового чата с настройкой агента.
- * @param onMemory Открытие шторки памяти чата.
+ * @param onNewChat Создание нового чата и переход в него.
  * @param onInvariants Открытие шторки инвариантов проекта.
  * @param onProfile Открытие шторки профиля пользователя.
- * @param onGitHub Открытие шторки GitHub: подключение инструментов и вызов инструмента.
+ * @param showBack Показывать ли возврат к списку: на узком экране список — отдельный
+ *        экран, и без возврата из чата не выйти; на широком список стоит рядом,
+ *        и стрелка возврата не нужна.
+ * @param showNewChat Показывать ли создание чата в шапке: на широком экране кнопка
+ *        есть в списке чатов, и вторая кнопка на той же странице повторяла бы её.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBar(
     title: String?,
     isOnline: Boolean?,
+    model: String? = null,
+    provider: String? = null,
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onNewChat: () -> Unit,
-    onMemory: () -> Unit,
     onInvariants: () -> Unit,
     onProfile: () -> Unit,
-    onGitHub: () -> Unit,
+    showBack: Boolean = true,
+    showNewChat: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
         modifier = modifier,
         navigationIcon = {
-            IconButton(onClick = onBack) {
-                Text("←", fontSize = 20.sp)
+            if (showBack) {
+                IconButton(onClick = onBack) {
+                    BackIcon()
+                }
             }
         },
         title = {
@@ -67,34 +76,37 @@ fun ChatTopBar(
                     overflow = TextOverflow.Ellipsis
                 )
                 ConnectionStatus(isOnline)
+                // Имя ответившей модели — под статусом связи и до ответа не показывается:
+                // до первого ответа называть модель значило бы обещать, а не сообщать.
+                // В локальном режиме подпись называет провайдера: имя модели Ollama
+                // (`qwen3:1.7b`) само по себе не говорит, что ответ пришёл с этой машины
+                model?.let {
+                    Text(
+                        text = if (provider == LOCAL_PROVIDER) "локальная модель: $it" else "модель: $it",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         },
         actions = {
-            // Память чата: настройки памяти открываются шторкой, поэтому лента
-            // сообщений не занята панелью
-            TextButton(onClick = onMemory) {
-                Text("Память", style = MaterialTheme.typography.labelLarge)
-            }
             // Инварианты проекта: те же правила уходят в модель с каждым запросом,
             // поэтому правятся они там же, где видно остальные настройки агента
             TextButton(onClick = onInvariants) {
                 Text("Инварианты", style = MaterialTheme.typography.labelLarge)
             }
-            // Профиль пользователя: та же шторка, что и память, — обе настройки
-            // агента открываются поверх чата, а не занимают ленту сообщений
+            // Профиль пользователя: предпочтения, которые сервер подставляет в каждый
+            // запрос к модели; шторка открывается поверх чата, а не занимает ленту
             TextButton(onClick = onProfile) {
                 Text("Профиль", style = MaterialTheme.typography.labelLarge)
             }
-            // GitHub: подключение к MCP-серверу инструментов и их ручной вызов открываются
-            // той же шторкой, что и остальные настройки агента. Подпись короче соседних
-            // намеренно: действий в шапке уже четыре, и «Инструменты GitHub» выдавили бы
-            // заголовок чата, ради которого шапка и нужна
-            TextButton(onClick = onGitHub) {
-                Text("GitHub", style = MaterialTheme.typography.labelLarge)
-            }
-            // Кнопка создания нового чата: возвращает к настройке агента
-            IconButton(onClick = onNewChat) {
-                Text("＋", fontSize = 20.sp)
+            // Новый чат: заводится сразу и открывается — настраивать перед первым
+            // сообщением нечего, провайдера и модель выбирает конфигурация сервера
+            if (showNewChat) {
+                IconButton(onClick = onNewChat) {
+                    PlusIcon()
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -102,3 +114,12 @@ fun ChatTopBar(
         )
     )
 }
+
+/**
+ * Значение провайдера в ответе сервера для локального режима.
+ *
+ * Строка, а не перечисление: провайдера выбирает конфигурация сервера, и клиент
+ * о нём знает ровно столько, сколько сервер прислал, — иначе список провайдеров
+ * на клиенте разошёлся бы с тем, что сервер умеет.
+ */
+private const val LOCAL_PROVIDER = "local"

@@ -1,25 +1,14 @@
 package com.osvin.aichallenge.data
 
 /**
- * Модель DeepSeek, доступная в шторке настроек.
- * Три модели взяты из живого списка DeepSeek /v1/models:
- * начало, середина и конец списка (день 5: сравнение версий моделей).
- *
- * @param id Идентификатор модели в API DeepSeek.
- * @param title Короткое название для шторки.
- * @param subtitle Пояснение: уровень и типичное применение.
- */
-data class ModelOption(
-    val id: String,
-    val title: String,
-    val subtitle: String
-)
-
-/**
  * Настройки генерации ответа модели.
- * Заполняются в шторке настроек и передаются на сервер вместе с каждым сообщением.
  *
- * @param model Модель DeepSeek (см. [GenerationSettings.MODELS]).
+ * Передаются на сервер вместе с каждым сообщением. Ручных настроек в интерфейсе нет:
+ * модель выбирает конфигурация сервера (`LLM_PROVIDER`), а вместе с ней и провайдера —
+ * облачный или локальный, — поэтому и выбирать модель в чате не из чего; в чате видно
+ * ту, которой сервер ответил. Остальные поля задают рамки запроса и берутся значениями
+ * по умолчанию.
+ *
  * @param maxTokens Максимальное количество токенов в ответе модели —
  *                  ограничение длины ответа.
  * @param stopWords Стоп-слова завершения: генерация останавливается, как только модель
@@ -39,7 +28,6 @@ data class ModelOption(
  *                 [ContextStrategy.MEMORY]. Остальные стратегии его не читают.
  */
 data class GenerationSettings(
-    val model: String = DEFAULT_MODEL,
     val maxTokens: Int = DEFAULT_MAX_TOKENS,
     val stopWords: List<String> = emptyList(),
     val systemPrompt: String = "",
@@ -48,31 +36,6 @@ data class GenerationSettings(
     val windowMessages: Int = DEFAULT_WINDOW_MESSAGES
 ) {
     companion object {
-        /** Модель по умолчанию: самая быстрая и дешёвая из списка DeepSeek. */
-        const val DEFAULT_MODEL = "deepseek-v4-flash"
-
-        /**
-         * Модели DeepSeek в порядке живого списка API:
-         * flash — начало списка (быстрая, дешёвая), pro — середина (сильная),
-         * flash-vision — конец (экспериментальная, со зрением).
-         */
-        val MODELS = listOf(
-            ModelOption(
-                id = "deepseek-v4-flash",
-                title = "V4 Flash — быстрая",
-                subtitle = "Дешёвая модель для повседневных вопросов"
-            ),
-            ModelOption(
-                id = "deepseek-v4-pro",
-                title = "V4 Pro — сильная",
-                subtitle = "Тяжёлая модель для сложных задач и рассуждений"
-            ),
-            ModelOption(
-                id = "deepseek-v4-flash-vision-exp",
-                title = "V4 Flash Vision (экспериментальная)",
-                subtitle = "Flash со зрением; в текстовых задачах ведёт себя как Flash"
-            )
-        )
 
         /**
          * Значение по умолчанию повторяет серверное (AppConfig): у thinking-модели
@@ -81,40 +44,22 @@ data class GenerationSettings(
          */
         const val DEFAULT_MAX_TOKENS = 8192
 
-        /**
-         * Верхняя граница бюджета ответа в настройках — та же, что зажимает агент
-         * (`AppConfig.MAX_TOKEN_CEILING`). Больше поле не примет: на 8192 рассуждения
-         * thinking-модели могли съесть весь бюджет и оставить ответ без текста, а
-         * агент советует увеличить бюджет — значит, увеличить должно быть можно.
-         */
-        const val MAX_TOKENS_LIMIT = 32_768
-
-        /** Максимум стоп-слов за один запрос (лимит DeepSeek API). */
-        const val MAX_STOP_WORDS = 16
-
         /** Температура генерации по умолчанию. */
         const val DEFAULT_TEMPERATURE = 0.7
 
         /**
-         * Стратегия нового чата: память агента. Приложение хранит память (день 11),
-         * и чат по умолчанию обязан её читать — иначе записи из шторки лежали бы
-         * на сервере и не уходили в модель.
+         * Стратегия нового чата: вся история диалога целиком.
+         *
+         * Это обычный чат: в модель уходит весь разговор, без извлечения памяти, сводок
+         * и веток. Так короче путь запроса — на ход приходится один вызов модели, —
+         * и это то, что нужно локальному провайдеру: извлечение памяти само обращается
+         * к модели и ждёт от неё JSON, а 1.7B отвечает по такой просьбе негодно.
+         * Стратегии остальных дней ([ContextStrategy]) никуда не делись: их можно
+         * включить у чата ([com.osvin.aichallenge.repository.ChatRepository.updateStrategy]).
          */
-        val DEFAULT_STRATEGY = ContextStrategy.MEMORY
+        val DEFAULT_STRATEGY = ContextStrategy.FULL
 
         /** Размер окна стратегий «скользящее окно» и «память агента» по умолчанию. */
         const val DEFAULT_WINDOW_MESSAGES = 10
-
-        /** Нижняя граница окна в шторке настроек: совсем короткий контекст бесполезен. */
-        const val MIN_WINDOW_MESSAGES = 2
-
-        /** Верхняя граница окна в шторке настроек. */
-        const val MAX_WINDOW_MESSAGES = 100
-
-        /**
-         * Значения температуры, доступные в шторке настроек:
-         * эксперимент дня 4 гоняет один и тот же запрос при 0 / 0.7 / 1.2.
-         */
-        val TEMPERATURE_OPTIONS = listOf(0.0, 0.7, 1.2)
     }
 }

@@ -6,17 +6,10 @@ import com.osvin.aichallenge.data.Chat
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.ContextStrategy
-import com.osvin.aichallenge.data.CurrencyChangeFeed
-import com.osvin.aichallenge.data.DialogBranch
 import com.osvin.aichallenge.data.GenerationSettings
-import com.osvin.aichallenge.data.GitHubConnection
 import com.osvin.aichallenge.data.InvariantSnapshot
-import com.osvin.aichallenge.data.MemoryLayers
-import com.osvin.aichallenge.data.MemoryReport
-import com.osvin.aichallenge.data.TaskSnapshot
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.repository.ChatRepository
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,11 +27,11 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
 
     // Экспонируем потоки данных из репозитория для UI
     val messages: StateFlow<List<ChatMessage>> = repository.messages
-    val branches: StateFlow<List<DialogBranch>> = repository.branches
-    val activeBranchId: StateFlow<String?> = repository.activeBranchId
-    val memory: StateFlow<MemoryReport?> = repository.memory
-    val layers: StateFlow<MemoryLayers?> = repository.layers
-    val memoryError: StateFlow<String?> = repository.memoryError
+
+    // Состояния веток диалога здесь нет: переключателя вариантов и кнопки «ветка
+    // от этого сообщения» в интерфейсе больше нет, поэтому и подписываться нечему.
+    // Само ветвление в репозитории осталось ([ChatRepository.createBranchFrom]):
+    // им пользуются механизмы истории и его проверяют тесты стратегий контекста.
 
     // Профиль пользователя из шторки профиля. Это не память, поэтому и состояния
     // свои: профиль объявляет сам пользователь, и он подставляется в каждый запрос
@@ -46,11 +39,9 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val profile: StateFlow<UserProfile?> = repository.profile
     val profileError: StateFlow<String?> = repository.profileError
 
-    // Задача активного чата: этап, шаг и ожидаемое действие. Состояние и каталог этапов
-    // приходят с сервера, поэтому и потоки свои: задача не часть профиля и не память —
-    // она принадлежит диалогу, и её состояние не выводится на клиенте
-    val task: StateFlow<TaskSnapshot?> = repository.task
-    val taskError: StateFlow<String?> = repository.taskError
+    // Состояния задачи здесь нет: полосы «Взять в работу» в интерфейсе больше нет,
+    // поэтому подписываться нечему. Работа с задачей в репозитории осталась
+    // ([ChatRepository.loadTask]): её проверяют тесты, а состояние живёт на сервере.
 
     // Инварианты профиля: правила проекта, которые ассистент нарушать не имеет права.
     // Это ни память, ни задача: память агент извлекает из диалога, а задача описывает
@@ -60,21 +51,23 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val invariants: StateFlow<InvariantSnapshot?> = repository.invariants
     val invariantsError: StateFlow<String?> = repository.invariantsError
 
-    // Подключение к GitHub и его инструменты. Это ни память, ни задача, ни правила: GitHub —
-    // чужой сервис за отдельным MCP-процессом, и клиент знает о нём ровно столько, сколько
-    // сообщил сервер. Снимок и причина отказа — свои потоки: сбой GitHub не должен выглядеть
-    // как сбой памяти, а причина отказа инструмента теряться среди ошибок диалога
-    val github: StateFlow<GitHubConnection?> = repository.github
-    val githubError: StateFlow<String?> = repository.githubError
+    // Снимков памяти агента и подключения к GitHub здесь нет: их шторки убраны
+    // из интерфейса — чат ведёт обычную историю диалога ([ContextStrategy.FULL]),
+    // а инструменты MCP локальному провайдеру не предлагаются вовсе.
 
-    // Изменение курсов за сутки — шапка закреплённого чата, и причина последнего отказа:
-    // считается на сервере, клиент только показывает то, что пришло. Это ни память,
-    // ни задача: курсы не часть диалога, а показание прибора со своим расписанием
-    val currencyChange: StateFlow<CurrencyChangeFeed?> = repository.currencyChange
-    val currencyChangeError: StateFlow<String?> = repository.currencyChangeError
+    // Изменение курсов за сутки и причина последнего отказа в модели представления
+    // не выставляются: закреплённый чат курсов скрыт из списка, поэтому и его шапке
+    // нечего показывать. Само чтение осталось у репозитория ([ChatRepository.loadCurrencyChange]) —
+    // лента включается обратно одной строкой, если её вернут в интерфейс.
 
     val uiState: StateFlow<ChatUiState> = repository.state
     val isOnline: StateFlow<Boolean?> = repository.isServerOnline
+
+    // Кто ответил на последний вопрос: имя модели и провайдер с сервера. В шапке чата
+    // видно правду о локальном режиме — отвечает загруженная модель Ollama, а не та,
+    // что выбрана в настройках, потому что выбор провайдера клиенту не принадлежит
+    val answerModel: StateFlow<String?> = repository.answerModel
+    val answerProvider: StateFlow<String?> = repository.answerProvider
 
     // Текущие настройки генерации из шторки настроек. Стратегия в них — стратегия
     // активного чата, поэтому настройки живут в репозитории рядом с активным чатом
@@ -84,56 +77,15 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     private val _chatsLoaded = MutableStateFlow(false)
     val chatsLoaded: StateFlow<Boolean> = _chatsLoaded.asStateFlow()
 
-    // Цикл монитора курсов: нужен, чтобы повторный запуск не завёл второй цикл
-    private var currencyMonitorJob: Job? = null
-
     init {
-        // Восстанавливаем чаты, затем проверяем связь
+        // Восстанавливаем чаты, затем проверяем связь. Закреплённого чата курсов
+        // в списке больше нет, поэтому ни он не заводится, ни монитор не стартует:
+        // скрытая лента наполнялась бы впустую и дергала сервер каждую минуту
         viewModelScope.launch {
             repository.loadChats()
-            // Закреплённый чат курсов заводится до того, как список показан: иначе
-            // на первом запуске список успел бы мигнуть пустым, а чат появился бы
-            // только с первого удара монитора. Заведение идемпотентно, поэтому
-            // второй вызов из самого монитора ничего не меняет
-            repository.ensureCurrencyChat()
             _chatsLoaded.value = true
-            // Монитор курсов стартует после чтения списка чатов: закреплённый чат он
-            // заводит сам, и два обновления списка наперегонки показали бы список
-            // без закреплённого чата — тот появился бы только со следующего удара
-            startCurrencyMonitor()
         }
         checkHealth()
-    }
-
-    /**
-     * Запуск монитора курсов валют: строка с курсами приходит в закреплённый чат
-     * сразу и дальше раз в минуту, а на смене часа — сводка прошедшего часа.
-     *
-     * Цикл живёт в области видимости модели ([viewModelScope]): приложение открыто —
-     * лента наполняется, экран уничтожен — цикл умирает вместе с моделью, и никакой
-     * фоновой службы, которая будила бы устройство ради ленты, не заводится.
-     *
-     * Повторный вызов второй цикл не заводит: два цикла печатали бы по строке каждый
-     * и лента получала бы по две строки за минуту, поэтому запуск идемпотентен — как
-     * и заведение самого чата ([ChatRepository.ensureCurrencyChat]).
-     */
-    fun startCurrencyMonitor() {
-        if (currencyMonitorJob?.isActive == true) return
-        currencyMonitorJob = viewModelScope.launch {
-            repository.runCurrencyMonitor()
-        }
-    }
-
-    /**
-     * Чтение изменения курсов за [hours] часов для шапки закреплённого чата.
-     * Умолчание — сутки: шапка показывает суточную картину; сама лента сводку часа
-     * читает своим чтением, и сюда оно не заходит — иначе в шапке оказался бы час
-     * под заголовком «за сутки».
-     */
-    fun loadCurrencyChange(hours: Int = 24) {
-        viewModelScope.launch {
-            repository.loadCurrencyChange(hours)
-        }
     }
 
     /**
@@ -155,11 +107,14 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Создание нового чата с настроенным агентом и переход в него.
-     * Стратегия из настроек становится стратегией чата ([Chat.strategy]).
+     * Создание нового чата и переход в него.
+     *
+     * Настраивать нечего: настройки агента лежат значениями по умолчанию
+     * ([GenerationSettings]) — провайдера и модель выбирает конфигурация сервера,
+     * а не человек в шторке. Стратегия из настроек становится стратегией чата
+     * ([Chat.strategy]).
      */
-    fun createChat(settings: GenerationSettings) {
-        repository.updateSettings(settings)
+    fun createChat() {
         viewModelScope.launch {
             repository.createChat()
         }
@@ -175,66 +130,11 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Ветка от сообщения активного пути: продолжение диалога отдельно от соседей.
-     */
-    fun createBranchFrom(message: ChatMessage) {
-        viewModelScope.launch {
-            repository.createBranchFrom(message)
-        }
-    }
-
-    /**
-     * Переключение активной ветки диалога; null — основная линия.
-     */
-    fun switchBranch(branchId: String?) {
-        viewModelScope.launch {
-            repository.switchBranch(branchId)
-        }
-    }
-
-    /**
-     * Смена стратегии контекста активного чата: она сохраняется в самом чате
-     * и уходит с каждым следующим запросом к модели.
-     */
-    fun updateStrategy(strategy: ContextStrategy) {
-        viewModelScope.launch {
-            repository.updateStrategy(strategy)
-        }
-    }
-
-    /**
      * Отправка сообщения с текущими настройками генерации.
      */
     fun sendMessage(text: String) {
         viewModelScope.launch {
             repository.sendMessage(text, settings.value)
-        }
-    }
-
-    /**
-     * Перечитывание снимка памяти активного чата.
-     */
-    fun loadMemory() {
-        viewModelScope.launch {
-            repository.loadMemory()
-        }
-    }
-
-    /**
-     * Явная запись в память активного чата выбранного типа.
-     */
-    fun remember(layer: String, value: String) {
-        viewModelScope.launch {
-            repository.remember(layer, value)
-        }
-    }
-
-    /**
-     * Удаление записи памяти активного чата: тип и текст записи.
-     */
-    fun forget(layer: String, value: String) {
-        viewModelScope.launch {
-            repository.forget(layer, value)
         }
     }
 
@@ -256,46 +156,6 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun saveProfile(profile: UserProfile) {
         viewModelScope.launch {
             repository.saveProfile(profile)
-        }
-    }
-
-    /**
-     * Перечитывание состояния задачи активного чата. Чат читает его сам при создании
-     * и открытии, а это повторное чтение — например, после сбоя сети.
-     */
-    fun loadTask() {
-        viewModelScope.launch {
-            repository.loadTask()
-        }
-    }
-
-    /**
-     * Взятие задачи активного чата в работу: дальше её ведёт сервер, а полоса
-     * показывает то, что он вернул.
-     */
-    fun startTask() {
-        viewModelScope.launch {
-            repository.startTask()
-        }
-    }
-
-    /**
-     * Пауза и продолжение задачи активного чата: оба действия — одно поле,
-     * состояние после них берётся из ответа сервера.
-     */
-    fun setTaskPaused(paused: Boolean) {
-        viewModelScope.launch {
-            repository.setTaskPaused(paused)
-        }
-    }
-
-    /**
-     * Забвение задачи активного чата: работа стирается на сервере, полоса
-     * показывает, что задачи нет.
-     */
-    fun forgetTask() {
-        viewModelScope.launch {
-            repository.forgetTask()
         }
     }
 
@@ -327,53 +187,6 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     fun forgetInvariant(kind: String, value: String) {
         viewModelScope.launch {
             repository.forgetInvariant(kind, value)
-        }
-    }
-
-    /**
-     * Перечитывание снимка GitHub: подключено ли и какие инструменты объявлены. Шторка
-     * открывается с ним, поэтому читает его и сама; чат его не читает — подключение
-     * не принадлежит диалогу, а состояние держит сервер.
-     */
-    fun loadGitHub() {
-        viewModelScope.launch {
-            repository.loadGitHub()
-        }
-    }
-
-    /**
-     * Подключение к серверу инструментов GitHub. Аргументов нет: доступ к GitHub сервер
-     * ищет сам на своей машине, а клиент ни токена, ни поля для него не держит —
-     * результат поиска приходит в снимке подключения.
-     */
-    fun connectGitHub() {
-        viewModelScope.launch {
-            repository.connectGitHub()
-        }
-    }
-
-    /**
-     * Отключение от сервера инструментов: состояние после него берётся из ответа
-     * сервера — список инструментов знает только он.
-     */
-    fun disconnectGitHub() {
-        viewModelScope.launch {
-            repository.disconnectGitHub()
-        }
-    }
-
-    /**
-     * Вызов инструмента GitHub с вариантами аргументов, которые выбрал человек. Результат
-     * остаётся в ленте служебной записью, а причина отказа — строкой ошибки: диалог при этом
-     * продолжается.
-     *
-     * @param name Имя инструмента из снимка.
-     * @param arguments Выбранные значения по именам аргументов; пустая карта — инструмент
-     *        вызывается без аргументов (у него их нет или объявленных значений не было).
-     */
-    fun callGitHubTool(name: String, arguments: Map<String, String> = emptyMap()) {
-        viewModelScope.launch {
-            repository.callGitHubTool(name, arguments)
         }
     }
 }

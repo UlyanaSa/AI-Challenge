@@ -44,7 +44,7 @@ class ContextStrategiesClientTest {
 
     /**
      * Выбранная стратегия и размер окна уезжают в каждом запросе — вместе со
-     * значениями по умолчанию (по умолчанию — память агента), чтобы сервер
+     * значениями по умолчанию (по умолчанию — вся история чата), чтобы сервер
      * не угадывал выбор клиента. Ветки в запросах обычных стратегий не участвуют.
      */
     @Test
@@ -63,7 +63,7 @@ class ContextStrategiesClientTest {
 
         repository.sendMessage("А если на поезде")
         val defaults = lastChatRequest(requests)
-        assertEquals("memory", defaults.strategy)
+        assertEquals("full", defaults.strategy)
         assertEquals(GenerationSettings.DEFAULT_WINDOW_MESSAGES, defaults.windowMessages)
         assertNull(defaults.branchId)
         assertNull(defaults.branches)

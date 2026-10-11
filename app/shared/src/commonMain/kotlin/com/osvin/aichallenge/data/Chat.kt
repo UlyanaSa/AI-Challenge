@@ -1,5 +1,6 @@
 package com.osvin.aichallenge.data
 
+import com.osvin.aichallenge.nowMillis
 import kotlinx.serialization.Serializable
 
 /**
@@ -31,7 +32,7 @@ import kotlinx.serialization.Serializable
 data class Chat(
     val id: String,
     val title: String,
-    val createdAt: Long = System.currentTimeMillis(),
+    val createdAt: Long = nowMillis(),
     val updatedAt: Long = createdAt,
     val activeBranchId: String? = null,
     val strategy: String = ContextStrategy.MEMORY.wire,

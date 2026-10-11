@@ -186,7 +186,7 @@ private fun InvariantKindSection(
                     contentDescription = "Убрать инвариант: ${invariant.value}"
                 }
             ) {
-                Text("✕", style = MaterialTheme.typography.labelMedium)
+                CloseIcon(dimension = 14.dp)
             }
         }
     }

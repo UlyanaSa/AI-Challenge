@@ -16,9 +16,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.osvin.aichallenge.data.ChatUiState
-import com.osvin.aichallenge.data.DialogBranches
 import com.osvin.aichallenge.data.InvariantSnapshot
-import com.osvin.aichallenge.data.MemoryLayers
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
 
@@ -26,31 +24,33 @@ import com.osvin.aichallenge.ui.components.*
  * Экран одного чата: история активного чата и обмен сообщениями с агентом.
  * Соединяет ViewModel с пользовательским интерфейсом.
  *
- * Показывается только путь активной ветки: сообщения соседних веток лежат
- * в хранилище, но в чате не мешаются (см. [com.osvin.aichallenge.data.DialogBranches]).
+ * Показывается только путь активной ветки диалога: сообщения соседних веток лежат
+ * в хранилище, но в чате не мешаются. Самих веток в интерфейсе нет — ни переключателя
+ * вариантов ответа, ни кнопки «ветка от этого сообщения»: диалог ведётся одной линией
+ * (см. [com.osvin.aichallenge.data.DialogBranches]).
  *
- * Память агента открывается шторкой из верхней панели: в ленте сообщений её нет,
- * чтобы хранилище не мешало диалогу. Профиль пользователя — второй шторкой там же:
- * он общий для всех чатов и подставляется в каждый запрос к модели. Инварианты —
- * третьей: это правила проекта, которые ассистент нарушать не имеет права, и они
- * тоже уходят в каждый запрос, поэтому правятся поверх чата. GitHub — четвёртой: подключение
- * к MCP-серверу инструментов живёт на сервере приложения и общее для всех чатов, поэтому
- * шторка показывает одно соединение и даёт вызвать инструмент руками.
+ * Профиль пользователя открывается шторкой из верхней панели: он общий для всех чатов
+ * и подставляется в каждый запрос к модели. Инварианты — второй: это правила проекта,
+ * которые ассистент нарушать не имеет права, и они тоже уходят в каждый запрос, поэтому
+ * правятся поверх чата. Шторок памяти агента и подключения к GitHub здесь нет: чат ведёт
+ * обычную историю диалога ([com.osvin.aichallenge.data.ContextStrategy.FULL]), а инструменты
+ * MCP локальному провайдеру не предлагаются.
  *
- * Задача чата видна полосой над полем ввода: состояние работы адресуется сессией
- * диалога, поэтому у каждого чата оно своё, и там же его заводят, ставя на паузу
- * и забывают (см. [com.osvin.aichallenge.ui.components.TaskStateBar]).
+ * Задачи чата в интерфейсе нет: ни полосы состояния работы над полосой ввода, ни кнопок
+ * «Взять в работу», паузы и «забыть». Состояние задачи на сервере живёт по-прежнему
+ * (см. [com.osvin.aichallenge.repository.ChatRepository.loadTask]) — из интерфейса убрано
+ * только управление им.
  *
- * Если открыт закреплённый чат ([com.osvin.aichallenge.data.CurrencyChat]), экран
- * показывает ленту, а не диалог: поля ввода и полосы задачи в нём нет — писать в ленту
- * нечем, — а первой строкой стоит [CurrencyChangeCard] с изменением курсов за сутки.
- * Карточка читается при открытии чата: суточное изменение считает сервер, и по минутам
- * оно не меняется. Лента при этом наполняется сама: строки печатает монитор
- * ([com.osvin.aichallenge.repository.ChatRepository.runCurrencyMonitor]).
+ * Модель, которой ответил сервер, видна в шапке под статусом связи: её называет ответ,
+ * а не настройки, — провайдера и модель выбирает конфигурация сервера.
  *
  * @param title Заголовок активного чата для верхней панели.
  * @param onBack Возврат к списку чатов.
- * @param onNewChat Переход к экрану создания нового чата с настройкой агента.
+ * @param onNewChat Создание нового чата и переход в него.
+ * @param showBack Показывать ли возврат к списку: на узком экране список — отдельный
+ *        экран, на широком он стоит рядом и возвращаться некуда.
+ * @param showNewChat Показывать ли создание чата в шапке: на широком экране кнопка
+ *        есть в списке чатов рядом.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,56 +58,29 @@ fun ChatScreen(
     viewModel: ChatViewModel,
     title: String?,
     onBack: () -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    showBack: Boolean = true,
+    showNewChat: Boolean = true
 ) {
     // Подписка на состояния из ViewModel
     val messages by viewModel.messages.collectAsStateWithLifecycle()
-    val branches by viewModel.branches.collectAsStateWithLifecycle()
-    val activeBranchId by viewModel.activeBranchId.collectAsStateWithLifecycle()
-    val memory by viewModel.memory.collectAsStateWithLifecycle()
-    val layers by viewModel.layers.collectAsStateWithLifecycle()
-    val memoryError by viewModel.memoryError.collectAsStateWithLifecycle()
     // Профиль пользователя: что лежит на сервере и чем закончилось чтение или запись
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val profileError by viewModel.profileError.collectAsStateWithLifecycle()
-    // Задача активного чата: этап, шаг и ожидаемое действие вместе с каталогом этапов,
-    // и чем закончилось последнее обращение к серверу
-    val task by viewModel.task.collectAsStateWithLifecycle()
-    val taskError by viewModel.taskError.collectAsStateWithLifecycle()
     // Инварианты проекта: действующие правила вместе с каталогом видов и чем
     // закончилось последнее обращение к серверу
     val invariants by viewModel.invariants.collectAsStateWithLifecycle()
     val invariantsError by viewModel.invariantsError.collectAsStateWithLifecycle()
-    // Инструменты GitHub: снимок подключения и причина последнего отказа
-    val github by viewModel.github.collectAsStateWithLifecycle()
-    val githubError by viewModel.githubError.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
-    // Стратегия контекста активного чата: она же показывается и меняется в шторке памяти
-    val settings by viewModel.settings.collectAsStateWithLifecycle()
-    // Активный чат: по его закреплению видно, что открыта лента курсов, а не диалог
-    val activeChat by viewModel.activeChat.collectAsStateWithLifecycle()
-    // Изменение курсов за сутки для шапки ленты и причина последнего отказа
-    val currencyChange by viewModel.currencyChange.collectAsStateWithLifecycle()
-    val currencyChangeError by viewModel.currencyChangeError.collectAsStateWithLifecycle()
-    // Открыта лента курсов: она закреплена, поэтому полем ввода в ней писать нечем,
-    // а сверху видно, как курсы изменились за сутки. Признак берётся у самого чата,
-    // а не сравнением с идентификатором ленты: закрепление — свойство списка чатов,
-    // и второму такому чату не пришлось бы добавлять сюда второе условие
-    val isCurrencyChat = activeChat?.pinned == true
+    val answerModel by viewModel.answerModel.collectAsStateWithLifecycle()
+    val answerProvider by viewModel.answerProvider.collectAsStateWithLifecycle()
 
     // Локальное состояние ввода
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    // Форма явной записи в память и признак открытой шторки: живут на экране,
-    // поэтому перерисовка списка сообщений не теряет набранный текст
-    var memoryLayer by rememberSaveable { mutableStateOf<String?>(null) }
-    var memoryValue by rememberSaveable { mutableStateOf("") }
-    var memoryOpen by rememberSaveable { mutableStateOf(false) }
-    val memorySheetState = rememberModalBottomSheetState()
-
-    // Форма добавления инварианта и признак открытой шторки: как и у памяти, они
+    // Форма добавления инварианта и признак открытой шторки: как и у профиля, они
     // живут на экране, поэтому перерисовка списка сообщений не теряет набранный текст
     var invariantKind by rememberSaveable { mutableStateOf<String?>(null) }
     var invariantValue by rememberSaveable { mutableStateOf("") }
@@ -123,28 +96,6 @@ fun ChatScreen(
     var profileOpen by rememberSaveable { mutableStateOf(false) }
     val profileSheetState = rememberModalBottomSheetState()
 
-    // Признак открытой шторки GitHub: как и у остальных шторок, он живёт на экране,
-    // иначе перерисовка ленты сообщений закрывала бы шторку посреди ввода
-    var githubOpen by rememberSaveable { mutableStateOf(false) }
-    val githubSheetState = rememberModalBottomSheetState()
-
-    // Подключение живёт на сервере и переживает перезапуск приложения, поэтому снимок
-    // читается при появлении экрана: иначе кнопка и шторка показывали бы «не подключено»
-    // там, где инструменты уже работают
-    LaunchedEffect(Unit) {
-        viewModel.loadGitHub()
-    }
-
-    // Шапка ленты курсов читается при открытии закреплённого чата, а не при каждом
-    // ударе монитора: изменение за сутки считается на сервере и за минуту не меняется
-    // заметно, а лишний запрос на каждый удар был бы платой ни за что. Переход
-    // из обычного чата в ленту снова поднимает чтение — ключ эффекта меняется
-    LaunchedEffect(isCurrencyChat) {
-        if (isCurrencyChat) {
-            viewModel.loadCurrencyChange()
-        }
-    }
-
     // Шторка открывается с тем, что лежит на сервере, а не с прошлыми правками;
     // профиль мог прийти уже после открытия (медленная сеть) — тогда черновик
     // наполняется, как только он придёт
@@ -154,15 +105,6 @@ fun ChatScreen(
         val fromServer = profile
         if (profileOpen && fromServer != null) {
             profileDraft = fromServer
-        }
-    }
-
-    // Тип записи выбирается только из каталога сервера: по умолчанию — первый
-    // писаемый, обычно рабочая память. Пока каталога нет, типа тоже нет.
-    LaunchedEffect(layers?.types) {
-        val writable = layers?.types.orEmpty().filter { it.writable }
-        if (writable.none { it.layer == memoryLayer }) {
-            memoryLayer = writable.firstOrNull()?.layer
         }
     }
 
@@ -187,47 +129,34 @@ fun ChatScreen(
             ChatTopBar(
                 title = title,
                 isOnline = isOnline,
+                model = answerModel,
+                provider = answerProvider,
                 onBack = onBack,
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,
-                onMemory = { memoryOpen = true },
                 onInvariants = { invariantsOpen = true },
                 onProfile = { profileOpen = true },
-                onGitHub = { githubOpen = true }
+                showBack = showBack,
+                showNewChat = showNewChat
             )
         },
         bottomBar = {
-            // В закреплённом чате-ленте поля ввода нет: писать в него нечем — курсы
-            // приходят по расписанию, а модель в нём не вызывается. Полосы задачи там
-            // тоже нет: задача принадлежит диалогу, а не ленте показаний
-            if (!isCurrencyChat) {
-                // Полоса задачи встаёт над полем ввода: состояние работы видно рядом
-                // с тем, чем её продолжают, и не занимает места в ленте сообщений
-                Column {
-                    TaskStateBar(
-                        task = task,
-                        error = taskError,
-                        onStart = { viewModel.startTask() },
-                        // Действие одно, а значение — обратное текущему: на паузе кнопка
-                        // продолжает, а идущую задачу останавливает
-                        onTogglePause = { viewModel.setTaskPaused(task?.task?.paused != true) },
-                        onForget = { viewModel.forgetTask() }
-                    )
-                    ChatInputBar(
-                        text = inputText,
-                        onTextChange = { inputText = it },
-                        onSend = {
-                            viewModel.sendMessage(inputText)
-                            inputText = ""
-                        },
-                        isLoading = uiState is ChatUiState.Loading,
-                        enabled = isOnline == true
-                    )
-                }
-            }
+            ChatInputBar(
+                text = inputText,
+                onTextChange = { inputText = it },
+                onSend = {
+                    viewModel.sendMessage(inputText)
+                    inputText = ""
+                },
+                isLoading = uiState is ChatUiState.Loading,
+                enabled = isOnline == true
+            )
         }
     ) { padding ->
         Box(
+            // Лента по центру и не шире строки чтения: на широком экране браузера
+            // сообщение во всю ширину окна читать нельзя — глаз теряет начало строки
+            contentAlignment = Alignment.TopCenter,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -235,22 +164,14 @@ fun ChatScreen(
         ) {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = CONTENT_MAX_WIDTH),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Шапка ленты курсов: в неё смотрят раньше самих наблюдений — она
-                // отвечает, что стало с курсами за сутки. Стоит первой строкой списка,
-                // поэтому прокручивается вместе с лентой и не занимает экран вечно
-                if (isCurrencyChat) {
-                    item {
-                        CurrencyChangeCard(feed = currencyChange, error = currencyChangeError)
-                    }
-                }
-
-                // Пустой чат: подсказка вместо пустого экрана. В ленте курсов её нет:
-                // писать в неё нечего, и совет «напишите первое сообщение» был бы ложью
-                if (messages.isEmpty() && uiState !is ChatUiState.Loading && !isCurrencyChat) {
+                // Пустой чат: подсказка вместо пустого экрана
+                if (messages.isEmpty() && uiState !is ChatUiState.Loading) {
                     item {
                         Text(
                             text = "Напишите первое сообщение — у этого чата своя история " +
@@ -265,14 +186,10 @@ fun ChatScreen(
                     }
                 }
 
-                // Список сообщений активного пути: на каждом видно варианты продолжения
-                itemsIndexed(messages) { index, message ->
-                    ChatBubble(
-                        message = message,
-                        choice = DialogBranches.choiceAfter(messages, index, branches, activeBranchId),
-                        onSelectOption = { viewModel.switchBranch(it) },
-                        onBranchFrom = { viewModel.createBranchFrom(message) }
-                    )
+                // Список сообщений: у каждого — только его текст, вызовы инструментов
+                // и служебные карточки. Ветки диалога в интерфейсе не показываются
+                itemsIndexed(messages) { _, message ->
+                    ChatBubble(message = message)
                 }
                 
                 // Отображение индикаторов загрузки или ошибок
@@ -286,36 +203,6 @@ fun ChatScreen(
                     else -> {}
                 }
             }
-        }
-    }
-
-    // Шторка памяти: открывается из верхней панели и не занимает место в ленте
-    // сообщений. Снимок читается при открытии чата, поэтому шторка показывает
-    // то же, что и чат; без снимка видно, что каталог не пришёл.
-    if (memoryOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { memoryOpen = false },
-            sheetState = memorySheetState
-        ) {
-            MemorySheet(
-                layers = layers ?: EMPTY_MEMORY_LAYERS,
-                report = memory,
-                error = memoryError,
-                selectedLayer = memoryLayer,
-                valueText = memoryValue,
-                // Смена стратегии сразу уходит во ViewModel: она же уезжает с запросом
-                strategy = settings.strategy,
-                onLayerSelected = { memoryLayer = it },
-                onValueChange = { memoryValue = it },
-                onRemember = {
-                    memoryLayer?.let { viewModel.remember(it, memoryValue) }
-                    // Текст очищается сразу, тип остаётся выбранным:
-                    // так подряд вводят несколько записей одного типа
-                    memoryValue = ""
-                },
-                onForget = { layer, value -> viewModel.forget(layer, value) },
-                onStrategySelected = { viewModel.updateStrategy(it) }
-            )
         }
     }
 
@@ -345,8 +232,8 @@ fun ChatScreen(
         }
     }
 
-    // Шторка профиля: та же форма, что у памяти, — профиль правится поверх чата,
-    // и правки видны строкой состояния до самого сохранения
+    // Шторка профиля: предпочтения, которые сервер подставляет в каждый запрос к модели,
+    // правятся поверх чата, и правки видны строкой состояния до самого сохранения
     if (profileOpen) {
         ModalBottomSheet(
             onDismissRequest = { profileOpen = false },
@@ -361,29 +248,7 @@ fun ChatScreen(
             )
         }
     }
-
-    // Шторка GitHub: подключение к MCP-серверу инструментов и их вызов. Снимок приходит
-    // с сервера, поэтому и после подключения, и после отказа видно то, что он ответил;
-    // токена на клиенте нет вовсе — доступ сервер берёт с машины, где запущен, а шторка
-    // показывает только его результат: логин, права и место, откуда доступ взят
-    if (githubOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { githubOpen = false },
-            sheetState = githubSheetState
-        ) {
-            GitHubSheet(
-                connection = github,
-                error = githubError,
-                onConnect = { viewModel.connectGitHub() },
-                onDisconnect = { viewModel.disconnectGitHub() },
-                onCall = { name, arguments -> viewModel.callGitHubTool(name, arguments) }
-            )
-        }
-    }
 }
-
-/** Пустой снимок: шторка открывается и до ответа сервера — тогда видно, что каталог типов не пришёл. */
-private val EMPTY_MEMORY_LAYERS = MemoryLayers()
 
 /** Пустой снимок инвариантов: шторка открывается и до ответа сервера — тогда видно, что каталог видов не пришёл. */
 private val EMPTY_INVARIANTS = InvariantSnapshot()

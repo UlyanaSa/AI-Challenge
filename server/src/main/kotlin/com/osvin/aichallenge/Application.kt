@@ -1,12 +1,13 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.agent.AgentLogger
 import com.osvin.aichallenge.agent.AgentOptions
 import com.osvin.aichallenge.agent.AgentTool
 import com.osvin.aichallenge.agent.ContextStrategy
 import com.osvin.aichallenge.agent.ContextOverflowException
 import com.osvin.aichallenge.agent.DEFAULT_PROFILE
-import com.osvin.aichallenge.agent.DeepSeekClient
 import com.osvin.aichallenge.agent.EmptyReplyException
+import com.osvin.aichallenge.agent.InMemoryInvariantStore
 import com.osvin.aichallenge.agent.InMemoryMemoryStore
 import com.osvin.aichallenge.agent.InMemorySummaryStore
 import com.osvin.aichallenge.agent.InMemoryTaskStateStore
@@ -16,9 +17,15 @@ import com.osvin.aichallenge.agent.InvariantWrite
 import com.osvin.aichallenge.agent.InvariantWriter
 import com.osvin.aichallenge.agent.LlmAgent
 import com.osvin.aichallenge.agent.LlmApiException
+import com.osvin.aichallenge.agent.LlmClientFactory
+import com.osvin.aichallenge.agent.LlmProvider
+import com.osvin.aichallenge.agent.LlmProviderConfig
+import com.osvin.aichallenge.agent.LlmTimeoutException
+import com.osvin.aichallenge.agent.LlmUnavailableException
 import com.osvin.aichallenge.agent.MemoryForget
 import com.osvin.aichallenge.agent.MemoryWrite
 import com.osvin.aichallenge.agent.MemoryWriter
+import com.osvin.aichallenge.agent.OllamaProbe
 import com.osvin.aichallenge.agent.ProfileStore
 import com.osvin.aichallenge.agent.TaskWrite
 import com.osvin.aichallenge.agent.TaskWriter
@@ -95,6 +102,26 @@ val client = HttpClient(CIO) {
         socketTimeoutMillis = 300_000
     }
 }
+
+/**
+ * Настройки провайдера генерации: чей транспорт вызывает агент.
+ *
+ * Читаются один раз при первом обращении к файлу: переменные окружения важнее строк
+ * `.env`, потому что ими провайдера переключают при запуске (`LLM_PROVIDER=local
+ * ./gradlew :server:run`), а `.env` — это сохранённая настройка машины, которую разово
+ * переопределяют. Ни маршрут чата, ни агент имён переменных не знают: они работают
+ * с [LlmProviderConfig], поэтому адрес демона и имя модели не разошлись по коду.
+ */
+val llmProviderConfig: LlmProviderConfig = LlmProviderConfig.fromEnv(envFile() + System.getenv())
+
+/**
+ * Сборка транспорта по настройкам: единственное место, где выбирается провайдер.
+ *
+ * Общая на все запросы, как хранилища: маршрут чата просит у неё клиента на каждый
+ * запрос, а не решает сам, куда идти. Так переключение провайдера не может обойти
+ * одну ветку маршрута: и чат, и проверка здоровья смотрят на [LlmClientFactory.provider].
+ */
+val llmClientFactory = LlmClientFactory(llmProviderConfig, client, AgentLogger.Console)
 
 /**
  * Сводки историй диалогов: отдельно от сообщений, по сессии.
@@ -254,6 +281,58 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
     )
 
 /**
+ * Здоровье локального провайдера: жив ли демон Ollama и загружена ли модель.
+ *
+ * Проверку ведёт фабрика ([LlmClientFactory.probeOllama]) — тем адресом и тем клиентом,
+ * с которыми пойдут запросы чата, поэтому страница не может узнать про одну модель,
+ * а работать с другой. Здесь только перевод итога в ответ сервера: «демон не ответил»
+ * и «демон ответил, модели нет» — разные причины, и человеку они называют разные действия.
+ *
+ * @param factory Сборка транспорта: из неё берутся и проверка, и имя модели для ответа.
+ */
+private suspend fun ApplicationCall.respondOllamaHealth(factory: LlmClientFactory) {
+    val model = factory.config.ollamaModel
+    when (val probe = factory.probeOllama()) {
+        is OllamaProbe.Failed -> respond(
+            HttpStatusCode.ServiceUnavailable,
+            HealthResponse(
+                status = "error",
+                deepseek = "local",
+                provider = LlmProvider.LOCAL.wire,
+                model = model,
+                message = probe.reason
+            )
+        )
+
+        is OllamaProbe.Loaded -> {
+            val loaded = probe.models.any { it == model || it.startsWith("$model:") }
+            if (loaded) {
+                respond(
+                    HealthResponse(
+                        status = "ok",
+                        deepseek = "local",
+                        provider = LlmProvider.LOCAL.wire,
+                        model = model,
+                        message = "Локальная модель $model доступна"
+                    )
+                )
+            } else {
+                respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    HealthResponse(
+                        status = "error",
+                        deepseek = "local",
+                        provider = LlmProvider.LOCAL.wire,
+                        model = model,
+                        message = "Модель $model не загружена в Ollama: выполните `ollama pull $model`"
+                    )
+                )
+            }
+        }
+    }
+}
+
+/**
  * Основной модуль сервера Ktor.
  * Настраивает плагины и маршрутизацию.
  *
@@ -274,12 +353,17 @@ private suspend fun ApplicationCall.respondTaskSessionRequired() =
  * @param reportTools Инструменты сервера отчётов — сборка markdown и запись файла. Четвёртый
  *        сервер в том же общем списке: инструменты всех серверов уезжают модели одним набором,
  *        а маршрут вызова ищет сервер по имени (см. [McpOrchestrator]).
+ * @param llmClients Сборка транспорта к модели: провайдер выбирается настройками запуска,
+ *        а не запросом клиента. Приходит параметром со значением по умолчанию, как инструменты:
+ *        тесты подставляют фабрику с подставным HTTP-движком и проверяют локальный режим,
+ *        не поднимая ни Ollama, ни облачный API.
  */
 fun Application.module(
     githubTools: GitHubTools = GitHubTools(),
     currencyTools: CurrencyTools = CurrencyTools(),
     pipelineTools: PipelineTools = PipelineTools(),
-    reportTools: ReportTools = ReportTools()
+    reportTools: ReportTools = ReportTools(),
+    llmClients: LlmClientFactory = llmClientFactory
 ) {
     // Единый реестр инструментов всех серверов и оркестратор, который по имени вызова находит
     // сервер: модель видит один список инструментов, а куда отправить вызов — знает реестр.
@@ -342,6 +426,25 @@ fun Application.module(
             )
         }
 
+        // Локальная модель не отвечает: демон Ollama не запущен или слушает по другому
+        // адресу. Это не ошибка запроса и не 500 сервера: сервер работает, недоступен
+        // провайдер, поэтому 503 с причиной — клиент покажет её человеку.
+        exception<LlmUnavailableException> { call, cause ->
+            call.respond(
+                HttpStatusCode.ServiceUnavailable,
+                ErrorResponse(success = false, error = cause.message ?: "Локальная модель недоступна")
+            )
+        }
+
+        // Провайдер не успел ответить за отведённый срок: 504, а не 500 — запрос был
+        // принят и до провайдера дошёл, но ответа не дождались.
+        exception<LlmTimeoutException> { call, cause ->
+            call.respond(
+                HttpStatusCode.GatewayTimeout,
+                ErrorResponse(success = false, error = cause.message ?: "Превышен срок ожидания ответа модели")
+            )
+        }
+
         exception<Throwable> { call, cause ->
             call.application.environment.log.error("Internal Server Error", cause)
             call.respond(
@@ -383,9 +486,21 @@ fun Application.module(
 
     routing {
         /**
-         * Проверка состояния сервера и API ключа.
+         * Проверка состояния сервера и провайдера модели.
+         *
+         * В локальном режиме проверяется демон Ollama, а не облачный API: иначе страница
+         * объявляла бы сервер офлайн ровно тогда, когда он работает, — ключа облака в этом
+         * режиме нет, и проверка по ключу всегда отвечала бы отказом. Локальная проверка
+         * смотрит список моделей демона: он отвечает и тогда, когда модель ещё не загружена,
+         * поэтому наличие самой модели проверяется по имени в списке — «демон жив, модели нет»
+         * это отдельное состояние, и человеку его надо назвать.
          */
         get("/v1/health") {
+            if (llmClients.provider == LlmProvider.LOCAL) {
+                call.respondOllamaHealth(llmClients)
+                return@get
+            }
+
             val apiKey = deepSeekApiKey()
 
             if (apiKey.isNullOrBlank()) {
@@ -394,6 +509,7 @@ fun Application.module(
                     HealthResponse(
                         status = "error",
                         deepseek = "unknown",
+                        provider = LlmProvider.CLOUD.wire,
                         message = "Ключ DEEPSEEK_API_KEY не задан в переменных окружения"
                     )
                 )
@@ -407,13 +523,16 @@ fun Application.module(
                 }
 
                 if (response.status.isSuccess()) {
-                    call.respond(HealthResponse(status = "ok", deepseek = "online"))
+                    call.respond(
+                        HealthResponse(status = "ok", deepseek = "online", provider = LlmProvider.CLOUD.wire)
+                    )
                 } else {
                     call.respond(
                         HttpStatusCode.ServiceUnavailable,
                         HealthResponse(
                             status = "error",
                             deepseek = "auth_failed",
+                            provider = LlmProvider.CLOUD.wire,
                             code = response.status.value
                         )
                     )
@@ -421,7 +540,12 @@ fun Application.module(
             } catch (e: Exception) {
                 call.respond(
                     HttpStatusCode.ServiceUnavailable,
-                    HealthResponse(status = "error", deepseek = "offline", message = e.message)
+                    HealthResponse(
+                        status = "error",
+                        deepseek = "offline",
+                        provider = LlmProvider.CLOUD.wire,
+                        message = e.message
+                    )
                 )
             }
         }
@@ -586,36 +710,78 @@ fun Application.module(
          * Инварианты читаются тем же способом и по той же причине: правила проекта —
          * объявленное состояние сервера, поэтому клиент их не присылает, и клиентская
          * версия правил не может разойтись с той, по которой ассистент отвечает.
+         *
+         * Провайдер выбирает не запрос, а фабрика ([LlmClientFactory]): в локальном режиме
+         * запросы идут в Ollama, и та же фабрика называет модель отчёта — иначе лог и отчёт
+         * говорили бы об облачной модели, которой в этом режиме не было. Инструменты MCP
+         * локальному провайдеру не предлагаются: задание дня допускает базовое взаимодействие
+         * с локальной моделью, а маленькая модель, которой предложили десяток инструментов,
+         * тратит бюджет на выбор вызова вместо ответа, — и серверы инструментов ради такого
+         * ответа не поднимаются вовсе.
+         *
+         * Локальный режим ведёт диалог, а не работу над проектом, поэтому профиль разработчика
+         * и правила проекта в запрос к нему не уходят, а системным промтом становится первое
+         * сообщение диалога — без отдельной инструкции (настройки контекста у чата нет).
+         * Это измеренное решение: qwen3:1.7b принимает правила проекта за задание и на вопрос
+         * о самой большой планете отвечает «Марс» с таблицей инвариантов, а на арифметическую
+         * задачу — куском кода на Kotlin. Проверка правил, кроме того, — отдельный вызов модели
+         * на каждый запрос, то есть лишняя минута ожидания и лишние токены ради ответа, который
+         * забудется через два сообщения. В облачном режиме и профиль, и инварианты остаются
+         * как были: там их держит модель, которая на них не сбивается.
          */
         post("/v1/chat/completions") {
             val request = call.receive<ChatRequest>()
-            val apiKey = deepSeekApiKey()
-                ?: error("API ключ не настроен")
-
+            val local = llmClients.provider == LlmProvider.LOCAL
             val agent = LlmAgent(
-                DeepSeekClient(apiKey, client),
+                llmClients.create(deepSeekApiKey()),
                 summaryStore = summaryStore,
                 taskStateStore = taskStateStore,
                 workingMemory = workingMemory,
                 longTermMemory = longTermMemory,
-                invariantStore = invariantStore
+                // Пустое хранилище вместо файлового — не «отключение инвариантов», а выбор
+                // набора правил: у локального диалога правил проекта нет, поэтому и проверять
+                // нечего. Хранилище файловое остаётся тем же у облачного режима, и правила
+                // из него никуда не деваются.
+                invariantStore = if (local) InMemoryInvariantStore() else invariantStore
             )
-            val result = agent.run(
-                userMessage = request.message,
-                // Инструменты — из всех серверов сразу, одним набором: имена в нём несут признак
-                // сервера (`currency.get_currency_rates`, `github.get_repositories`), и по имени
-                // вызова оркестратор находит, кому его передать. Недоступный сервер просто ничего
-                // не добавляет, и ответ без его инструментов не отменяется.
-                options = request.toAgentOptions(profile = profileStore.profileOrDefault())
-                    .copy(tools = orchestratedTools(toolRegistry, orchestrator, toolServers()))
-            )
+            val options = request.toAgentOptions(profile = profileStore.profileOrDefault())
+                .let { base ->
+                    if (local) {
+                        base.copy(
+                            model = llmClients.modelOverride ?: base.model,
+                            tools = emptyList(),
+                            // Своей системной инструкции сервер не подставляет: инструкции —
+                            // это настройка контекста, а её у чата нет. Системным промтом
+                            // становится первое сообщение диалога — правило агента
+                            // ([com.osvin.aichallenge.agent.LlmAgent]): оно остаётся в силе
+                            // и здесь, и клиентская инструкция (`systemPrompt` запроса),
+                            // если человек её написал, по-прежнему важнее.
+                            // Профиль — не часть диалога, а правила ответа: локальному диалогу
+                            // достаётся пустой, потому что перечисленные в профиле предпочтения
+                            // описывают работу над этим проектом.
+                            profile = null
+                        )
+                    } else {
+                        // Инструменты — из всех серверов сразу, одним набором: имена в нём несут
+                        // признак сервера (`currency.get_currency_rates`, `github.get_repositories`),
+                        // и по имени вызова оркестратор находит, кому его передать. Недоступный
+                        // сервер просто ничего не добавляет, и ответ без его инструментов не отменяется.
+                        base.copy(tools = orchestratedTools(toolRegistry, orchestrator, toolServers()))
+                    }
+                }
+            val result = agent.run(userMessage = request.message, options = options)
 
             call.respond(
                 ChatResponse(
                     success = true,
                     reply = result.reply,
                     usage = result.usage,
-                    tokens = result.tokens
+                    tokens = result.tokens,
+                    // Модель называет сервер, а не клиент: в локальном режиме клиент прислал
+                    // имя облачной модели, которой не пользовался, и показывать её в интерфейсе
+                    // значило бы врать о том, кто ответил.
+                    model = options.model ?: AppConfig.DEFAULT_MODEL,
+                    provider = llmClients.provider.wire
                 )
             )
         }
