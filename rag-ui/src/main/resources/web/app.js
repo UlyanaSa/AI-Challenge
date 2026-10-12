@@ -1018,6 +1018,11 @@ function renderChat() {
 // попадания источников и схожесть повторов считает сервер (те же `Stages`, `Check` и та же фабрика
 // клиента, что у прогона) — второй набор формул в браузере разошёлся бы с отчётом.
 //
+// Сравнивают модели по **улучшенному RAG** — тому пути, который на странице и считается системой:
+// переписывание запроса, поиск, порог, второй этап и ответ по отобранному контексту. Два других
+// режима сравниваются между собой в разделе прогона; здесь они были бы шумом, потому что разница
+// между моделями на ступенях конвейера — не разница между моделями.
+//
 // Три вопроса задания — качество, скорость и стабильность — три разных разреза одних данных:
 // качество читается по оценкам, скорость по времени и токенам, а стабильность по повторам, и она
 // есть только там, где повторов больше одного. Поэтому страница говорит об этом словами, а не
@@ -1027,22 +1032,20 @@ function compareModel(id) {
     return (compare.models || []).find((model) => model.provider === id);
 }
 
-// Оценки одного вопроса у одной модели: три режима в одной ячейке — «без базы / базовый / улучшенный».
+// Оценка одного вопроса у одной модели: улучшенный RAG, 0–2. «!» — ответа не было.
 function compareScores(repeat, id) {
     const question = (repeat.questions || []).find((item) => item.id === id);
-    if (!question) return `<span class="question-meta">—</span>`;
-    const one = (answer) => {
-        if (!answer) return "—";
-        if (answer.state === "failed") return "!";
-        return String(answer.score);
-    };
-    return `<span class="scores">${one(question.without)} / ${one(question.baseline)} / ${one(question.improved)}</span>`;
+    const answer = question?.improved;
+    if (!answer) return `<span class="question-meta">—</span>`;
+    if (answer.state === "failed") return `<span class="scores scores-failed" title="${esc(answer.error || "отказ")}">!</span>`;
+    return `<span class="scores">${answer.score}</span>`;
 }
 
-// Попадание ожидаемого источника в контекст: у вопроса без ответа в базе считать нечего.
+// Попадание ожидаемого источника в контекст улучшенного режима: у вопроса без ответа в базе
+// считать нечего — там прочерк, а не «нет».
 function compareHit(repeat, id) {
     const question = (repeat.questions || []).find((item) => item.id === id);
-    const hit = question?.baseline?.hit ?? question?.improved?.hit ?? null;
+    const hit = question?.improved?.hit ?? null;
     if (question?.absent) return `<span class="question-meta">—</span>`;
     return hit === null
         ? `<span class="question-meta">—</span>`
@@ -1051,14 +1054,14 @@ function compareHit(repeat, id) {
           : `<span class="hit hit-no">✗</span>`;
 }
 
-// Ответы одной модели на один вопрос: три режима подряд, с оценкой, исходом и текстом.
+// Ответ одной модели на один вопрос улучшенным RAG: оценка, исход, текст и расход.
 function compareAnswers(model, id) {
     if (model.repeats.length === 0) return "";
     const repeat = model.repeats[0];
     const question = (repeat.questions || []).find((item) => item.id === id);
     if (!question) return `<p class="question-meta">Вопрос ещё не прогонялся этой моделью.</p>`;
-    const one = (answer, title) => {
-        if (!answer) return `<div class="answer"><h5>${esc(title)}</h5><p class="question-meta">не прогонялся</p></div>`;
+    const one = (answer) => {
+        if (!answer) return `<div class="answer"><h5>улучшенный RAG</h5><p class="question-meta">не прогонялся</p></div>`;
         const failed = answer.state === "failed";
         const head = failed
             ? `<span class="loss loss-bad">${esc(answer.error || "отказ")}</span>`
@@ -1071,89 +1074,73 @@ function compareAnswers(model, id) {
               `фрагментов ${answer.sources}` +
               (answer.retrievalMillis ? ` · поиск ${seconds(answer.retrievalMillis)}` : "") +
               `</p>`;
-        return `<div class="answer"><h5>${esc(title)} ${head}</h5>${text}${cost}</div>`;
+        return `<div class="answer"><h5>улучшенный RAG ${head}</h5>${text}${cost}</div>`;
     };
-    return (
-        one(question.without, "без базы") +
-        one(question.baseline, "базовый RAG") +
-        one(question.improved, "улучшенный RAG")
-    );
+    return one(question.improved);
 }
 
-// Качество модели: метрики дня 23 по её первому повтору. При нескольких повторах рядом стоит второй —
-// по нему видно, насколько числа качества сами по себе устойчивы.
+// Качество модели на улучшенном RAG по её первому повтору: средняя оценка, факты, попадание
+// источника, потери по этапам и цена фильтра. Числа приходят посчитанными (`Stages`) — страница
+// их только раскладывает. Разница между повторами видна в разделе стабильности, а не здесь.
 function compareQuality(model) {
     if (model.repeats.length === 0) {
         return `<p class="question-meta">Прогонов нет.</p>`;
     }
-    const first = model.repeats[0];
-    const last = model.repeats[model.repeats.length - 1];
-    const stages = first.quality || {};
+    const quality = model.repeats[0].quality || {};
     const cells = [
         metric(
-            "Средняя оценка повтора 1",
-            `${ru(stages.noBaseScore ?? 0, 2)} / ${ru(stages.baselineScore ?? 0, 2)} / ${ru(stages.improvedScore ?? 0, 2)}`,
-            "без базы / базовый / улучшенный, из 2"
+            "Средняя оценка",
+            `${ru(quality.score ?? 0, 2)} из 2`,
+            `вопросов с оценкой ${quality.scored ?? 0} из ${quality.questions ?? 0}`
         ),
         metric(
             "Факты в ответах",
-            `${stages.baselineFacts ?? 0} / ${stages.improvedFacts ?? 0}`,
-            `базовый / улучшенный, из ${stages.factsTotal ?? 0}`
+            `${quality.facts ?? 0} из ${quality.factsTotal ?? 0}`,
+            "сколько фактов набора назвал улучшенный режим"
         ),
         metric(
             "Source Hit Rate",
-            `${stages.baselineHits ?? 0} / ${stages.improvedHits ?? 0}`,
-            `базовый / улучшенный, из ${stages.scored ?? 0}`
-        ),
-        metric(
-            "Улучшенный против базового",
-            `+${stages.better ?? 0} / =${stages.same ?? 0} / −${stages.worse ?? 0}`,
-            "выше, столько же, ниже по оценке"
+            `${quality.hits ?? 0} из ${quality.scored ?? 0}`,
+            "в скольких вопросах нужный фрагмент попал в контекст"
         ),
         metric(
             "Потери по этапам",
-            `${stages.lostInRetrieval ?? 0} / ${stages.lostInFilter ?? 0} / ${stages.lostInRerank ?? 0}`,
+            `${quality.lostInRetrieval ?? 0} / ${quality.lostInFilter ?? 0} / ${quality.lostInRerank ?? 0}`,
             "не найден поиском / отсечён порогом / проиграл на втором этапе"
         ),
         metric(
             "Цена фильтра",
-            `${stages.removed ?? 0} отсеяно`,
-            `из них правильных ${stages.wronglyFiltered ?? 0}`
+            `${quality.removed ?? 0} отсеяно`,
+            `из них правильных ${quality.wronglyFiltered ?? 0}`
+        ),
+        metric(
+            "Пустой контекст",
+            `${quality.emptyContext ?? 0}`,
+            "вопросов, где в контекст не прошло ни одного фрагмента"
         ),
     ];
-    if (model.repeats.length > 1) {
-        const average = (repeat) =>
-            `${ru(repeat.quality.noBaseScore, 2)} / ${ru(repeat.quality.baselineScore, 2)} / ${ru(repeat.quality.improvedScore, 2)}`;
-        cells.push(
-            metric("Средняя оценка последнего повтора", average(last), `повтор ${last.number}`),
-            metric(
-                "Разница средних",
-                average(first) === average(last) ? "та же" : `${average(first)} → ${average(last)}`,
-                "первый повтор против последнего"
-            )
-        );
-    }
     return `<dl class="metrics">${cells.join("")}</dl>`;
 }
 
-// Скорость модели: время и токены по режимам. Токены разделены по режимам намеренно: без базы
-// не платит за поиск, а улучшенный платит за этапы, и одно общее число это скрыло бы.
+// Скорость модели на улучшенном RAG: время прогона, одного ответа, генерации и поиска плюс токены.
+// Числа не делятся по режимам: сравнивают один путь — улучшенный, — и токены двух других режимов
+// в этой сумме были бы расходом на то, чего в сравнении нет.
 function compareSpeed(model) {
     if (model.repeats.length === 0) return `<p class="question-meta">Прогонов нет.</p>`;
     const repeat = model.repeats[0];
     const speed = repeat.speed || {};
     const perAnswer = speed.answers ? speed.answerMillis / speed.answers : 0;
-    const mode = (title, used) =>
-        `${title}: ${tokens((used?.prompt || 0) + (used?.completion || 0))} ` +
-        `(${tokens(used?.prompt || 0)} запрос + ${tokens(used?.completion || 0)} ответ)`;
+    const used = speed.improved || {};
     return `<dl class="metrics">${[
-        metric("Время прогона", seconds(repeat.elapsedMs), `${speed.answers ?? 0} ответов, один повтор`),
+        metric("Время прогона", seconds(repeat.elapsedMs), `${speed.answers ?? 0} ответов улучшенного режима`),
         metric("Время ответа", seconds(perAnswer), "в среднем одно обращение к модели"),
-        metric("Генерация", seconds(speed.answerMillis ?? 0), "сумма обращений к модели по всем режимам"),
+        metric("Генерация", seconds(speed.answerMillis ?? 0), "сумма обращений к модели"),
         metric("Поиск", seconds(speed.retrievalMillis ?? 0), "сумма поиска; у обеих моделей он общий"),
-        metric("Токены", tokens((speed.without?.prompt || 0) + (speed.without?.completion || 0)), mode("без базы", speed.without)),
-        metric("Токены", tokens((speed.baseline?.prompt || 0) + (speed.baseline?.completion || 0)), mode("базовый", speed.baseline)),
-        metric("Токены", tokens((speed.improved?.prompt || 0) + (speed.improved?.completion || 0)), mode("улучшенный", speed.improved)),
+        metric(
+            "Токены",
+            tokens((used.prompt || 0) + (used.completion || 0)),
+            `${tokens(used.prompt || 0)} запрос + ${tokens(used.completion || 0)} ответ`
+        ),
     ].join("")}</dl>`;
 }
 
@@ -1180,7 +1167,7 @@ function compareStability(model) {
         .map((pair) =>
             fold(
                 `compare-${model.provider}-${pair.id}-${pair.mode}`,
-                `${pair.id} · ${pair.title} · схожесть ${ru(pair.similarity, 2)} · оценка ${pair.scoreBefore} → ${pair.scoreAfter}`,
+                `${pair.id} · схожесть ${ru(pair.similarity, 2)} · оценка ${pair.scoreBefore} → ${pair.scoreAfter}`,
                 `<div class="answers"><div class="answer"><h5>повтор раньше</h5><p class="answer-text">${esc(pair.before)}</p></div>` +
                     `<div class="answer"><h5>повтор позже</h5><p class="answer-text">${esc(pair.after)}</p></div></div>`
             )
@@ -1270,23 +1257,24 @@ function renderCompare() {
             })
             .join("");
     body.innerHTML = `
-        <h3>Качество: оценки и источники</h3>
+        <h3>Качество улучшенного RAG: оценки и источники</h3>
         <p class="hint">
             Оценка 0–2 у всех одна: 0 — ответа нет или он неверен, 1 — часть фактов, 2 — все.
-            «Источник» — попал ли ожидаемый текст в контекст. Числа первой строки каждой модели —
-            её первый повтор; расхождения повторов смотрите в разделе стабильности.
+            «Источник» — попал ли ожидаемый текст в контекст улучшенного режима. Числа колонок —
+            первый повтор модели; расхождения повторов смотрите в разделе стабильности. Ответы двух
+            других режимов — в разделе прогона выше и в отчётах сравнения под таблицами.
         </p>
         <div class="compare-grid">${perQuestion("Качество", compareQuality)}</div>
         <table class="questions">
             <thead><tr><th>#</th><th>Вопрос</th>${heads}</tr></thead>
             <tbody>${rows}</tbody>
         </table>
-        <h3>Скорость: время и токены</h3>
+        <h3>Скорость улучшенного RAG: время и токены</h3>
         <div class="compare-grid">${perQuestion("Скорость", compareSpeed)}</div>
-        <h3>Стабильность: повтор против повтора</h3>
+        <h3>Стабильность улучшенного RAG: повтор против повтора</h3>
         <div class="compare-grid">${perQuestion("Стабильность", compareStability)}</div>
         <h3>Ответы целиком</h3>
-        <p class="hint">По вопросу — ответы каждой модели во всех трёх режимах, как они есть.</p>
+        <p class="hint">По вопросу — ответ улучшенного RAG каждой модели, как он есть.</p>
         ${compare.questions
             .map((id) => {
                 const question = setup.questions.find((item) => item.id === id);

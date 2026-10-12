@@ -355,40 +355,33 @@ class CompareSession(
         else -> Run(control, answer, check)
     }
 
-    /** Ответы вопроса в трёх режимах — так, как их читает страница. */
+    /** Ответ вопроса улучшенным RAG — то, что читает страница сравнения. */
     private fun questionDto(control: ControlQuestion, modes: Modes): CompareQuestionDto = CompareQuestionDto(
         id = control.id,
         question = control.question,
         absent = control.absent,
-        without = modes.without?.toCompare("without"),
-        baseline = modes.baseline?.toCompare("baseline"),
-        improved = modes.improved?.toCompare("improved")
+        improved = modes.improved?.toCompare()
     )
 
     /**
-     * Один режим одного ответа: оценка, исход, расход и время.
+     * Ответ улучшенного RAG: оценка, исход, расход и время.
      *
      * Отдельно от [ModeDto] намеренно: страница сравнения показывает не путь запроса, а вердикт,
      * и тащить в неё контекст, фрагменты и сообщения запроса значило бы гонять по сети десятки
      * копий одного текста ради двух чисел. Путь запроса остаётся у прогона — он там нужен целиком.
      */
-    private fun ModeResult.toCompare(kind: String): CompareAnswerDto {
+    private fun ModeResult.toCompare(): CompareAnswerDto {
         val answer = answer
         val check = check
         return CompareAnswerDto(
-            mode = kind,
             state = if (failed) ModeDto.FAILED else ModeDto.DONE,
             error = error,
             text = answer?.text.orEmpty(),
             score = check?.score ?: 0,
             matched = check?.matched ?: 0,
             total = check?.total ?: control.facts.size,
-            outcome = if (check == null || mode == Mode.WITHOUT_RAG) "" else Check.outcome(control, check).title,
-            hit = if (control.absent || check == null || mode == Mode.WITHOUT_RAG) {
-                null
-            } else {
-                check.retrievedFacts.any { it }
-            },
+            outcome = if (check == null) "" else Check.outcome(control, check).title,
+            hit = if (control.absent || check == null) null else check.retrievedFacts.any { it },
             promptTokens = answer?.promptTokens,
             completionTokens = answer?.completionTokens,
             retrievalMillis = answer?.retrieval?.millis ?: 0L,
@@ -402,25 +395,45 @@ class CompareSession(
         CompareRepeatDto(
             number = number,
             elapsedMs = elapsedMs,
-            quality = (quality ?: Stages.summary(trials)).toDto(),
+            quality = (quality ?: Stages.summary(trials)).toCompareQuality(),
             speed = speedOf(),
             questions = questionDtos.values.toList()
         )
     }
 
     /**
-     * Скорость прогона: токены и время по режимам.
+     * Качество улучшенного RAG в узком виде: те же числа [StagesDto], но те, по которым сравнивают.
+     *
+     * Отбор одного режима, а не второй расчёт: средние, попадания и потери улучшенного режима
+     * `Stages` уже посчитала по тем же вопросам, и брать их оттуда — единственный способ не завести
+     * вторую формулу рядом с первой.
+     */
+    private fun StageSummary.toCompareQuality(): CompareQualityDto = CompareQualityDto(
+        questions = questions,
+        scored = scored,
+        score = improvedScore,
+        facts = improvedFacts,
+        factsTotal = factsTotal,
+        hits = improvedHits,
+        removed = removed,
+        wronglyFiltered = wronglyFiltered,
+        emptyContext = emptyContext,
+        lostInRetrieval = lostInRetrieval,
+        lostInFilter = lostInFilter,
+        lostInRerank = lostInRerank
+    )
+
+    /**
+     * Скорость прогона на улучшенном RAG: токены, генерация и поиск по его ответам.
      *
      * Считается по ответам, а не по метрикам дня 22: у того отчёта такие числа есть только для двух
-     * режимов — «без базы» и «с базой», — а сравнению нужны три. Формула при этом одна и та же
+     * режимов — «без базы» и «с базой», — а сравнивают улучшенный. Формула при этом одна и та же
      * (сумма по ответам), и она здесь единственная.
      */
     private fun ModelRun.speedOf(): CompareSpeedDto = synchronized(lock) {
-        val answers = modes.values.flatMap { listOfNotNull(it.without?.answer, it.baseline?.answer, it.improved?.answer) }
+        val answers = modes.values.mapNotNull { it.improved?.answer }
         CompareSpeedDto(
-            without = tokens(modes.values.mapNotNull { it.without?.answer }),
-            baseline = tokens(modes.values.mapNotNull { it.baseline?.answer }),
-            improved = tokens(modes.values.mapNotNull { it.improved?.answer }),
+            improved = tokens(answers),
             answers = answers.size,
             answerMillis = answers.sumOf { it.elapsedMillis },
             retrievalMillis = answers.sumOf { it.retrieval?.millis ?: 0L }
@@ -440,7 +453,7 @@ class CompareSession(
     )
 
     /**
-     * Стабильность модели: повтор против повтора по каждому вопросу и режиму.
+     * Стабильность модели: повтор против повтора по каждому вопросу улучшенного RAG.
      *
      * Сравниваются соседние повторы, а не первый с последним: при двух повторах это одно и то же,
      * а при большем их числе рядом стоящие пары показывают, на каком повторе модель поехала.
@@ -459,9 +472,12 @@ class CompareSession(
             val before = list[index - 1]
             val after = list[index]
             for (id in before.questionDtos.keys) {
-                for (kind in MODES) {
-                    val first = before.answerOf(id, kind) ?: continue
-                    val second = after.answerOf(id, kind) ?: continue
+                // Один режим — улучшенный: сравнение идёт по нему, и стабильность считается по тому же
+                // пути, которым модели сравнивают. Стабильность двух других режимов описывала бы
+                // ступени конвейера, а не систему.
+                run {
+                    val first = before.improvedOf(id) ?: return@run
+                    val second = after.improvedOf(id) ?: return@run
                     compared++
                     val same = first.text == second.text
                     val similarity = if (same) 1.0 else textSimilarity(first.text, second.text)
@@ -474,8 +490,6 @@ class CompareSession(
                     if (!same) {
                         pairs += ComparePairDto(
                             id = id,
-                            mode = kind,
-                            title = MODE_TITLES.getValue(kind),
                             identical = false,
                             similarity = similarity,
                             scoreBefore = first.score,
@@ -506,24 +520,17 @@ class CompareSession(
         synchronized(lock) { if (token == runId) stability[provider] = dto }
     }
 
-    /** Средняя оценка ответов одного повтора: по ней видно, разъехались прогоны или нет. */
+    /** Средняя оценка улучшенного режима в одном повторе: по ней видно, разъехались прогоны или нет. */
     private fun averageScore(list: List<ModelRun>, number: Int): Double {
         val answers = synchronized(lock) {
-            list[number].questionDtos.values.flatMap { question ->
-                listOfNotNull(question.without, question.baseline, question.improved).filter { it.state == ModeDto.DONE }
-            }
+            list[number].questionDtos.values.mapNotNull { it.improved }.filter { it.state == ModeDto.DONE }
         }
         return if (answers.isEmpty()) 0.0 else answers.sumOf { it.score }.toDouble() / answers.size
     }
 
     /** Ответ одного вопроса в одном режиме: по нему сравниваются повторы. */
-    private fun ModelRun.answerOf(id: String, kind: String): CompareAnswerDto? = synchronized(lock) {
-        val question = questionDtos[id] ?: return null
-        when (kind) {
-            "without" -> question.without
-            "baseline" -> question.baseline
-            else -> question.improved
-        }
+    private fun ModelRun.improvedOf(id: String): CompareAnswerDto? = synchronized(lock) {
+        questionDtos[id]?.improved
     }
 
     /**
@@ -642,13 +649,7 @@ class CompareSession(
 
         private const val STOP_TIMEOUT_MS = 5_000L
 
-        private val MODES = listOf("without", "baseline", "improved")
 
-        private val MODE_TITLES = mapOf(
-            "without" to "без базы",
-            "baseline" to "базовый RAG",
-            "improved" to "улучшенный RAG"
-        )
 
         private fun repeatsMessage(repeats: Int): String =
             "Число повторов «$repeats» не подходит: нужно от 1 до $MAX_REPEATS"

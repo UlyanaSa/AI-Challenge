@@ -174,36 +174,35 @@ class CompareSessionTest {
             assertEquals(2, model.repeats.size, "у каждой модели по два повтора")
             val first = model.repeats.first()
             val second = model.repeats.last()
-            // Качество: первый повтор ответил верно во всех трёх режимах, второй — ни в одном.
-            assertEquals(2.0, first.quality.noBaseScore)
-            assertEquals(2.0, first.quality.baselineScore)
-            assertEquals(2.0, first.quality.improvedScore)
-            assertEquals(0.0, second.quality.improvedScore)
-            // Скорость: три ответа на вопрос и токены, которые сообщил подставной API.
-            assertEquals(3, first.speed.answers)
-            assertEquals(10, first.speed.baseline.prompt, "один вопрос — 10 токенов запроса")
+            // Качество: первый повтор ответил верно улучшенным режимом, второй — нет.
+            assertEquals(2.0, first.quality.score)
+            assertEquals(2, first.quality.facts, "названы оба факта вопроса")
+            assertEquals(2, first.quality.factsTotal)
+            assertEquals(1, first.quality.questions)
+            assertEquals(0.0, second.quality.score)
+            // Скорость: одно обращение улучшенного режима и токены, которые сообщил подставной API.
+            assertEquals(1, first.speed.answers, "считается только улучшенный режим")
+            assertEquals(10, first.speed.improved.prompt, "один вопрос — 10 токенов запроса")
             assertEquals(20, first.speed.improved.completion, "ответ улучшенного режима — 20 токенов")
-            assertEquals(1, first.speed.baseline.reported, "расход назвала модель")
+            assertEquals(1, first.speed.improved.reported, "расход назвала модель")
             assertTrue(first.speed.answerMillis >= 0)
-            // Ответы целиком: у каждого вопроса по три режима со своими оценками.
+            // Ответы целиком: сравнение показывает улучшенный RAG, и только его.
             val question = first.questions.first { it.id == "q01" }
-            assertEquals(2, question.without?.score)
-            assertEquals(2, question.baseline?.score)
             assertEquals(2, question.improved?.score)
             assertEquals(answerWithFacts, question.improved?.text)
 
-            // Стабильность: все три ответа разошлись по тексту и все три — по оценке.
+            // Стабильность: сравнение идёт по улучшенному режиму — один вопрос, один ответ.
             val stability = assertNotNull(model.stability)
-            assertEquals(3, stability.compared, "один вопрос × три режима")
+            assertEquals(1, stability.compared, "один вопрос улучшенного режима")
             assertEquals(0, stability.identical)
-            assertEquals(3, stability.changed)
-            assertEquals(3, stability.scoreChanged)
+            assertEquals(1, stability.changed)
+            assertEquals(1, stability.scoreChanged)
             assertEquals(0, stability.scoreUp)
-            assertEquals(3, stability.scoreDown, "второй повтор ответил хуже")
+            assertEquals(1, stability.scoreDown, "второй повтор ответил хуже")
             assertEquals(2.0, stability.averageScoreFirst)
             assertEquals(0.0, stability.averageScoreLast)
             assertTrue(stability.averageSimilarity < 1.0, "тексты разные")
-            assertEquals(3, stability.pairs.size, "каждое расхождение названо с обоими текстами")
+            assertEquals(1, stability.pairs.size, "расхождение названо с обоими текстами")
             assertTrue(stability.pairs.all { it.before == answerWithFacts && it.after == answerWithoutFacts })
         }
 
@@ -276,7 +275,7 @@ class CompareSessionTest {
         val failure = assertNotNull(failed.failure)
         assertTrue(failure.contains("демон Ollama не отвечает"), "причина отказа названа: $failure")
         // Ответы всё равно показаны, каждый со своей причиной: страница рисует отказ там, где он был.
-        val answer = failed.repeats.single().questions.single().baseline
+        val answer = failed.repeats.single().questions.single().improved
         assertEquals(ModeDto.FAILED, answer?.state)
         assertTrue(answer?.error?.contains("демон Ollama не отвечает") == true, "причина отказа в самом ответе")
         assertNull(state.models.first { it.provider == "cloud" }.failure, "вторая модель ответила")
