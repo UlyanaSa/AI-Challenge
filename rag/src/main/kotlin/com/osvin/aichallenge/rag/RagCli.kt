@@ -2,6 +2,7 @@ package com.osvin.aichallenge.rag
 
 import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.agent.LlmClient
+import com.osvin.aichallenge.agent.LlmProvider
 import com.osvin.aichallenge.indexing.model.ChunkingStrategyType
 import com.osvin.aichallenge.indexing.ollama.EmbeddingProviders
 import com.osvin.aichallenge.indexing.pipeline.Tokens
@@ -23,6 +24,11 @@ import kotlin.system.exitProcess
  * Живой режим включается флагом, а не наличием ключа: прогон стоит денег и идёт минутами, поэтому
  * запуск без флага обязан закончиться подсказкой, а не двадцатью запросами. Ключ берётся оттуда
  * же, откуда его берёт сервер ([Api.key]), и нигде не печатается.
+ *
+ * Провайдер генерации выбирает конфигурация: `LLM_PROVIDER=local` отвечает локальной моделью
+ * Ollama, и тогда ключ облака не нужен вовсе — ни для запуска, ни для отчёта. Флаг живого
+ * режима остаётся обязательным и здесь: облачного счёта локальный прогон не тратит, но идёт
+ * десятки запросов к модели, и случайный запуск без флага так же нежелателен.
  */
 fun main(args: Array<String>) {
     val options = try {
@@ -39,15 +45,33 @@ fun main(args: Array<String>) {
         return
     }
 
+    // Локальному провайдеру ключ не нужен: он не обращается к облаку вовсе, и требовать
+    // ключ значило бы запрещать прогон, который ничего не тратит
+    val local = Api.provider() == LlmProvider.LOCAL
     val apiKey = Api.key()
-    if (apiKey == null) {
+    if (!local && apiKey.isNullOrBlank()) {
         println("Ключ DEEPSEEK_API_KEY не задан: положите его в server/.env или задайте переменной окружения.")
         println(USAGE)
         return
     }
+    // Дальше ключ передаётся строкой: пустая строка локальному провайдеру безразлична —
+    // он её не читает, а облачному сюда не дойти с пустой (проверено выше)
+    val generationKey = apiKey.orEmpty()
+
+    // Провайдер и модель называются до прогона: отчёт и подсказки читают после него,
+    // и по одному отчёту нельзя понять, чьими ответами он получен
+    println(
+        if (local) {
+            "Генерация: локальная модель ${Api.modelName(options.model)} (демон Ollama)"
+        } else {
+            "Генерация: облачная модель ${Api.modelName(options.model)}"
+        }
+    )
 
     try {
-        runBlocking { if (options.grounded) runGrounding(options, apiKey) else run(options, apiKey) }
+        runBlocking {
+            if (options.grounded) runGrounding(options, generationKey) else run(options, generationKey)
+        }
     } catch (cause: PdfLoadException) {
         println("База дня не разобралась: ${cause.message}")
         exitProcess(1)
@@ -110,7 +134,9 @@ private suspend fun run(options: Options, apiKey: String) {
     )
 
     val llm = Api.model(apiKey)
-    val model = options.model
+    // Имя модели задаёт провайдер: в локальном режиме это имя модели Ollama из настроек,
+    // а не запрошенное запуском — иначе промпт и отчёт говорили бы о модели, которой не было
+    val model = Api.modelName(options.model)
     val rewriter = options.rewriterOf(llm, model)
     val reranker = options.rerankerOf(llm, model)
 
@@ -227,7 +253,9 @@ private suspend fun runGrounding(options: Options, apiKey: String) {
     )
 
     val llm = Api.model(apiKey)
-    val model = options.model
+    // Имя модели задаёт провайдер: в локальном режиме это имя модели Ollama из настроек,
+    // а не запрошенное запуском — иначе промпт и отчёт говорили бы о модели, которой не было
+    val model = Api.modelName(options.model)
     val rewriter = options.rewriterOf(llm, model)
     val reranker = options.rerankerOf(llm, model)
     val pipeline = RagPipeline(

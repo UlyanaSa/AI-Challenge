@@ -1,7 +1,7 @@
 package com.osvin.aichallenge.rag.ui
 
-import com.osvin.aichallenge.agent.LlmApiException
 import com.osvin.aichallenge.agent.LlmClient
+import com.osvin.aichallenge.agent.LlmProvider
 import com.osvin.aichallenge.indexing.model.ChunkingStrategyType
 import com.osvin.aichallenge.indexing.ollama.Embedding
 import com.osvin.aichallenge.rag.Api
@@ -26,7 +26,6 @@ import com.osvin.aichallenge.rag.Report
 import com.osvin.aichallenge.rag.Reranker
 import com.osvin.aichallenge.rag.Run
 import com.osvin.aichallenge.rag.RunHeader
-import com.osvin.aichallenge.rag.SimilarityFilter
 import com.osvin.aichallenge.rag.StageConfig
 import com.osvin.aichallenge.rag.StageReport
 import com.osvin.aichallenge.rag.Stages
@@ -196,6 +195,14 @@ class RagSession(
     /** Ключ модели: `null` — ключа нет, и прогон вопросов не запускается. */
     private val apiKey: String?,
     /**
+     * Провайдер генерации: облачный ключ нужен только облачному ([Api.provider]).
+     *
+     * Параметром, а не чтением окружения внутри: страница запускается с одним провайдером
+     * на весь свой срок, и подстановка клиента в тесте ([llm]) должна быть согласована с ним,
+     * а не с переменными машины, где идёт тест.
+     */
+    private val provider: LlmProvider = LlmProvider.CLOUD,
+    /**
      * Как построить клиента модели.
      *
      * Фабрикой, а не готовым клиентом, потому что страница строит его один раз на прогон,
@@ -230,6 +237,15 @@ class RagSession(
     )
 
     private val lock = Any()
+
+    /**
+     * Не хватает ли ключа для выбранного провайдера.
+     *
+     * Локальному провайдеру ключ не нужен вовсе: он отвечает демоном Ollama на этой машине
+     * (`LLM_PROVIDER=local`), и страница не должна отказываться запускать прогон только
+     * потому, что облачного ключа на машине нет.
+     */
+    private val keyMissing: Boolean = provider == LlmProvider.CLOUD && apiKey.isNullOrBlank()
 
     /**
      * База дня: читается при запуске страницы, а не при первом вопросе.
@@ -383,7 +399,7 @@ class RagSession(
             rerank = RunSettings.DEFAULT.rerank,
             keyNote = when {
                 current == null -> Corpus.MISSING_MESSAGE
-                apiKey == null -> NO_KEY_MESSAGE
+                keyMissing -> NO_KEY_MESSAGE
                 else -> null
             },
             questions = Controls.questions.map { control ->
@@ -481,11 +497,13 @@ class RagSession(
             build(token, current)
         } catch (cause: CancellationException) {
             throw cause
-        } catch (cause: Exception) {
+        } catch (cause: Throwable) {
+            // `Error` сообщается так же, как `Exception`: индекс остаётся несобранным, и причина
+            // должна быть названа, а не уйти в никуда вместе с упавшей корутиной.
             synchronized(lock) {
                 if (token == runId) {
                     indexState = IndexDto.IDLE
-                    error = "Индекс не собрался: ${message(cause)}"
+                    error = "Индекс не собрался: ${failureMessage(cause)}"
                 }
             }
         } finally {
@@ -513,7 +531,7 @@ class RagSession(
      */
     suspend fun start(ids: List<String>, settings: RunSettings): StartOutcome {
         val current = base ?: return StartOutcome.Rejected(Corpus.MISSING_MESSAGE)
-        if (apiKey == null) return StartOutcome.Rejected(NO_KEY_MESSAGE)
+        if (keyMissing) return StartOutcome.Rejected(NO_KEY_MESSAGE)
         if (ids.isEmpty()) return StartOutcome.Rejected(NO_QUESTIONS_MESSAGE)
         settings.validate()?.let { return StartOutcome.Rejected(it) }
         val unknown = ids.filter { Controls.byId(it) == null }
@@ -640,7 +658,7 @@ class RagSession(
         } catch (cause: Exception) {
             // Сбой хода не отменяет разговор: причина уходит в состояние, а лента и память остаются
             // такими, какими были до него, — человек может повторить реплику.
-            synchronized(lock) { chatError = "Реплика не выполнена: ${message(cause)}" }
+            synchronized(lock) { chatError = "Реплика не выполнена: ${failureMessage(cause)}" }
         } finally {
             synchronized(lock) {
                 chatBusy = false
@@ -707,7 +725,7 @@ class RagSession(
         return try {
             // Клиент общий на разговор, а поиск берётся у того же индекса, что у прогонов:
             // второй поиск по другому файлу дал бы другие источники при тех же настройках.
-            val client = chatLlm ?: llm(requireNotNull(apiKey)).also { chatLlm = it }
+            val client = chatLlm ?: llm(apiKey.orEmpty()).also { chatLlm = it }
             ChatSession(
                 llm = client,
                 model = model,
@@ -717,7 +735,7 @@ class RagSession(
         } catch (cause: Exception) {
             // Индекс есть, но не читается (обрывок сборки, чужой файл): причина остаётся, пока
             // её не исправят, — иначе каждый опрос пытался бы открыть тот же битый файл.
-            chatFailure = "Чат не собрался по индексу: ${message(cause)}"
+            chatFailure = "Чат не собрался по индексу: ${failureMessage(cause)}"
             null
         }
     }
@@ -730,7 +748,7 @@ class RagSession(
      * словами, а не кодом: ключ и индекс лечатся по-разному, и подсказка должна говорить, чем.
      */
     private fun chatReasonLocked(): String? = when {
-        apiKey == null -> NO_KEY_MESSAGE
+        keyMissing -> NO_KEY_MESSAGE
         chatFailure != null -> chatFailure
         chat != null -> null
         indexState == IndexDto.BUILDING -> CHAT_BUILDING_MESSAGE
@@ -782,7 +800,7 @@ class RagSession(
         } catch (cause: CancellationException) {
             throw cause
         } catch (cause: Exception) {
-            synchronized(lock) { chatError = "Сценарий не доигран: ${message(cause)}" }
+            synchronized(lock) { chatError = "Сценарий не доигран: ${failureMessage(cause)}" }
         } finally {
             synchronized(lock) {
                 chatBusy = false
@@ -872,32 +890,15 @@ class RagSession(
         val started = System.nanoTime()
         try {
             val prepared = prepareIndex(token, current)
-            val llm = llm(requireNotNull(apiKey))
-            val rewriter = settings.rewriterOf(llm, model)
-            val reranker = settings.rerankerOf(llm, model)
+            // Клиента строит фабрика сессии: локальному провайдеру ключ не нужен, и пустая
+            // строка на его месте ничего не ломает (`.orEmpty()`)
+            val client = llm(apiKey.orEmpty())
+            // Агенты трёх режимов собирает [QuestionRunner] — то же место, которым пользуется
+            // сравнение моделей: порядок этапов здесь и есть условие сравнения, и вторая сборка
+            // разошлась бы с первой при первой правке конвейера.
+            val runner = QuestionRunner(client, model, settings, prepared)
             // Имена реализаций попадают в отчёт: по ним видно, какой именно этап работал в этом прогоне.
-            synchronized(lock) {
-                stageConfig = StageConfig(
-                    baselineTopK = settings.baselineTopK,
-                    retrievalTopK = settings.retrievalTopK,
-                    finalTopK = settings.finalTopK,
-                    threshold = settings.threshold,
-                    rewrite = rewriter?.name,
-                    rerank = reranker?.name
-                )
-            }
-            val baseAgent = RagAgent(llm, prepared.retriever(settings.baselineTopK), model)
-            val pipeline = RagPipeline(
-                finder = prepared.retriever(settings.retrievalTopK),
-                rewriter = rewriter,
-                filter = SimilarityFilter(settings.threshold),
-                reranker = reranker,
-                finalTopK = settings.finalTopK
-            )
-            val improvedAgent = RagAgent(llm, pipeline, model)
-            // Порог достаточности — тот же, что у фильтра (§8): второе число для «хватает ли
-            // контекста» разошлось бы с первым, и объяснить отказ разными порогами было бы нечем.
-            val groundedAgent = GroundedAgent(llm, model, settings.threshold)
+            synchronized(lock) { stageConfig = runner.config }
             for (id in ids) {
                 // Проверка на каждой итерации, а не только у записей: вытеснённый прогон должен
                 // перестать спрашивать модель, а не просто перестать показывать ответы.
@@ -907,11 +908,11 @@ class RagSession(
                     stage = id
                     stageTitle = control.question
                 }
-                val without = ask(baseAgent, control, Mode.WITHOUT_RAG)
+                val without = runner.without(control)
                 record(token, id, without = without)
-                val baseline = ask(baseAgent, control, Mode.WITH_RAG)
+                val baseline = runner.baseline(control)
                 record(token, id, baseline = baseline)
-                val day24 = askDay24(id, control, improvedAgent, groundedAgent, pipeline, settings.threshold)
+                val day24 = askDay24(id, control, runner, settings.threshold)
                 val pair = record(token, id, improved = day24.improved, grounded = day24.grounded)
                 val trial = day24.trial
                 val passed = pair.without?.failed == false &&
@@ -942,11 +943,14 @@ class RagSession(
             // Отмена — не отказ прогона: состояние уже переведено тем, кто отменил работу
             // (остановка — в [stop], вытеснение — в [start]).
             throw cause
-        } catch (cause: Exception) {
+        } catch (cause: Throwable) {
+            // И `Error` тоже: ниже `finally` объявляет прогон законченным, и прошедшая мимо `Error`
+            // (например `NoClassDefFoundError`, когда сборка перезаписала классы под работающей
+            // страницей) обернулась бы прогоном без единого ответа вместо причины отказа.
             synchronized(lock) {
                 if (token == runId) {
                     state = StateDto.FAILED
-                    error = message(cause)
+                    error = failureMessage(cause)
                 }
             }
         } finally {
@@ -964,25 +968,6 @@ class RagSession(
                 }
             }
         }
-    }
-
-    /** Один вопрос в одном режиме: ответ модели и его сверка с ожиданием. */
-    private suspend fun ask(agent: RagAgent, control: ControlQuestion, mode: Mode): ModeResult = try {
-        val answer = agent.ask(control.question, mode)
-        ModeResult(
-            control = control,
-            mode = mode,
-            answer = answer,
-            check = Check.evaluate(control, answer.text, answer.sources),
-            error = null
-        )
-    } catch (cause: Exception) {
-        // Отмену пробрасываем: отказ режима — это отказ модели или поиска, а отмена приходит снаружи,
-        // и, проглотив её здесь, страница продолжала бы прогон после нажатия «Остановить».
-        if (cause is CancellationException) throw cause
-        // Отказ режима — не отказ прогона: второй режим всё ещё может ответить, и страница
-        // показывает ошибку в том столбце, где она случилась.
-        ModeResult(control, mode, answer = null, check = null, error = message(cause))
     }
 
     /** Прогон режима в том виде, в каком его принимает [Trial]: без ответа и сверки Trial не собрать. */
@@ -1008,43 +993,30 @@ class RagSession(
     private suspend fun askDay24(
         id: String,
         control: ControlQuestion,
-        agent: RagAgent,
-        groundedAgent: GroundedAgent,
-        pipeline: RagPipeline,
+        runner: QuestionRunner,
         threshold: Double
     ): Day24 {
         val found = try {
-            pipeline.find(control.question)
+            runner.find(control.question)
         } catch (cause: Exception) {
-            // Отмена — не отказ поиска (см. [ask]): её пробрасываем, чтобы прогон действительно встал.
+            // Отмена — не отказ поиска ([QuestionRunner] её пробрасывает): её пробрасываем и здесь,
+            // чтобы прогон действительно встал.
             if (cause is CancellationException) throw cause
-            val error = "Поиск не выполнился: ${message(cause)}"
+            val error = "Поиск не выполнился: ${failureMessage(cause)}"
             return Day24(
                 improved = ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = error),
                 grounded = failedGrounded(id, control, threshold, error),
                 trial = null
             )
         }
-        val improved = try {
-            val answer = agent.askWith(control.question, Mode.WITH_RAG, found)
-            ModeResult(
-                control = control,
-                mode = Mode.WITH_RAG,
-                answer = answer,
-                check = Check.evaluate(control, answer.text, answer.sources),
-                error = null
-            )
-        } catch (cause: Exception) {
-            if (cause is CancellationException) throw cause
-            ModeResult(control, Mode.WITH_RAG, answer = null, check = null, error = message(cause))
-        }
+        val improved = runner.improved(control, found)
         val groundedAnswer = try {
-            groundedAgent.answer(control.question, found)
+            runner.groundedAgent.answer(control.question, found)
         } catch (cause: Exception) {
             if (cause is CancellationException) throw cause
             return Day24(
                 improved = improved,
-                grounded = failedGrounded(id, control, threshold, "Grounded-ответ не получен: ${message(cause)}"),
+                grounded = failedGrounded(id, control, threshold, "Grounded-ответ не получен: ${failureMessage(cause)}"),
                 trial = null
             )
         }
@@ -1288,12 +1260,6 @@ class RagSession(
         total = indexTotal,
         state = indexState
     )
-
-    /** Сообщение об отказе: у отказа API ценен его ответ, у остальных — тип и текст. */
-    private fun message(cause: Throwable): String = when (cause) {
-        is LlmApiException -> "Модель отказала: статус ${cause.status}, ${cause.message}"
-        else -> cause.message ?: cause::class.simpleName ?: "неизвестная ошибка"
-    }
 
     companion object {
 

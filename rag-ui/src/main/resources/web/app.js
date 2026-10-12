@@ -17,6 +17,7 @@
 let setup = null;
 let state = null;
 let chat = null;
+let compare = null;
 let selected = null;
 let signature = "";
 
@@ -1009,8 +1010,347 @@ function renderChat() {
     document.getElementById("chat-text").disabled = blocked;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Сравнение моделей (день 28): локальная против облачной на одном наборе вопросов.
+//
+// Данных у сравнения один источник — `compare`, и он приходит целиком: обе модели, все их повторы,
+// ответы, метрики и расхождения. Считать на странице нечего: оценки ответов, средние по режимам,
+// попадания источников и схожесть повторов считает сервер (те же `Stages`, `Check` и та же фабрика
+// клиента, что у прогона) — второй набор формул в браузере разошёлся бы с отчётом.
+//
+// Три вопроса задания — качество, скорость и стабильность — три разных разреза одних данных:
+// качество читается по оценкам, скорость по времени и токенам, а стабильность по повторам, и она
+// есть только там, где повторов больше одного. Поэтому страница говорит об этом словами, а не
+// показывает пустую таблицу, которую можно принять за «модель нестабильна».
+
+function compareModel(id) {
+    return (compare.models || []).find((model) => model.provider === id);
+}
+
+// Оценки одного вопроса у одной модели: три режима в одной ячейке — «без базы / базовый / улучшенный».
+function compareScores(repeat, id) {
+    const question = (repeat.questions || []).find((item) => item.id === id);
+    if (!question) return `<span class="question-meta">—</span>`;
+    const one = (answer) => {
+        if (!answer) return "—";
+        if (answer.state === "failed") return "!";
+        return String(answer.score);
+    };
+    return `<span class="scores">${one(question.without)} / ${one(question.baseline)} / ${one(question.improved)}</span>`;
+}
+
+// Попадание ожидаемого источника в контекст: у вопроса без ответа в базе считать нечего.
+function compareHit(repeat, id) {
+    const question = (repeat.questions || []).find((item) => item.id === id);
+    const hit = question?.baseline?.hit ?? question?.improved?.hit ?? null;
+    if (question?.absent) return `<span class="question-meta">—</span>`;
+    return hit === null
+        ? `<span class="question-meta">—</span>`
+        : hit
+          ? `<span class="hit hit-yes">✓</span>`
+          : `<span class="hit hit-no">✗</span>`;
+}
+
+// Ответы одной модели на один вопрос: три режима подряд, с оценкой, исходом и текстом.
+function compareAnswers(model, id) {
+    if (model.repeats.length === 0) return "";
+    const repeat = model.repeats[0];
+    const question = (repeat.questions || []).find((item) => item.id === id);
+    if (!question) return `<p class="question-meta">Вопрос ещё не прогонялся этой моделью.</p>`;
+    const one = (answer, title) => {
+        if (!answer) return `<div class="answer"><h5>${esc(title)}</h5><p class="question-meta">не прогонялся</p></div>`;
+        const failed = answer.state === "failed";
+        const head = failed
+            ? `<span class="loss loss-bad">${esc(answer.error || "отказ")}</span>`
+            : `${scoreBadge(answer.score)} <span class="answer-facts">${answer.matched} из ${answer.total} фактов</span> ${outcomeLabel(answer.outcome)}`;
+        const text = failed ? "" : `<p class="answer-text">${esc(answer.text)}</p>`;
+        const cost = failed
+            ? ""
+            : `<p class="answer-cost">${seconds(answer.elapsedMillis)} · ` +
+              `${tokens((answer.promptTokens || 0) + (answer.completionTokens || 0))} токенов · ` +
+              `фрагментов ${answer.sources}` +
+              (answer.retrievalMillis ? ` · поиск ${seconds(answer.retrievalMillis)}` : "") +
+              `</p>`;
+        return `<div class="answer"><h5>${esc(title)} ${head}</h5>${text}${cost}</div>`;
+    };
+    return (
+        one(question.without, "без базы") +
+        one(question.baseline, "базовый RAG") +
+        one(question.improved, "улучшенный RAG")
+    );
+}
+
+// Качество модели: метрики дня 23 по её первому повтору. При нескольких повторах рядом стоит второй —
+// по нему видно, насколько числа качества сами по себе устойчивы.
+function compareQuality(model) {
+    if (model.repeats.length === 0) {
+        return `<p class="question-meta">Прогонов нет.</p>`;
+    }
+    const first = model.repeats[0];
+    const last = model.repeats[model.repeats.length - 1];
+    const stages = first.quality || {};
+    const cells = [
+        metric(
+            "Средняя оценка повтора 1",
+            `${ru(stages.noBaseScore ?? 0, 2)} / ${ru(stages.baselineScore ?? 0, 2)} / ${ru(stages.improvedScore ?? 0, 2)}`,
+            "без базы / базовый / улучшенный, из 2"
+        ),
+        metric(
+            "Факты в ответах",
+            `${stages.baselineFacts ?? 0} / ${stages.improvedFacts ?? 0}`,
+            `базовый / улучшенный, из ${stages.factsTotal ?? 0}`
+        ),
+        metric(
+            "Source Hit Rate",
+            `${stages.baselineHits ?? 0} / ${stages.improvedHits ?? 0}`,
+            `базовый / улучшенный, из ${stages.scored ?? 0}`
+        ),
+        metric(
+            "Улучшенный против базового",
+            `+${stages.better ?? 0} / =${stages.same ?? 0} / −${stages.worse ?? 0}`,
+            "выше, столько же, ниже по оценке"
+        ),
+        metric(
+            "Потери по этапам",
+            `${stages.lostInRetrieval ?? 0} / ${stages.lostInFilter ?? 0} / ${stages.lostInRerank ?? 0}`,
+            "не найден поиском / отсечён порогом / проиграл на втором этапе"
+        ),
+        metric(
+            "Цена фильтра",
+            `${stages.removed ?? 0} отсеяно`,
+            `из них правильных ${stages.wronglyFiltered ?? 0}`
+        ),
+    ];
+    if (model.repeats.length > 1) {
+        const average = (repeat) =>
+            `${ru(repeat.quality.noBaseScore, 2)} / ${ru(repeat.quality.baselineScore, 2)} / ${ru(repeat.quality.improvedScore, 2)}`;
+        cells.push(
+            metric("Средняя оценка последнего повтора", average(last), `повтор ${last.number}`),
+            metric(
+                "Разница средних",
+                average(first) === average(last) ? "та же" : `${average(first)} → ${average(last)}`,
+                "первый повтор против последнего"
+            )
+        );
+    }
+    return `<dl class="metrics">${cells.join("")}</dl>`;
+}
+
+// Скорость модели: время и токены по режимам. Токены разделены по режимам намеренно: без базы
+// не платит за поиск, а улучшенный платит за этапы, и одно общее число это скрыло бы.
+function compareSpeed(model) {
+    if (model.repeats.length === 0) return `<p class="question-meta">Прогонов нет.</p>`;
+    const repeat = model.repeats[0];
+    const speed = repeat.speed || {};
+    const perAnswer = speed.answers ? speed.answerMillis / speed.answers : 0;
+    const mode = (title, used) =>
+        `${title}: ${tokens((used?.prompt || 0) + (used?.completion || 0))} ` +
+        `(${tokens(used?.prompt || 0)} запрос + ${tokens(used?.completion || 0)} ответ)`;
+    return `<dl class="metrics">${[
+        metric("Время прогона", seconds(repeat.elapsedMs), `${speed.answers ?? 0} ответов, один повтор`),
+        metric("Время ответа", seconds(perAnswer), "в среднем одно обращение к модели"),
+        metric("Генерация", seconds(speed.answerMillis ?? 0), "сумма обращений к модели по всем режимам"),
+        metric("Поиск", seconds(speed.retrievalMillis ?? 0), "сумма поиска; у обеих моделей он общий"),
+        metric("Токены", tokens((speed.without?.prompt || 0) + (speed.without?.completion || 0)), mode("без базы", speed.without)),
+        metric("Токены", tokens((speed.baseline?.prompt || 0) + (speed.baseline?.completion || 0)), mode("базовый", speed.baseline)),
+        metric("Токены", tokens((speed.improved?.prompt || 0) + (speed.improved?.completion || 0)), mode("улучшенный", speed.improved)),
+    ].join("")}</dl>`;
+}
+
+// Стабильность модели: повтор против повтора. Совпадение дословное и совпадение оценки — разные
+// числа: ответ может быть переписан другими словами и остаться верным, а может совпасть и разойтись
+// с ожиданием. Показываются оба.
+function compareStability(model) {
+    const stability = model.stability;
+    if (!stability) {
+        return `<p class="question-meta">Повтор один: сравнивать не с чем — поставьте повторов больше одного.</p>`;
+    }
+    const cells = [
+        metric("Дословно совпало", `${stability.identical} из ${stability.compared}`, "ответов повторились слово в слово"),
+        metric("Оценка изменилась", `${stability.scoreChanged}`, `вверх ${stability.scoreUp}, вниз ${stability.scoreDown}`),
+        metric("Средняя схожесть", ru(stability.averageSimilarity, 2), "1 — дословно совпало, 0 — общего нет"),
+        metric(
+            "Средняя оценка",
+            `${ru(stability.averageScoreFirst, 2)} → ${ru(stability.averageScoreLast, 2)}`,
+            "первый повтор против последнего, из 2"
+        ),
+    ];
+    const divergent = stability.pairs || [];
+    const list = divergent
+        .map((pair) =>
+            fold(
+                `compare-${model.provider}-${pair.id}-${pair.mode}`,
+                `${pair.id} · ${pair.title} · схожесть ${ru(pair.similarity, 2)} · оценка ${pair.scoreBefore} → ${pair.scoreAfter}`,
+                `<div class="answers"><div class="answer"><h5>повтор раньше</h5><p class="answer-text">${esc(pair.before)}</p></div>` +
+                    `<div class="answer"><h5>повтор позже</h5><p class="answer-text">${esc(pair.after)}</p></div></div>`
+            )
+        )
+        .join("");
+    return `<dl class="metrics">${cells.join("")}</dl>` +
+        (divergent.length
+            ? `<p class="hint">Ответы, разошедшиеся между повторами: ${divergent.length}.</p>${list}`
+            : `<p class="hint">Все ответы совпали дословно: расхождений нет.</p>`);
+}
+
+function renderCompare() {
+    const panel = document.getElementById("compare-panel");
+    if (!compare) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    const status = document.getElementById("compare-status");
+    const running = compare.state === "running";
+    const models = compare.models || [];
+    // Кнопка запуска не блокируется на время сравнения: повторное нажатие замещает идущую работу —
+    // сервер снимает прежнее сравнение и начинает новое, — и так же ведёт себя прогон вопросов на этой
+    // странице. Заблокированная кнопка без объяснения читается как поломка страницы; остановить
+    // сравнение можно соседней кнопкой, а её недоступность объяснена строкой состояния.
+    document.getElementById("compare-stop").disabled = !running;
+    document.getElementById("compare-run").disabled = false;
+    const parts = [];
+    if (compare.state === "idle") {
+        parts.push("Сравнение не запускалось: выберите, сколько вопросов и повторов, и нажмите «Сравнить модели».");
+    } else if (running) {
+        parts.push(`Идёт сравнение: прогонов ${compare.done} из ${compare.total}. ${compare.stage ? `Сейчас: ${compare.stage}.` : ""}`);
+    } else if (compare.state === "stopped") {
+        parts.push(`Сравнение остановлено: прогонов ${compare.done} из ${compare.total}.`);
+    } else if (compare.state === "failed") {
+        parts.push(`Сравнение не удалось: ${compare.error || "причина не названа"}.`);
+    } else {
+        parts.push(`Сравнение готово: прогонов ${compare.done} из ${compare.total} за ${seconds(compare.elapsedMs)}.`);
+    }
+    parts.push(`Вопросов в наборе: ${compare.questions.length}, повторов каждой модели: ${compare.repeats}.`);
+    status.className = compare.state === "failed" ? "status error" : "status";
+    status.textContent = parts.join(" ");
+    const progress = document.getElementById("compare-progress-wrap");
+    progress.hidden = compare.total === 0;
+    document.getElementById("compare-progress-bar").style.width =
+        compare.total === 0 ? "0%" : `${Math.round((compare.done / compare.total) * 100)}%`;
+
+    // Причина, по которой модели не участвуют, — отдельной строкой: пустые колонки читались бы
+    // как «ответила плохо». Причин две, и они разные: модели нет на машине (нет ключа) и модель
+    // есть, но прогон не состоялся (отказ API или мёртвый демон).
+    const notes = models
+        .map((model) => model.note || model.failure)
+        .filter(Boolean);
+    const note = document.getElementById("compare-note");
+    note.hidden = notes.length === 0;
+    note.textContent = notes.join(" ");
+
+    const body = document.getElementById("compare-body");
+    if (!models.some((model) => model.repeats.length > 0)) {
+        body.innerHTML = "";
+        document.getElementById("compare-reports").hidden = true;
+        return;
+    }
+    const rows = compare.questions
+        .map((id) => {
+            const question = setup.questions.find((item) => item.id === id);
+            const cells = models
+                .map((model) => {
+                    if (!model.available) return `<td class="question-meta">—</td>`;
+                    const first = model.repeats[0];
+                    return `<td>${first ? compareScores(first, id) : "—"}</td><td>${first ? compareHit(first, id) : "—"}</td>`;
+                })
+                .join("");
+            return `<tr class="question-row" data-id="${esc(id)}"><td>${esc(id)}</td><td>${esc(question ? question.question : "")}</td>${cells}</tr>`;
+        })
+        .join("");
+    const heads = models
+        .map((model) => `<th colspan="2">${esc(model.title)} — ${esc(model.model)}${model.available ? "" : " (нет)"}</th>`)
+        .join("");
+    const perQuestion = (title, render) =>
+        models
+            .map((model) => {
+                const block = model.available
+                    ? render(model)
+                    : `<p class="question-meta">${esc(model.note || "Модель недоступна.")}</p>`;
+                return `<div class="compare-column"><h4>${esc(model.title)} — ${esc(model.model)}</h4>${block}</div>`;
+            })
+            .join("");
+    body.innerHTML = `
+        <h3>Качество: оценки и источники</h3>
+        <p class="hint">
+            Оценка 0–2 у всех одна: 0 — ответа нет или он неверен, 1 — часть фактов, 2 — все.
+            «Источник» — попал ли ожидаемый текст в контекст. Числа первой строки каждой модели —
+            её первый повтор; расхождения повторов смотрите в разделе стабильности.
+        </p>
+        <div class="compare-grid">${perQuestion("Качество", compareQuality)}</div>
+        <table class="questions">
+            <thead><tr><th>#</th><th>Вопрос</th>${heads}</tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <h3>Скорость: время и токены</h3>
+        <div class="compare-grid">${perQuestion("Скорость", compareSpeed)}</div>
+        <h3>Стабильность: повтор против повтора</h3>
+        <div class="compare-grid">${perQuestion("Стабильность", compareStability)}</div>
+        <h3>Ответы целиком</h3>
+        <p class="hint">По вопросу — ответы каждой модели во всех трёх режимах, как они есть.</p>
+        ${compare.questions
+            .map((id) => {
+                const question = setup.questions.find((item) => item.id === id);
+                const columns = models
+                    .map((model) => {
+                        const block = model.available
+                            ? compareAnswers(model, id)
+                            : `<p class="question-meta">${esc(model.note || "Модель недоступна.")}</p>`;
+                        return `<div class="compare-column"><h4>${esc(model.title)} — ${esc(model.model)}</h4>${block}</div>`;
+                    })
+                    .join("");
+                return fold(
+                    `compare-answers-${id}`,
+                    `${id} · ${question ? question.question : ""}`,
+                    `<div class="compare-grid">${columns}</div>`
+                );
+            })
+            .join("")}
+    `;
+    const reports = document.getElementById("compare-reports");
+    reports.hidden = compare.reports.length === 0;
+    reports.innerHTML = compare.reports
+        .map((report) => `<li><span>${esc(report.name)}</span><code>${esc(report.file)}</code></li>`)
+        .join("");
+}
+
+async function compareStart() {
+    try {
+        const count = Number(document.getElementById("compare-count").value) || setup.questions.length;
+        const ids = setup.questions.slice(0, Math.max(1, Math.min(count, setup.questions.length))).map((item) => item.id);
+        const params = new URLSearchParams({
+            ids: ids.join(","),
+            repeats: document.getElementById("compare-repeats").value,
+            topK: document.getElementById("topk").value,
+            retrievalTopK: document.getElementById("retrieval-topk").value,
+            finalTopK: document.getElementById("final-topk").value,
+            threshold: document.getElementById("threshold").value,
+            rewrite: document.getElementById("rewrite").value,
+            rerank: document.getElementById("rerank").value,
+        });
+        compare = await api(`/api/compare?${params}`, { method: "POST" });
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+}
+
+async function compareStop() {
+    try {
+        compare = await api("/api/compare/stop", { method: "POST" });
+        signature = "";
+        render();
+    } catch (cause) {
+        alert(cause.message);
+    }
+}
+
+document.getElementById("compare-run").addEventListener("click", compareStart);
+document.getElementById("compare-stop").addEventListener("click", compareStop);
+
 function render() {
     renderChat();
+    renderCompare();
     renderStatus();
     renderQuestions();
     renderMetrics();
@@ -1030,6 +1370,11 @@ function renderSetup() {
     document.getElementById("threshold").value = setup.threshold;
     document.getElementById("rewrite").value = setup.rewrite;
     document.getElementById("rerank").value = setup.rerank;
+    document.getElementById("compare-count").value = setup.questions.length;
+    // Умолчание — один повтор: это полное сравнение двух моделей, и его хватает, чтобы сравнить
+    // качество и скорость. Второй повтор добавляет к нему разрез стабильности — его включают
+    // осознанно, потому что каждый повтор — это ещё десять вопросов на каждой модели.
+    document.getElementById("compare-repeats").value = 1;
     document.getElementById("setup-facts").innerHTML = [
         ["База", `${setup.base.file} — ${tokens(setup.base.chars)} символов, ${tokens(setup.base.tokens)} токенов, ${setup.base.pages} страниц`],
         ["Нарезка", `${setup.index.strategy} — ${tokens(setup.index.chunks)} чанков`],
@@ -1050,7 +1395,10 @@ async function refresh() {
     // Разговор опрашивается тем же циклом, что и прогон: пока идёт сценарий, лента растёт по ходам,
     // и именно этот опрос показывает прогресс — страница на время сценария не блокируется.
     chat = await api("/api/chat");
-    const next = JSON.stringify({ state, chat, selected });
+    // Сравнение опрашивается тем же циклом: его прогоны идут минутами, и прогресс нужен по ходу,
+    // а не после перезагрузки страницы.
+    compare = await api("/api/compare");
+    const next = JSON.stringify({ state, chat, compare, selected });
     if (next !== signature) {
         signature = next;
         render();

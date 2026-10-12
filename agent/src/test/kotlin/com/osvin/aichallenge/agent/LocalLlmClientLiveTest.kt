@@ -55,15 +55,30 @@ class LocalLlmClientLiveTest {
                         ChatMessage("system", "Отвечай одним словом."),
                         ChatMessage("user", "Какая планета Солнечной системы самая большая? Ответь одним словом.")
                     ),
-                    maxTokens = 64,
+                    // Бюджет с запасом: при `think = true` рассуждение идёт в тот же `num_predict`,
+                    // и маленький бюджет отдаёт пустой ответ с `done_reason = length` (измерено:
+                    // 64 токена — пусто, 256 — ответ целиком). Проверяется провод, а не теснота бюджета.
+                    maxTokens = 512,
                     temperature = 0.0
                 )
             )
         }
 
-        val reply = response.choices.single().message.content
+        val choice = response.choices.single()
+        val reply = choice.message.content
         println("[agent] живой ответ ${LocalLlmClient.DEFAULT_MODEL}: $reply")
-        assertTrue(reply.contains("Юпитер", ignoreCase = true), "неожиданный ответ: $reply")
+        // Бюджет, съеденный рассуждением, — самая тихая поломка этого пути: ответ приходит
+        // пустым и успешным на вид. Поэтому причина исхода проверяется отдельно от текста.
+        assertTrue(choice.finishReason != "length", "бюджет ответа израсходован на рассуждения: $reply")
+        assertTrue(reply.isNotBlank(), "демон вернул пустой ответ")
+        // Планета названа — но написание проверяется терпимо: та же модель в том же режиме отвечает
+        // «Юпитер», «Jupiter» и «Жупитер», и это задокументированный разброс дня (см.
+        // docs/task-27-local-llm.md, §4 и §7), а не предмет этого теста.
+        val answer = reply.lowercase()
+        assertTrue(
+            answer.contains("юпитер") || answer.contains("jupiter") || answer.contains("жупитер"),
+            "неожиданный ответ: $reply"
+        )
         assertTrue((response.usage?.completionTokens ?: 0) > 0, "демон не назвал расход токенов")
     }
 }

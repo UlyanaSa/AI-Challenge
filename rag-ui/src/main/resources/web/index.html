@@ -3,12 +3,12 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Дни 23–25. RAG: три режима, grounded-ответ и мини-чат с памятью задачи</title>
+    <title>Дни 23–28. RAG: три режима, grounded-ответ, мини-чат и сравнение моделей</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-    <h1>Дни 23–25. RAG: три режима, grounded-ответ и мини-чат</h1>
+    <h1>Дни 23–28. RAG: три режима, grounded-ответ, мини-чат и сравнение моделей</h1>
     <p class="subtitle" id="run-title">Загрузка прогона…</p>
 </header>
 
@@ -108,8 +108,48 @@
         <div class="metrics" id="grounding-metrics"></div>
     </section>
 
+    <section class="panel" id="compare-panel" hidden>
+        <h2><span class="step">3</span> Сравнение моделей: локальная и облачная</h2>
+        <p class="hint">
+            Тот же набор вопросов прогоняется тем же конвейером дважды: локальной моделью через
+            Ollama и облачной. Вопросы, настройки этапов и индекс у обеих рук одни и те же, поэтому
+            разница в ответах — это разница моделей, а не условий поиска. Сравниваются три вещи.
+            <b>Качество</b>: оценка каждого ответа 0–2 и попадание ожидаемого источника в контекст —
+            те же метрики, что у прогона дня 23. <b>Скорость</b>: время прогона, время одного
+            обращения к модели и токены по режимам. <b>Стабильность</b>: сколько ответов повтор
+            повторил дословно, насколько разошлись тексты у остальных и изменились ли при этом
+            оценки. Стабильность требует повторов: при одном повторе её нет, и страница говорит
+            об этом словами, а не пустой таблицей. Сравнение идёт по готовому индексу и своего
+            индекса не собирает — его собирает кнопка в разделе прогона.
+        </p>
+        <div class="controls settings">
+            <label class="field">
+                <span>вопросов в сравнении</span>
+                <input type="number" id="compare-count" min="1" max="10" step="1" inputmode="numeric">
+            </label>
+            <label class="field">
+                <span>повторов каждой модели</span>
+                <input type="number" id="compare-repeats" min="1" max="5" step="1" inputmode="numeric">
+            </label>
+            <button id="compare-run" type="button">Сравнить модели</button>
+            <button id="compare-stop" type="button" class="secondary" disabled>Остановить сравнение</button>
+        </div>
+        <p class="hint">
+            Вопросов десять, и каждый повтор стоит обращений к обеим моделям: десять вопросов с двумя
+            повторами — это около сорока обращений к локальной модели и сорока к облачной, то есть
+            минуты. Для быстрой проверки поставьте один повтор и два-три вопроса.
+        </p>
+        <p class="status" id="compare-status">Загрузка…</p>
+        <div class="progress" id="compare-progress-wrap" hidden>
+            <div class="progress-bar" id="compare-progress-bar"></div>
+        </div>
+        <p class="note" id="compare-note" hidden></p>
+        <div id="compare-body"></div>
+        <ul class="reports" id="compare-reports" hidden></ul>
+    </section>
+
     <section class="panel">
-        <h2><span class="step">3</span> Десять контрольных вопросов</h2>
+        <h2><span class="step">4</span> Десять контрольных вопросов</h2>
         <p class="hint">
             Три режима отвечают на разные вопросы сравнения. «Без базы» — нижняя граница: что модель
             помнит сама. «Базовый RAG» — то, что дал поиск дня 22 (Top-K по близости), и он же учтён
@@ -153,7 +193,7 @@
     </section>
 
     <section class="panel">
-        <h2><span class="step">4</span> Конвейер вопроса</h2>
+        <h2><span class="step">5</span> Конвейер вопроса</h2>
         <p class="hint" id="pipeline-hint">
             Выберите вопрос в таблице — здесь появятся все три конвейера: вопрос, вектор вопроса,
             выдача поиска с идентификаторами и близостями, этапы улучшенного конвейера (переписанный

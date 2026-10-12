@@ -6,6 +6,7 @@ import com.osvin.aichallenge.rag.Candidate
 import com.osvin.aichallenge.rag.Check
 import com.osvin.aichallenge.rag.ConfidenceCheck
 import com.osvin.aichallenge.rag.ControlQuestion
+import com.osvin.aichallenge.rag.TokensUsed
 import com.osvin.aichallenge.rag.GroundedAnswer
 import com.osvin.aichallenge.rag.GroundedCheck
 import com.osvin.aichallenge.rag.GroundingSummary
@@ -920,4 +921,177 @@ internal fun GroundingSummary.toDto(): GroundingDto = GroundingDto(
     factsPrevious = factsPrevious,
     factsGrounded = factsGrounded,
     factsTotal = factsTotal
+)
+
+/**
+ * Состояние сравнения моделей: чем страница отвечает на вопрос «кто отвечает лучше».
+ *
+ * Отдельный набор от [StateDto], потому что вопросы разные. Прогон дня 23 отвечает «что добавили
+ * этапы конвейера» на одной модели; сравнение — «чем локальная модель отличается от облачной»:
+ * у него две модели, по нескольку повторов каждой, и три вида чисел, которых у прогона нет, —
+ * качество по вопросам (те же метрики дня 23, посчитанные дважды), скорость (время и токены
+ * каждой модели) и стабильность (насколько повтор повторил предыдущий прогон).
+ *
+ * Считать это из [StateDto] нельзя: у прогона один клиент и результаты одного набора, а сравнение
+ * показывает два набора, снятых при одинаковых вопросах, настройках и индексе. Общее у них —
+ * метрики ([StagesDto], [CompareSpeedDto]) и сами ответы: их считает тот же код.
+ */
+@Serializable
+data class CompareStateDto(
+    val state: String,
+    /** Что идёт прямо сейчас: «локальная модель · повтор 1 · q03». */
+    val stage: String?,
+    val error: String?,
+    /** Сколько прогонов (моделей на повторы) закончено и сколько всего. */
+    val done: Int,
+    val total: Int,
+    val repeats: Int,
+    /** Вопросы набора в порядке прогона: по ним страница читает колонки таблиц. */
+    val questions: List<String>,
+    val index: IndexDto,
+    /** Настройки этапов: у обеих моделей они одни и те же, и без них числа не объяснить. */
+    val config: StageConfigDto?,
+    val models: List<CompareModelDto>,
+    val reports: List<ReportDto>,
+    val elapsedMs: Long
+)
+
+/**
+ * Одна модель в сравнении: чем отвечает, есть ли чем отвечать и что показали её прогоны.
+ *
+ * [available] и [note] — не украшение: облачной модели может не быть на этой машине (нет ключа),
+ * и сравнение обязано сказать об этом словами, а не показать пустые колонки, которые читались бы
+ * как «модель ответила плохо».
+ */
+@Serializable
+data class CompareModelDto(
+    /** `local` или `cloud` — по нему страница выбирает подпись и порядок колонок. */
+    val provider: String,
+    /** Имя модели словами: «локальная модель» или «облачная модель». */
+    val title: String,
+    val model: String,
+    val available: Boolean,
+    val note: String?,
+    /**
+     * Почему прогоны модели не состоялись: причина отказа, если ни один ответ не вышел.
+     *
+     * Отдельно от [note]: [note] — это «модели нет на этой машине» (нет ключа), и она известна
+     * до запуска, а здесь — «модель есть, но не ответила» (недоступный демон, отказ API).
+     * Смешать их значило бы сказать «модели нет» про модель, которой просто не ответили.
+     */
+    val failure: String?,
+    /** Прогоны этой модели: их столько, сколько запрошено повторов. */
+    val repeats: List<CompareRepeatDto>,
+    /** Стабильность по повторам: `null`, если повтор один — повторять нечего. */
+    val stability: CompareStabilityDto?
+)
+
+/** Один прогон набора вопросов одной моделью: качество, скорость и ответы. */
+@Serializable
+data class CompareRepeatDto(
+    val number: Int,
+    val elapsedMs: Long,
+    /** Метрики дня 23 на этом прогоне: оценки режимов, попадания этапов, потери и цена фильтра. */
+    val quality: StagesDto,
+    val speed: CompareSpeedDto,
+    val questions: List<CompareQuestionDto>
+)
+
+/**
+ * Скорость одной модели: время и токены по режимам.
+ *
+ * Токены и время разделены по режимам, а не сведены в одно число: режим без базы стоит дешевле
+ * остальных (поиска нет), а у улучшенного к ответу добавляются этапы конвейера. Одно общее число
+ * скрыло бы, за что заплачено временем.
+ */
+@Serializable
+data class CompareSpeedDto(
+    val without: TokensUsed,
+    val baseline: TokensUsed,
+    val improved: TokensUsed,
+    /** Сколько ответов получено во всех трёх режимах: на них делятся числа выше. */
+    val answers: Int,
+    /** Сколько всего шла генерация (сумма обращений к модели). */
+    val answerMillis: Long,
+    /** Сколько всего шёл поиск — у обеих моделей он общий, и это видно по числу. */
+    val retrievalMillis: Long
+)
+
+/**
+ * Ответы одной модели на один вопрос во всех трёх режимах.
+ *
+ * Тексты и оценки отдаются целиком: ради них сравнение и запускается. Поля скорости и расхода
+ * стоят рядом с текстом, потому что «лучше» без них — половина ответа: маленькая модель может
+ * отвечать точнее и дешевле, и это видно только вместе.
+ */
+@Serializable
+data class CompareQuestionDto(
+    val id: String,
+    val question: String,
+    val absent: Boolean,
+    val without: CompareAnswerDto?,
+    val baseline: CompareAnswerDto?,
+    val improved: CompareAnswerDto?
+)
+
+/** Один ответ модели в одном режиме: текст, оценка, расход и время. */
+@Serializable
+data class CompareAnswerDto(
+    val mode: String,
+    val state: String,
+    val error: String?,
+    val text: String,
+    val score: Int,
+    val matched: Int,
+    val total: Int,
+    /** Чем кончился режим: «верно», «ошибка генерации» или «ошибка поиска». */
+    val outcome: String,
+    /** Попал ли ожидаемый текст в контекст: `null` там, где считать нечего (без базы, вопрос без ответа). */
+    val hit: Boolean?,
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val retrievalMillis: Long,
+    val elapsedMillis: Long,
+    val sources: Int
+)
+
+/**
+ * Стабильность модели по повторам: насколько её второй прогон повторил первый.
+ *
+ * Стабильность — это не «сколько ответов совпало» только, а два разных числа: сколько текстов
+ * совпало дословно и сколько оценок при этом изменилось. Первое говорит о форме, второе — о том,
+ * меняется ли вердикт: ответ может быть переписан другими словами и остаться верным, а может
+ * остаться тем же и разойтись с ожиданием по-другому.
+ */
+@Serializable
+data class CompareStabilityDto(
+    /** Сколько ответов сравнено: вопросы × режимы. */
+    val compared: Int,
+    val identical: Int,
+    val changed: Int,
+    /** Оценка изменилась между повторами: сколько раз выросла и сколько упала. */
+    val scoreChanged: Int,
+    val scoreUp: Int,
+    val scoreDown: Int,
+    /** Средняя схожесть текстов по всем сравнённым ответам (1 — дословно). */
+    val averageSimilarity: Double,
+    /** Средняя оценка первого и последнего повтора: видно, разъехались они или нет. */
+    val averageScoreFirst: Double,
+    val averageScoreLast: Double,
+    /** Разошедшиеся ответы с обоими текстами: их читают, по ним видно, где именно разъехались. */
+    val pairs: List<ComparePairDto>
+)
+
+/** Пара ответов одной модели на один вопрос в одном режиме: что было в повторах. */
+@Serializable
+data class ComparePairDto(
+    val id: String,
+    val mode: String,
+    val title: String,
+    val identical: Boolean,
+    val similarity: Double,
+    val scoreBefore: Int,
+    val scoreAfter: Int,
+    val before: String,
+    val after: String
 )

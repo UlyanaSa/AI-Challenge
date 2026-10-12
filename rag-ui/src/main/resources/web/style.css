@@ -715,3 +715,60 @@ table.sources td {
     border-top: 1px solid var(--line);
     padding-top: 0.6rem;
 }
+
+/* Сравнение моделей (день 28): две колонки — локальная и облачная модель — на узком экране
+   складываются в одну, потому что таблицы ответов шириной в две книги рядом читать нельзя. */
+.compare-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.compare-column {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+}
+
+.compare-column h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.9rem;
+}
+
+.compare-column .metrics {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+}
+
+.scores {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+.answers .answer + .answer {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--line);
+}
+
+.answer h5 {
+    margin: 0 0 0.25rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.answer-text {
+    margin: 0.25rem 0 0;
+    white-space: pre-wrap;
+}
+
+.answer-cost,
+.answer-facts {
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.answer-cost {
+    margin: 0.25rem 0 0;
+}

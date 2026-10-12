@@ -1,5 +1,6 @@
 package com.osvin.aichallenge.rag.ui
 
+import com.osvin.aichallenge.agent.LlmProvider
 import com.osvin.aichallenge.indexing.model.ChunkingStrategyType
 import com.osvin.aichallenge.indexing.ollama.Embedding
 import com.osvin.aichallenge.indexing.ollama.EmbeddingProviders
@@ -61,17 +62,23 @@ fun main() {
     )
     val embedding = runBlocking { EmbeddingProviders.fromEnv() }
     val apiKey = Api.key()
+    val provider = Api.provider()
+    val model = Api.modelName(AppConfig.DEFAULT_MODEL)
     println("Векторы: ${embedding.name} (${embedding.note})")
     println(
-        if (apiKey == null) {
-            "Ключ DEEPSEEK_API_KEY не найден: страница покажет поиск, но ответов модели не будет."
-        } else {
-            "Ключ DEEPSEEK_API_KEY найден: страница отвечает живой моделью."
+        when {
+            provider == LlmProvider.LOCAL ->
+                "Генерация: локальная модель $model (демон Ollama) — ключ облака странице не нужен."
+
+            apiKey == null ->
+                "Ключ DEEPSEEK_API_KEY не найден: страница покажет поиск, но ответов модели не будет."
+
+            else -> "Ключ DEEPSEEK_API_KEY найден: страница отвечает моделью $model."
         }
     )
     println("Страница дней 23–25: http://127.0.0.1:$port (рабочий каталог: ${workDir.toAbsolutePath()})")
     embeddedServer(Netty, port = port, host = "127.0.0.1") {
-        module(workDir, embedding, apiKey)
+        module(workDir, embedding, apiKey, provider = provider, model = model)
     }.start(wait = true)
 }
 
@@ -81,11 +88,26 @@ fun Application.module(
     embedding: Embedding,
     apiKey: String?,
     /**
+     * Провайдер генерации: локальный отвечает демоном Ollama и облачного ключа не требует
+     * (`LLM_PROVIDER=local`). Умолчание — облачный, потому что тесты страницы подставляют
+     * клиента сами и о провайдере машины не знают.
+     */
+    provider: LlmProvider = LlmProvider.CLOUD,
+    /**
      * Нарезка корпуса: по умолчанию структурная — та же, что у прогона в консоли, иначе числа
      * страницы и отчёта относились бы к разным индексам.
      */
     strategy: ChunkingStrategyType = ChunkingStrategyType.STRUCTURAL,
-    model: String = AppConfig.DEFAULT_MODEL
+    model: String = AppConfig.DEFAULT_MODEL,
+    /**
+     * Имя облачной модели для сравнения — **не** то же, что [model].
+     *
+     * [model] называет модель, которой отвечает прогон страницы, и в локальном режиме это имя
+     * локальное (`Api.modelName` подставляет `qwen3:1.7b`). Облачной руке сравнения нужен
+     * настоящий облачный идентификатор: отправить ей локальное имя значит получить от API отказ
+     * «такой модели нет» и пустые колонки вместо сравнения.
+     */
+    cloudModel: String = AppConfig.DEFAULT_MODEL
 ) {
     val session = RagSession(
         workDir = workDir,
@@ -93,6 +115,19 @@ fun Application.module(
         embedding = embedding,
         strategy = strategy,
         model = model,
+        apiKey = apiKey,
+        provider = provider
+    )
+    // Сравнение моделей живёт рядом с прогоном и делит с ним индекс: и локальная, и облачная рука
+    // отвечают по тому же файлу поиска, что и прогон десяти вопросов. Своей пересборки у сравнения
+    // поэтому нет — сломать общий индекс оно не может.
+    val compare = CompareSession(
+        workDir = workDir,
+        scope = this,
+        embedding = embedding,
+        strategy = strategy,
+        cloudModel = cloudModel,
+        localModel = Api.settingsFor(LlmProvider.LOCAL).ollamaModel,
         apiKey = apiKey
     )
 
@@ -170,6 +205,57 @@ fun Application.module(
                 is StartOutcome.Accepted -> call.respond(session.state())
                 is StartOutcome.Rejected ->
                     call.respond(HttpStatusCode.BadRequest, ErrorDto(outcome.message))
+            }
+        }
+
+        /**
+         * Состояние сравнения моделей: качество, скорость и стабильность каждой.
+         *
+         * Отдаётся целиком, как состояние прогона: страница опрашивает один ответ и рисует из него
+         * обе модели. Собрать сравнение из двух запросов значило бы показать его из разных моментов
+         * времени — у локальной модели уже посчитан третий повтор, у облачной ещё первый.
+         */
+        get("/api/compare") { call.respond(compare.state()) }
+
+        /**
+         * Запуск сравнения: `ids` — вопросы, `repeats` — сколько раз прогнать каждую модель.
+         *
+         * Настройки этапов разбираются так же, как у прогона, и проверяются в [CompareSession.start]:
+         * страница — второй вход в тот же конвейер, и неизвестный вариант этапа должен отвергнуть
+         * запуск там же, где и в консоли. Индекс не собирается: сравнение идёт по готовому файлу,
+         * и причина отказа видна странице текстом, а не пустыми таблицами.
+         */
+        post("/api/compare") {
+            val ids = call.request.queryParameters["ids"]
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?: emptyList()
+            val parameters = call.request.queryParameters
+            val defaults = RunSettings.DEFAULT
+            val settings = RunSettings(
+                baselineTopK = parameters["topK"]?.toIntOrNull() ?: defaults.baselineTopK,
+                retrievalTopK = parameters["retrievalTopK"]?.toIntOrNull() ?: defaults.retrievalTopK,
+                finalTopK = parameters["finalTopK"]?.toIntOrNull() ?: defaults.finalTopK,
+                threshold = parameters["threshold"]?.replace(',', '.')?.toDoubleOrNull() ?: defaults.threshold,
+                rewrite = parameters["rewrite"]?.trim()?.lowercase() ?: defaults.rewrite,
+                rerank = parameters["rerank"]?.trim()?.lowercase() ?: defaults.rerank
+            )
+            val selected = if (ids.isEmpty()) Controls.questions.map { it.id } else ids
+            val repeats = parameters["repeats"]?.toIntOrNull() ?: CompareSession.DEFAULT_REPEATS
+            when (val outcome = compare.start(selected, repeats, settings)) {
+                is StartOutcome.Accepted -> call.respond(compare.state())
+                is StartOutcome.Rejected ->
+                    call.respond(HttpStatusCode.BadRequest, ErrorDto(outcome.message))
+            }
+        }
+
+        /** Остановка сравнения: посчитанное остаётся, работа прекращается. */
+        post("/api/compare/stop") {
+            if (compare.stop()) {
+                call.respond(compare.state())
+            } else {
+                call.respond(HttpStatusCode.BadRequest, ErrorDto("Останавливать нечего: сравнение не идёт"))
             }
         }
 
