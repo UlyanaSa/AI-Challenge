@@ -25,7 +25,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -481,6 +483,34 @@ class ServiceClientTest {
         assertEquals(null, chatIdFromUrl("?chat="))
         assertEquals(null, chatIdFromUrl("https://app.test/"))
         assertEquals(null, chatIdFromUrl(null))
+    }
+
+    /**
+     * Где у платформы нет адреса своей страницы, ссылки на чат не существует.
+     *
+     * Android-хост-тесты идут на андроидных actual'ах: `appAddress` там null, буфера обмена
+     * нет. Это ровно та платформа, где «Поделиться» показывать нечем — кнопка отдала бы
+     * голый идентификатор, который не скопировать и не открыть ссылкой. Проверка держит
+     * согласие двух концов — признака для шапки и самой ссылки: кнопки не может быть там,
+     * где [ChatRepository.shareServiceChat] возвращает null при открытом чате.
+     */
+    @Test
+    fun shareLinkNeedsAnAppAddressAndIsAbsentWithoutOne() = runBlocking {
+        val repository = repository { path ->
+            when (path) {
+                "/api/chats/9c1e" -> Stub(
+                    """{"chatId":"9c1e","title":"Поездка","messages":[]}"""
+                )
+                else -> error("неожиданный путь: $path")
+            }
+        }
+
+        assertFalse(repository.canShareServiceChat, "на этой платформе нет адреса страницы")
+        assertNull(repository.shareServiceChat(), "без открытого чата делиться нечем")
+
+        repository.openSharedServiceChat("9c1e")
+
+        assertNull(repository.shareServiceChat(), "адреса нет — ссылки нет, даже когда чат открыт")
     }
 
     /**

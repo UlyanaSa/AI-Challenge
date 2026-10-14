@@ -942,17 +942,28 @@ class ChatRepository(
     }
 
     /**
+     * Есть ли чем делиться ссылкой: адрес страницы знает только браузер ([appAddress]).
+     *
+     * Где адреса нет — приложение Android, iOS, десктоп, — остаётся голый идентификатор:
+     * его не скопировать (буфера на этих платформах у клиента нет, `copyToClipboard` там
+     * false) и не открыть как ссылку, поэтому кнопка «Поделиться» в шапке не показывается
+     * (`ChatTopBar.canShare`). Признак живёт здесь, рядом с самим адресом: платформенная
+     * разница — в одном месте, а не в вёрстке.
+     */
+    val canShareServiceChat: Boolean = appAddress() != null
+
+    /**
      * Ссылка на открытый чат сервиса для «Поделиться» (§5): `<адрес приложения>/?chat=<id>`.
      *
-     * Адрес приложения знает только браузер ([appAddress]); там, где его нет, остаётся сам
-     * идентификатор — чат по нему открывают из списка. Копирование в буфер пробуем здесь же
-     * и исход возвращаем наружу ([ServiceShareLink]): где буфера нет, ссылку показывают
-     * текстом для выделения. null — открытого чата нет, делиться нечем.
+     * Копирование в буфер пробуем здесь же и исход возвращаем наружу ([ServiceShareLink]):
+     * где буфера нет, ссылку показывают текстом для выделения. null — делиться нечем:
+     * либо открытого чата нет, либо платформа не знает адреса страницы, и ссылки не собрать
+     * ([canShareServiceChat]).
      */
     fun shareServiceChat(): ServiceShareLink? {
         val chatId = _serviceChatId.value?.takeIf { it.isNotBlank() } ?: return null
-        val address = appAddress()
-        val text = if (address != null) "$address/?chat=$chatId" else chatId
+        val address = appAddress() ?: return null
+        val text = "$address/?chat=$chatId"
         return ServiceShareLink(text = text, copied = copyToClipboard(text))
     }
 

@@ -45,6 +45,10 @@ import androidx.compose.ui.unit.sp
  * @param onToggleCompare Включение и выключение сравнения сборок.
  * @param serviceMode Открыт ли чат приватного сервиса: его лента обновляется и делится
  *        ссылкой, а не сравнивается по сборкам — чат живёт на сервисе и общий у клиентов.
+ * @param canShare Показывать ли «Поделиться»: ссылку на чат собирает только та платформа,
+ *        что знает адрес своей страницы ([appAddress]). Там, где адреса нет — приложение
+ *        Android, iOS, десктоп, — кнопка была бы без действия: она отдала бы голый
+ *        идентификатор, который нечем скопировать.
  * @param onRefresh Перечитывание списка чатов сервиса и истории открытого: так появляется
  *        написанное другим клиентом — сервис о чужих записях сам не сообщает.
  * @param onShare Показ и копирование ссылки на открытый чат сервиса: по ней второй клиент
@@ -69,6 +73,7 @@ fun ChatTopBar(
     showBack: Boolean = true,
     showNewChat: Boolean = true,
     serviceMode: Boolean = false,
+    canShare: Boolean = true,
     onRefresh: () -> Unit = {},
     onShare: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -136,13 +141,16 @@ fun ChatTopBar(
             // Лента сервиса: «Обновить» перечитывает список чатов и историю открытого —
             // так появляется написанное другим клиентом, потому что сервис о чужих
             // записях сам не сообщает. «Поделиться» даёт ссылку на тот же чат: по ней
-            // второй клиент с ключом открывает этот разговор
+            // второй клиент с ключом открывает этот разговор — там, где ссылку есть
+            // из чего собрать ([canShare]), иначе кнопка была бы без действия
             if (serviceMode) {
                 TextButton(onClick = onRefresh) {
                     Text("Обновить", style = MaterialTheme.typography.labelLarge)
                 }
-                TextButton(onClick = onShare) {
-                    Text("Поделиться", style = MaterialTheme.typography.labelLarge)
+                if (canShare) {
+                    TextButton(onClick = onShare) {
+                        Text("Поделиться", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
             }
             // Инварианты проекта: те же правила уходят в модель с каждым запросом,
