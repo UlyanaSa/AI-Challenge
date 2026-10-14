@@ -36,11 +36,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.osvin.aichallenge.data.Chat
+import com.osvin.aichallenge.data.ServiceChatItem
+import com.osvin.aichallenge.data.ServiceChatList
 import com.osvin.aichallenge.ui.components.CloseIcon
 import com.osvin.aichallenge.ui.components.PlusIcon
 
 /**
  * Экран списка чатов: каждый чат — отдельный диалог со своей сессией агента.
+ *
+ * В режиме «Сервис» вместо локальных чатов здесь чаты приватного сервиса ([ServiceChatsPane]):
+ * источник истины по ним — сервис, а не БД устройства, и один и тот же чат открывают все
+ * клиенты с ключом. Список приходит из `GET /api/chats`, поэтому удаления в нём нет:
+ * кнопка «удалить» стёрла бы общий разговор у всех, а не только у нажавшего.
  *
  * Закреплённых чатов здесь нет: закреплённым приходил чат курсов валют, который ведёт
  * само приложение, а не человек, — его лента наполнялась по расписанию, а писать в неё
@@ -48,12 +55,21 @@ import com.osvin.aichallenge.ui.components.PlusIcon
  * с толку, поэтому он скрыт целиком: его не заводит и не обновляет ни модель
  * представления, ни эта страница.
  *
- * @param chats Сохранённые чаты, свежие сверху.
+ * @param chats Сохранённые чаты, свежие сверху. Показываются в локальном режиме.
  * @param loaded Загружен ли список из БД: до этого показывать нечего.
  * @param onOpen Открыть чат и продолжить его диалог.
  * @param onNew Создать новый чат и открыть его сразу: настраивать перед первым
  *        сообщением нечего — провайдера и модель выбирает конфигурация сервера.
  * @param onDelete Удалить чат вместе с его историей и сессией.
+ * @param serviceMode Показывать ли вместо локальных чатов чаты приватного сервиса:
+ *        в этом режиме источник истины по чатам — сервис, и список у него свой.
+ * @param serviceChats Чаты сервиса из `GET /api/chats`, свежие сверху.
+ * @param serviceChatsLoaded Прочитан ли список чатов сервиса: до этого панель пуста,
+ *        а не «чатов нет».
+ * @param serviceChatsError Причина, по которой список сервиса не прочитался; null — отказа не было.
+ * @param onServiceOpen Открыть чат сервиса по идентификатору: так открывается общий
+ *        разговор клиентов с ключом.
+ * @param onServiceNew Завести чат на сервисе: прошлый чат для сводки выберет он сам.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,8 +79,21 @@ fun ChatsScreen(
     onOpen: (String) -> Unit,
     onNew: () -> Unit,
     onDelete: (String) -> Unit,
+    serviceMode: Boolean = false,
+    serviceChats: ServiceChatList = ServiceChatList(),
+    serviceChatsLoaded: Boolean = false,
+    serviceChatsError: String? = null,
+    onServiceOpen: (String) -> Unit = {},
+    onServiceNew: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    // Режим сервиса показывает другой список, поэтому и заголовок с подписью у него свои:
+    // «своя сессия агента» про чаты сервиса неверно — они общие у всех клиентов с ключом
+    val subtitle = if (serviceMode) {
+        "Чаты приватного сервиса: общий разговор у клиентов с ключом"
+    } else {
+        "У каждого чата своя сессия агента"
+    }
     // Чат, у которого подтверждают удаление: удаление необратимо, спрашиваем
     var pendingDelete by remember { mutableStateOf<Chat?>(null) }
     // Диалоги человека: закреплённые чаты ведёт приложение, и в этом списке их нет
@@ -82,7 +111,7 @@ fun ChatsScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "У каждого чата своя сессия агента",
+                            text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -90,8 +119,9 @@ fun ChatsScreen(
                 },
                 actions = {
                     // Кнопка названа словом, а не только знаком: один значок в шапке
-                    // читался как украшение, и найти создание чата по нему было нельзя
-                    TextButton(onClick = onNew) {
+                    // читался как украшение, и найти создание чата по нему было нельзя.
+                    // В режиме сервиса она заводит чат на сервисе: список-то его
+                    TextButton(onClick = if (serviceMode) onServiceNew else onNew) {
                         PlusIcon(dimension = 16.dp)
                         Spacer(Modifier.width(6.dp))
                         Text("Новый чат", style = MaterialTheme.typography.labelLarge)
@@ -110,6 +140,16 @@ fun ChatsScreen(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             when {
+                // В режиме «Сервис» панель показывает чаты сервиса, а не локальные:
+                // источник истины по ним — сервис, и список читается из `/api/chats`
+                serviceMode -> ServiceChatsPane(
+                    chats = serviceChats,
+                    loaded = serviceChatsLoaded,
+                    error = serviceChatsError,
+                    onOpen = onServiceOpen,
+                    modifier = Modifier.fillMaxSize()
+                )
+
                 // Список ещё читается из БД — пустой экран лучше мигания «нет чатов»
                 !loaded -> Unit
 
@@ -164,6 +204,140 @@ fun ChatsScreen(
             }
         )
     }
+}
+
+/**
+ * Список чатов сервиса: он приходит из `GET /api/chats`, а не из БД устройства.
+ *
+ * Удаления здесь нет намеренно: чат на сервисе общий у нескольких клиентов, и кнопка
+ * «удалить» в списке стёрла бы разговор не только у того, кто на неё нажал. Пока список
+ * не прочитан, панель пуста: показать «чатов нет» до ответа сервиса значило бы соврать.
+ *
+ * @param chats Список чатов сервиса: чаты и их число в ответе.
+ * @param loaded Прочитан ли список: до этого показывать нечего.
+ * @param error Причина, по которой список не прочитался; null — отказа не было.
+ * @param onOpen Открыть чат сервиса по идентификатору.
+ */
+@Composable
+private fun ServiceChatsPane(
+    chats: ServiceChatList,
+    loaded: Boolean,
+    error: String?,
+    onOpen: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (!loaded) return
+
+    if (chats.chats.isEmpty()) {
+        // Пустой список и отказ чтения — разные состояния: без причины «чатов нет»
+        // на молчащем сервисе читалось бы как «разговоров не было»
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text(
+                text = if (error != null) {
+                    "Чаты сервиса не прочитаны: $error"
+                } else {
+                    "На сервисе пока нет чатов.\n" +
+                        "Начните новый — кнопка «Новый чат» в правом верхнем углу."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (error != null) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(32.dp)
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = modifier,
+        contentPadding = PaddingValues(vertical = 8.dp)
+    ) {
+        item {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                // Число берём из ответа, а не из длины списка: в контракте `count` — сколько
+                // чатов отдано (не всего в базе), и клиент показывает именно это
+                Text(
+                    text = "Чатов отдано: ${chats.count}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // Отказ чтения не стирает прочитанное: список мог не обновиться, и причина
+                // стоит рядом с ним, а не вместо него
+                error?.let {
+                    Text(
+                        text = "Список не обновлён: $it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+        items(chats.chats, key = { it.chatId }) { chat ->
+            ServiceChatRow(chat = chat, onOpen = { onOpen(chat.chatId) })
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+        }
+    }
+}
+
+/**
+ * Строка списка чатов сервиса: заголовок, число сообщений, когда писали последний раз
+ * и сводка прошлого чата, если она есть.
+ *
+ * Сводка показана тут же, в списке: по ней видно, о чём был предыдущий разговор, не открывая
+ * его, — а именно ради этого чат на сервисе и заводили со сводкой.
+ */
+@Composable
+private fun ServiceChatRow(
+    chat: ServiceChatItem,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpen() }
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text(
+                text = chat.title.ifBlank { "Без названия" },
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${messagesLabel(chat.messages)} · ${lastActivity(chat.updatedAt)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            chat.summary?.takeIf { it.isNotBlank() }?.let { summary ->
+                Text(
+                    text = "Сводка прошлого чата: $summary",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/** «1 сообщение», «3 сообщения», «12 сообщений» — по правилам русского языка. */
+private fun messagesLabel(count: Int): String = when {
+    count % 10 == 1 && count % 100 != 11 -> "$count сообщение"
+    count % 10 in 2..4 && count % 100 !in 12..14 -> "$count сообщения"
+    else -> "$count сообщений"
 }
 
 /**

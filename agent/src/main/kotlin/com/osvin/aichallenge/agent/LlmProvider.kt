@@ -218,6 +218,32 @@ class LlmClientFactory(
         OllamaProbe.Failed("Ollama не отвечает по адресу ${config.ollamaUrl}: ${e.message}")
     }
 
+    /**
+     * Та же фабрика с другими настройками генерации: провайдер, HTTP-клиент и журнал те же.
+     *
+     * Нужна сервису (день 30): клиент присылает модель, температуру и окно контекста в запросе,
+     * а транспорт собирается по настройкам запуска. Пересобирать фабрику в маршруте руками
+     * значило бы повторить выбор провайдера в обход единственного места, где он выбирается,
+     * — поэтому меняются только значения, а маршрут `when (provider)` не пишет.
+     *
+     * @param model Модель запроса; `null` или пустое — модель запуска.
+     * @param temperature Температура запроса; `null` — температура запуска.
+     * @param numCtx Окно контекста запроса; `null` — окно запуска.
+     */
+    fun withOverrides(
+        model: String? = null,
+        temperature: Double? = null,
+        numCtx: Int? = null
+    ): LlmClientFactory = LlmClientFactory(
+        config = config.copy(
+            ollamaModel = model?.trim()?.takeIf { it.isNotEmpty() } ?: config.ollamaModel,
+            ollamaTemperature = temperature ?: config.ollamaTemperature,
+            ollamaNumCtx = numCtx ?: config.ollamaNumCtx
+        ),
+        http = http,
+        logger = logger
+    )
+
     companion object {
 
         /** Причина отказа: облачный провайдер без ключа не работает. */

@@ -1,6 +1,8 @@
 package com.osvin.aichallenge.repository
 
 import com.osvin.aichallenge.data.*
+import com.osvin.aichallenge.appAddress
+import com.osvin.aichallenge.copyToClipboard
 import com.osvin.aichallenge.nowMillis
 import com.osvin.aichallenge.platformLog
 import io.ktor.client.HttpClient
@@ -67,6 +69,17 @@ import kotlin.random.Random
  * [forgetInvariant]), а проверку запроса на конфликт делает сервер. Своей копии
  * умолчаний у клиента нет: пока человек не задал правил, снимок с сервера приходит
  * с ними же.
+ *
+ * Режим «Сервис» ([ChatMode.SERVICE]) ведёт не тот разговор, что путь `/v1`: чаты и история
+ * живут в SQLite приватного сервиса (`/api/…`), и клиент их только читает ([loadServiceChats])
+ * и показывает. Поэтому список чатов сервиса — своё состояние, а не список локальных чатов:
+ * у них разные хранилища, и один список на двоих показал бы чаты одной базы среди чатов другой.
+ * Общий чат у нескольких клиентов — это один чат с одним идентификатором: его открывают из
+ * списка или по ссылке ([openServiceChat], [openSharedServiceChat]), а «Обновить»
+ * ([refreshService]) перечитывает его, потому что о чужих записях сервис сам не сообщает.
+ * Сводку прошлого чата строит сервис при заведении чата ([createServiceChat]) и передаёт
+ * её модели сам; клиент показывает её строкой над лентой ([serviceSummary]) и в ленту
+ * не кладёт — это контекст для модели, а не реплика диалога.
  *
  * GitHub ([loadGitHub], [connectGitHub]) — чужой сервис, и клиент его не знает:
  * подключение, список инструментов, доступ к API и сами вызовы держит сервер в отдельном
@@ -236,6 +249,68 @@ class ChatRepository(
     // сравнивают сборки модели, а не ведут диалог (см. [CompareFeed]).
     private val _compare = MutableStateFlow(CompareFeed())
     val compare: StateFlow<CompareFeed> = _compare.asStateFlow()
+
+    // Настройки приватного сервиса `/api/…` (`ChatMode.SERVICE`): адрес, ключ и рамки
+    // запроса. Живут в памяти процесса намеренно — ключ доступа на устройстве не хранится,
+    // и после перезапуска приложения его вводят заново (см. [ServerSettings]). Здесь же,
+    // а не в слое интерфейса: от режима зависит, кому адресован запрос, а это решает
+    // репозиторий, а не экран.
+    private val _serverSettings = MutableStateFlow(ServerSettings())
+    val serverSettings: StateFlow<ServerSettings> = _serverSettings.asStateFlow()
+
+    // Итог проверки подключения к сервису: своё поле, а не общий [isServerOnline] —
+    // путь `/v1` и сервис `/api/…` отказывают по разным причинам, и сводить их в один
+    // флаг значило бы показать «сервер недоступен» там, где на деле не принят ключ.
+    private val _serviceConnection = MutableStateFlow(ConnectionReport())
+    val serviceConnection: StateFlow<ConnectionReport> = _serviceConnection.asStateFlow()
+
+    // Лента сервисного чата: держится отдельно от [messages], потому что это другой
+    // разговор. Сессии сервиса живут в его SQLite, а история локального чата — в БД
+    // устройства; сложи их в один список — и в одном диалоге показались бы реплики
+    // другого, а переключение режима стирало бы историю то там, то здесь.
+    private val _serviceMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val serviceMessages: StateFlow<List<ChatMessage>> = _serviceMessages.asStateFlow()
+
+    // Идентификатор открытой сессии сервиса; null — сессии ещё нет. Хранится в памяти:
+    // сессию ведёт сервис, и второй её копии на устройстве не нужно — после перезапуска
+    // приложения сервисная переписка начинается заново, как и настройки к ней.
+    private val _serviceChatId = MutableStateFlow<String?>(null)
+    val serviceChatId: StateFlow<String?> = _serviceChatId.asStateFlow()
+
+    // Заголовок открытой сессии сервиса: его называет ответ сервиса, поэтому в шапке
+    // стоит он, а не заголовок локального чата, который открыт в другой панели.
+    private val _serviceChatTitle = MutableStateFlow<String?>(null)
+    val serviceChatTitle: StateFlow<String?> = _serviceChatTitle.asStateFlow()
+
+    // Чаты сервиса для боковой панели (`GET /api/chats`). Источник истины по ним — сервис:
+    // своего списка чатов у режима «Сервис» нет, и показывать вместо него локальные
+    // значило бы выдавать БД устройства за разговоры, которых на сервисе нет.
+    private val _serviceChats = MutableStateFlow(ServiceChatList())
+    val serviceChats: StateFlow<ServiceChatList> = _serviceChats.asStateFlow()
+
+    // Признак того, что список чатов сервиса уже читали: до этого панель пуста, а не «чатов нет».
+    private val _serviceChatsLoaded = MutableStateFlow(false)
+    val serviceChatsLoaded: StateFlow<Boolean> = _serviceChatsLoaded.asStateFlow()
+
+    // Отказ на чтение списка сервисных чатов; null — отказа не было. Это своя ошибка,
+    // а не [state]: список читается и когда никакой чат не открыт, и сбой списка не должен
+    // выглядеть сбоем разговора.
+    private val _serviceChatsError = MutableStateFlow<String?>(null)
+    val serviceChatsError: StateFlow<String?> = _serviceChatsError.asStateFlow()
+
+    // Сводка прошлого чата у открытого сервисного чата и причина, по которой её не построили.
+    // Хранятся отдельно от ленты намеренно: сводка — контекст, подставленный сервисом
+    // в запрос к модели, а не реплика диалога, и в ленту она не попадает (§5).
+    private val _serviceSummary = MutableStateFlow<String?>(null)
+    val serviceSummary: StateFlow<String?> = _serviceSummary.asStateFlow()
+
+    private val _serviceSummaryError = MutableStateFlow<String?>(null)
+    val serviceSummaryError: StateFlow<String?> = _serviceSummaryError.asStateFlow()
+
+    // Вызовы сервиса вынесены в [ServiceClient]: ключ уходит только туда, и только
+    // там живёт разбор его ошибок. Клиент берётся тот же, что у пути `/v1`, — движок
+    // общий, адрес задаёт вызов.
+    private val serviceClient = ServiceClient(client)
 
     /**
      * Проверка доступности сервера.
@@ -579,6 +654,347 @@ class ChatRepository(
             platformLog("agent", "[agent] Сервер недоступен: ${e.message ?: "нет соединения"}")
             _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
         }
+    }
+
+    /**
+     * Сохранение настроек сервиса: адрес, ключ, модель и рамки запроса.
+     *
+     * Смена адреса или ключа сбрасывает сессию сервиса ([_serviceChatId]) и её ленту:
+     * сессия принадлежит тому сервису, на который её завели, и, уведя запрос на другой
+     * адрес или под другой ключ, её пришлось бы разыскивать с чужими правами. Смена
+     * только режима сессию не трогает — переключение туда и обратно не должно терять
+     * разговор. Состояние соединения тоже сбрасывается: с новым адресом и ключом
+     * прежний итог проверки к нему не относится.
+     *
+     * Список чатов сервиса отпускается вместе с сессией и по той же причине: он принадлежит
+     * тому сервису, который его отдал, и показывать чужие чаты под новым адресом значило бы
+     * выдавать один сервис за другой.
+     */
+    fun updateServerSettings(settings: ServerSettings) {
+        val previous = _serverSettings.value
+        _serverSettings.value = settings
+        if (settings.baseUrl != previous.baseUrl || settings.apiKey != previous.apiKey) {
+            forgetServiceChat()
+            forgetServiceChats()
+            _serviceConnection.value = ConnectionReport()
+        }
+    }
+
+    /** Отпустить открытую сессию сервиса, её ленту, заголовок и сводку: она не этого сервиса. */
+    private fun forgetServiceChat() {
+        _serviceChatId.value = null
+        _serviceChatTitle.value = null
+        _serviceMessages.value = emptyList()
+        _serviceSummary.value = null
+        _serviceSummaryError.value = null
+    }
+
+    /** Забыть список чатов сервиса: в локальном режиме и при смене адреса или ключа он не наш. */
+    private fun forgetServiceChats() {
+        _serviceChats.value = ServiceChatList()
+        _serviceChatsError.value = null
+        _serviceChatsLoaded.value = false
+    }
+
+    /**
+     * Проверка подключения к сервису: `GET /api/health` без ключа, затем `GET /api/models` с ним.
+     *
+     * Сначала живость, потом доступ: `/api/health` отвечает без ключа и говорит, поднят
+     * ли сервис и загружена ли модель, — и запрашивать список моделей у лежащего сервиса
+     * было бы незачем. Состояние выбирается по тому, что именно отказало: не принят
+     * ключ — [ServerConnectionState.AUTH_ERROR], служба молчит и 503 — [ServerConnectionState.UNAVAILABLE],
+     * ответила без нужной модели — [ServerConnectionState.MODEL_MISSING]. Список моделей
+     * возвращается в отчёте, чтобы шторка показывала, из чего выбирать.
+     *
+     * Настройки приходят параметром, а не читаются из сохранённых: проверяют то, что человек
+     * видит в шторке сейчас. Иначе набранный, но не сохранённый ключ уходил бы в проверку
+     * пустым, и на верный ключ шторка отвечала бы «Ошибка авторизации» — то есть врала бы
+     * о том, что на экране.
+     */
+    suspend fun checkServiceConnection(settings: ServerSettings): ConnectionReport {
+        _serviceConnection.value = ConnectionReport(ServerConnectionState.CHECKING, "Проверка подключения…")
+        val report = try {
+            val health = serviceClient.health(settings)
+            try {
+                val models = serviceClient.models(settings).map { it.name }
+                if (models.none { it == settings.model }) {
+                    ConnectionReport(
+                        state = ServerConnectionState.MODEL_MISSING,
+                        message = "Модель недоступна: ${settings.model} нет в списке моделей сервиса",
+                        models = models
+                    )
+                } else {
+                    ConnectionReport(
+                        state = ServerConnectionState.CONNECTED,
+                        message = "Подключён: сервис отвечает, модель ${settings.model} доступна",
+                        models = models
+                    )
+                }
+            } catch (e: ServiceApiException) {
+                if (e.code == CODE_UNAUTHORIZED) {
+                    ConnectionReport(ServerConnectionState.AUTH_ERROR, "Ошибка авторизации: ${e.message}")
+                } else {
+                    ConnectionReport(ServerConnectionState.UNAVAILABLE, "Недоступен: ${e.message}")
+                }
+            } catch (e: Exception) {
+                ConnectionReport(ServerConnectionState.UNAVAILABLE, "Недоступен: ${e.message ?: "нет соединения"}")
+            }
+        } catch (e: ServiceApiException) {
+            ConnectionReport(ServerConnectionState.UNAVAILABLE, "Недоступен: ${e.message}")
+        } catch (e: Exception) {
+            ConnectionReport(ServerConnectionState.UNAVAILABLE, "Недоступен: ${e.message ?: "нет соединения"}")
+        }
+        _serviceConnection.value = report
+        return report
+    }
+
+    /**
+     * Заведение сессии сервиса: `POST /api/chats`.
+     *
+     * Лента очищается: новая сессия — новый разговор, и показывать в ней ходы прошлой
+     * значило бы показывать историю, которой у этой сессии нет. Заголовок и сводку
+     * называет ответ сервиса ([applyServiceChat]): прошлый чат сервис выбирает сам,
+     * поэтому и то, что из него свернули, знает только он. null — сервис отказал;
+     * причина уже выставлена в [state] тем же механизмом, что и отказ на ход.
+     */
+    suspend fun createServiceChat(): String? {
+        _state.value = ChatUiState.Loading
+        return try {
+            val created = serviceClient.createChat(_serverSettings.value, title = null)
+            _serviceChatId.value = created.chatId
+            _serviceMessages.value = emptyList()
+            applyServiceChat(created)
+            _state.value = ChatUiState.Idle
+            created.chatId
+        } catch (e: ServiceApiException) {
+            applyServiceError(e)
+            null
+        } catch (e: Exception) {
+            _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
+            null
+        }
+    }
+
+    /**
+     * Заголовок заведённой сессии и то, что сервис сказал про сводку её прошлого чата (§1.2).
+     *
+     * Одним местом на оба пути заведения — по кнопке и на повторной попытке хода: сводка
+     * приходит тем же ответом, а пустые строки не сохраняются, чтобы «Сводка прошлого чата: »
+     * без текста не появлялась в ленте (§5).
+     */
+    private fun applyServiceChat(created: ServiceChatCreated) {
+        _serviceChatTitle.value = created.title.takeIf { it.isNotBlank() }
+        _serviceSummary.value = created.summary?.takeIf { it.isNotBlank() }
+        _serviceSummaryError.value = created.summaryError?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Открытие чата сервиса по идентификатору: `GET /api/chats/{id}` и ход в него же (§5).
+     *
+     * Так открывают и чат из списка, и чат из ссылки: идентификатор у сервисного чата один
+     * на всех клиентов с ключом, поэтому открыть его — это и есть показать общий разговор.
+     * Прошлый разговор отпускается до чтения: держать чужую ленту, сводку и заголовок под
+     * новым идентификатором значило бы показать один чат под именем другого.
+     */
+    suspend fun openServiceChat(chatId: String) {
+        forgetServiceChat()
+        _serviceChatId.value = chatId
+        loadServiceHistory()
+    }
+
+    /**
+     * Чат из ссылки (`?chat=<id>`): режим переводится в «Сервис» и чат открывается (§5).
+     *
+     * Ссылкой делятся сервисным чатом, поэтому и открывать её нужно там, где он живёт:
+     * оставшись в локальном режиме, клиент показал бы пустой локальный чат с тем же
+     * идентификатором, и разговор не нашёлся бы. Ключ при этом вводят заново — он живёт
+     * только в памяти ([ServerSettings]) и после перезапуска его нет ни у одного клиента.
+     */
+    suspend fun openSharedServiceChat(chatId: String) {
+        if (_serverSettings.value.mode != ChatMode.SERVICE) {
+            _serverSettings.value = _serverSettings.value.copy(mode = ChatMode.SERVICE)
+        }
+        openServiceChat(chatId)
+    }
+
+    /**
+     * Список чатов сервиса для боковой панели: `GET /api/chats` (§5).
+     *
+     * В локальном режиме запрос не делается вовсе: панель показывает локальные чаты,
+     * и спрашивать сервис, которого в этом режиме не касаются, значило бы носить ключ
+     * туда, где он не нужен. Список принадлежит тому сервису, который его отдал, поэтому
+     * при смене адреса или ключа он отпускается ([updateServerSettings]).
+     *
+     * Отказ чтения не стирает прочитанное: показать «чатов нет» там, где список уже был,
+     * значило бы соврать — причина остаётся строкой рядом со снимком ([serviceChatsError]).
+     */
+    suspend fun loadServiceChats() {
+        if (_serverSettings.value.mode != ChatMode.SERVICE) {
+            forgetServiceChats()
+            return
+        }
+        try {
+            _serviceChats.value = serviceClient.chats(_serverSettings.value)
+            _serviceChatsError.value = null
+        } catch (e: ServiceApiException) {
+            _serviceChatsError.value = serviceErrorText(e)
+        } catch (e: Exception) {
+            _serviceChatsError.value = e.message ?: "Сетевая ошибка"
+        }
+        // Прочитанным список считается и после отказа: иначе панель мигала бы пустотой
+        // и после ответа сервиса — а причина отказа уже стоит рядом строкой
+        _serviceChatsLoaded.value = true
+    }
+
+    /**
+     * «Обновить» у ленты сервиса: перечитать список чатов и историю открытого чата (§5).
+     *
+     * Общий чат у нескольких клиентов — это один чат на сервисе, и о чужих записях сервис
+     * сам не сообщает: без перечитывания лента осталась бы снимком момента открытия.
+     */
+    suspend fun refreshService() {
+        loadServiceChats()
+        loadServiceHistory()
+    }
+
+    /**
+     * Ссылка на открытый чат сервиса для «Поделиться» (§5): `<адрес приложения>/?chat=<id>`.
+     *
+     * Адрес приложения знает только браузер ([appAddress]); там, где его нет, остаётся сам
+     * идентификатор — чат по нему открывают из списка. Копирование в буфер пробуем здесь же
+     * и исход возвращаем наружу ([ServiceShareLink]): где буфера нет, ссылку показывают
+     * текстом для выделения. null — открытого чата нет, делиться нечем.
+     */
+    fun shareServiceChat(): ServiceShareLink? {
+        val chatId = _serviceChatId.value?.takeIf { it.isNotBlank() } ?: return null
+        val address = appAddress()
+        val text = if (address != null) "$address/?chat=$chatId" else chatId
+        return ServiceShareLink(text = text, copied = copyToClipboard(text))
+    }
+
+    /**
+     * Ход в сервисном чате: `POST /api/chat` и запись ответа в ленту.
+     *
+     * Сессия заводится сама, если её ещё нет: человек выбирает режим и пишет, а не
+     * отдельно заводит сессию. Если сервис ответил `chat_not_found` — сессию на сервере
+     * удалили, и её поднимают заново с **одной** повторной попыткой; больше одной
+     * намеренно, иначе мёртвая сессия крутила бы запросы в цикле.
+     *
+     * Ошибку показываем существующим механизмом чата ([ChatUiState.Error]), а не своим
+     * состоянием: и отказ сервиса, и ошибка сети должны стоять в ленте там, где читает
+     * человек, — рядом с местом, куда он писал.
+     */
+    suspend fun sendServiceMessage(text: String) {
+        if (text.isBlank()) return
+        val settings = _serverSettings.value
+        try {
+            val chatId = _serviceChatId.value ?: createServiceChat() ?: return
+            // Ожидание ставится после того, как сессия есть: заведение сессии тоже
+            // ход к сервису, но показывать его отдельным ожиданием нечего — человек
+            // ждёт ответа на своё сообщение, а не открытия сессии
+            _state.value = ChatUiState.Loading
+            val response = try {
+                serviceClient.send(settings, chatId, text)
+            } catch (e: ServiceApiException) {
+                if (e.code != CODE_CHAT_NOT_FOUND) throw e
+                // Сессии на сервере больше нет: заводим новую и повторяем ровно один раз.
+                // Сводку и заголовок берём из того же ответа: это уже другая сессия,
+                // и то, что в шапке и строке сводки, должно быть про неё
+                val fresh = serviceClient.createChat(settings, title = null)
+                _serviceChatId.value = fresh.chatId
+                applyServiceChat(fresh)
+                serviceClient.send(settings, fresh.chatId, text)
+            }
+            _serviceMessages.value = _serviceMessages.value +
+                ChatMessage(MessageRole.USER, text) +
+                ChatMessage(MessageRole.ASSISTANT, response.reply)
+            // Имя ответившей модели берём из ответа и в режиме сервиса: сервис мог ответить
+            // своей моделью, а не той, что просили, — и в шапке должно стоять то, кто ответил
+            _answerModel.value = response.model?.takeIf { it.isNotBlank() }
+            _state.value = ChatUiState.Success(response.reply)
+        } catch (e: ServiceApiException) {
+            applyServiceError(e)
+        } catch (e: Exception) {
+            _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
+        }
+    }
+
+    /**
+     * Чтение истории открытой сессии сервиса: `GET /api/chats/{id}`.
+     *
+     * Лента заменяется историей сервиса целиком, а не дополняется: сервер — источник
+     * правды о ней, и добавить прочитанное к тому, что уже на экране, значило бы удвоить
+     * каждый ход после повторного чтения. Оттуда же приходят заголовок и сводка прошлого
+     * чата (§1.3) — сводку в ленту не кладём: это контекст для модели, а не реплика (§5).
+     * Причина отказа построения сводки остаётся прежней: история её не несёт, и обнулять
+     * сказанное при создании чата значило бы стереть причину, о которой человек уже знает.
+     */
+    suspend fun loadServiceHistory() {
+        val chatId = _serviceChatId.value ?: return
+        try {
+            val history = serviceClient.history(_serverSettings.value, chatId)
+            _serviceMessages.value = history.messages.map { stored ->
+                ChatMessage(roleFrom(stored.role), stored.content)
+            }
+            _serviceChatTitle.value = history.title.takeIf { it.isNotBlank() }
+            _serviceSummary.value = history.summary?.takeIf { it.isNotBlank() }
+        } catch (e: ServiceApiException) {
+            applyServiceError(e)
+        } catch (e: Exception) {
+            _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
+        }
+    }
+
+    /**
+     * Удаление сессии сервиса: `DELETE /api/chats/{id}`.
+     *
+     * Сессия и лента отпускаются только после успеха: если сервис отказал, ссылка
+     * на сессию остаётся — иначе разговор был бы потерян на клиенте, но жив на сервере.
+     */
+    suspend fun deleteServiceChat() {
+        val chatId = _serviceChatId.value ?: return
+        try {
+            serviceClient.deleteChat(_serverSettings.value, chatId)
+            forgetServiceChat()
+        } catch (e: ServiceApiException) {
+            applyServiceError(e)
+        } catch (e: Exception) {
+            _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
+        }
+    }
+
+    /**
+     * Отказ сервиса — в состояние ошибки чата.
+     *
+     * Текст берётся у сервиса (`message`) и дополняется `Retry-After`, если он есть:
+     * «повторите через N с» человеку нужнее кода 429. `unauthorized` отдельно переводит
+     * состояние соединения в [ServerConnectionState.AUTH_ERROR]: ключ мог протухнуть
+     * посреди работы, и это должно быть видно в шторке, а не только строкой в ленте.
+     * В лог уходит код, а не текст: текст может нести данные пользователя.
+     */
+    private fun applyServiceError(e: ServiceApiException) {
+        _state.value = ChatUiState.Error(serviceErrorText(e))
+    }
+
+    /**
+     * Отказ сервиса словами для человека: сообщение сервиса и срок повторения, если он назван.
+     *
+     * Отдельно от [applyServiceError], потому что отказ видят не только в ленте чата:
+     * список чатов сервиса показывает причину рядом с собой ([serviceChatsError]), и вторая
+     * копия «повторите через N с» разошлась бы с первой. Побочный перевод состояния
+     * соединения — тот же, что и у отказа на ход: `unauthorized` виден в шторке сервиса,
+     * каким бы запросом ключ ни отвергли.
+     */
+    private fun serviceErrorText(e: ServiceApiException): String {
+        val retry = e.retryAfterSeconds?.let { ". Повторите через $it с" }.orEmpty()
+        if (e.code == CODE_UNAUTHORIZED) {
+            _serviceConnection.value = ConnectionReport(
+                state = ServerConnectionState.AUTH_ERROR,
+                message = "Ошибка авторизации: ${e.message}"
+            )
+        }
+        platformLog("service", "отказ ${e.code}")
+        return e.message + retry
     }
 
     /**
@@ -1589,6 +2005,15 @@ class ChatRepository(
         ContextStrategy.ofWire(strategy) ?: ContextStrategy.MEMORY
 
     /**
+     * Роль сообщения из истории сервиса. Неизвестное значение — ответ ассистента:
+     * сервис пишет в историю только реплики диалога (`user`/`assistant`), системы
+     * среди них не бывает, и показать незнакомое как реплику человека значило бы
+     * приписать человеку слова, которых он не писал.
+     */
+    private fun roleFrom(role: String): MessageRole =
+        MessageRole.entries.firstOrNull { it.wire == role } ?: MessageRole.ASSISTANT
+
+    /**
      * Заголовок чата — начало первого сообщения пользователя.
      */
     private fun titleFrom(message: String): String {
@@ -1609,6 +2034,19 @@ class ChatRepository(
     private companion object {
         /** Заголовок чата до первого сообщения. */
         const val NEW_CHAT_TITLE = "Новый чат"
+
+        /**
+         * Код отказа сервиса «ключ не принят»: переводит состояние соединения
+         * в ошибку авторизации, а не в «недоступен».
+         */
+        const val CODE_UNAUTHORIZED = "unauthorized"
+
+        /**
+         * Код отказа сервиса «такой сессии нет»: на ход в удалённую сессию сервис
+         * отвечает им, и это единственный отказ, который клиент повторяет — заведя
+         * сессию заново.
+         */
+        const val CODE_CHAT_NOT_FOUND = "chat_not_found"
 
         /**
          * Имя модели в записи лога, когда ответ его не назвал.

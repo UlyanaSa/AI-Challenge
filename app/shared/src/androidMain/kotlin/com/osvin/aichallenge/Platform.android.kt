@@ -13,3 +13,19 @@ actual fun serverBaseUrl(): String = "http://10.0.2.2:8080"
 
 /** На Android время epoch дают системные часы JVM. */
 actual fun nowMillis(): Long = System.currentTimeMillis()
+
+/**
+ * Своего адреса у Android-приложения нет: его запускают не по ссылке, и собирать
+ * ссылку на чат не из чего — источник истины по чатам открывают по идентификатору.
+ */
+actual fun appAddress(): String? = null
+
+/** Адресных параметров у Android-приложения нет: `?chat=<id>` приходит только браузеру. */
+actual fun openedChatId(): String? = null
+
+/**
+ * Буфера обмена здесь нет: Android отдаёт его через `Context`, а общий код его не видит
+ * (ни одного держателя контекста в слое репозитория нет намеренно). Ссылку поэтому
+ * показывают текстом, который можно выделить.
+ */
+actual fun copyToClipboard(text: String): Boolean = false

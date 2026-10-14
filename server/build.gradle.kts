@@ -40,6 +40,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.dotenv.kotlin)
     implementation(libs.logback)
+    // Хранилище сессий сервиса: тот же драйвер SQLite, что у службы курсов. Явно, а не
+    // транзитивно через её `implementation`: сервис открывает базу сам, и его сборка
+    // не должна зависеть от того, что соседний модуль не сузит свои зависимости.
+    implementation(libs.sqlite.jdbc)
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.ktor.server.test.host)

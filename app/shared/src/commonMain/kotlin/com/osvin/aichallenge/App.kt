@@ -12,6 +12,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,8 +25,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.osvin.aichallenge.data.Chat
+import com.osvin.aichallenge.data.ChatMode
 import com.osvin.aichallenge.data.ChatStore
 import com.osvin.aichallenge.data.InMemoryChatStore
+import com.osvin.aichallenge.data.ServiceChatList
 import com.osvin.aichallenge.repository.ChatRepository
 
 /**
@@ -38,6 +41,11 @@ import com.osvin.aichallenge.repository.ChatRepository
  * поэтому экраны по-прежнему сменяют друг друга, а из чата возвращает стрелка.
  * Порог [WIDE_WIDTH] измеряется в dp доступной ширины, а не в пикселях окна, поэтому
  * на экране с высокой плотностью панели не схлопываются.
+ *
+ * Режим «Сервис» меняет не раскладку, а содержимое панелей: в списке — чаты приватного
+ * сервиса (`GET /api/chats`), в ленте — разговор выбранного сервисного чата. Читается
+ * список при заходе в режим, а чат из адреса страницы (`?chat=<id>`) открывается сразу
+ * при старте: этим и работает шаринг ссылкой — чат на сервисе один на всех клиентов с ключом.
  *
  * @param store Хранилище чатов. Android подставляет реализацию на Room, поэтому
  * чаты, их истории и сессии агента живут в БД устройства до удаления чата;
@@ -58,6 +66,28 @@ fun App(store: ChatStore = InMemoryChatStore()) {
     val activeChat by viewModel.activeChat.collectAsStateWithLifecycle()
     val chatsLoaded by viewModel.chatsLoaded.collectAsStateWithLifecycle()
 
+    // Список чатов сервиса: в режиме «Сервис» боковая панель показывает их, а не локальные, —
+    // источник истины по ним сервис, и живут они в его SQLite, а не в БД устройства
+    val serverSettings by viewModel.serverSettings.collectAsStateWithLifecycle()
+    val serviceMode = serverSettings.mode == ChatMode.SERVICE
+    val serviceChats by viewModel.serviceChats.collectAsStateWithLifecycle()
+    val serviceChatsLoaded by viewModel.serviceChatsLoaded.collectAsStateWithLifecycle()
+    val serviceChatsError by viewModel.serviceChatsError.collectAsStateWithLifecycle()
+
+    // Список читается при заходе в режим «Сервис»: в локальном режиме запрос не делается
+    // вовсе — стоит ли спрашивать сервис, решает репозиторий, а экран только просит прочитать
+    LaunchedEffect(serviceMode) {
+        if (serviceMode) viewModel.loadServiceChats()
+    }
+
+    // Чат из адреса (`?chat=<id>`): по ссылке второго клиента открывается тот же сервисный
+    // чат, и режим переводится в «Сервис» — в локальном его не нашлось бы. Читается один раз
+    // при старте: адрес страницы дальше не меняется
+    val sharedChatId = remember { openedChatId() }
+    LaunchedEffect(sharedChatId) {
+        if (sharedChatId != null) viewModel.openSharedServiceChat(sharedChatId)
+    }
+
     // Номер экрана нужен только узкой раскладке: на широкой оба экрана видно сразу
     var screen by remember { mutableStateOf(Screen.Chats) }
 
@@ -68,7 +98,11 @@ fun App(store: ChatStore = InMemoryChatStore()) {
                     viewModel = viewModel,
                     chats = chats,
                     chatsLoaded = chatsLoaded,
-                    activeChat = activeChat
+                    activeChat = activeChat,
+                    serviceMode = serviceMode,
+                    serviceChats = serviceChats,
+                    serviceChatsLoaded = serviceChatsLoaded,
+                    serviceChatsError = serviceChatsError
                 )
             } else {
                 when (screen) {
@@ -86,7 +120,21 @@ fun App(store: ChatStore = InMemoryChatStore()) {
                             viewModel.createChat()
                             screen = Screen.Chat
                         },
-                        onDelete = { id -> viewModel.deleteChat(id) }
+                        onDelete = { id -> viewModel.deleteChat(id) },
+                        // В режиме «Сервис» список и создание чата — сервисные: чат заводится
+                        // на сервисе и открывается по его идентификатору
+                        serviceMode = serviceMode,
+                        serviceChats = serviceChats,
+                        serviceChatsLoaded = serviceChatsLoaded,
+                        serviceChatsError = serviceChatsError,
+                        onServiceOpen = { id ->
+                            viewModel.openServiceChat(id)
+                            screen = Screen.Chat
+                        },
+                        onServiceNew = {
+                            viewModel.createServiceChat()
+                            screen = Screen.Chat
+                        }
                     )
 
                     // Переход в чат сразу после выбора: сообщения поднимаются из БД
@@ -96,7 +144,8 @@ fun App(store: ChatStore = InMemoryChatStore()) {
                         title = activeChat?.title,
                         onBack = { screen = Screen.Chats },
                         onNewChat = {
-                            viewModel.createChat()
+                            // Кнопка создания ведёт туда же, где живут чаты открытого режима
+                            if (serviceMode) viewModel.createServiceChat() else viewModel.createChat()
                             screen = Screen.Chat
                         }
                     )
@@ -117,13 +166,23 @@ fun App(store: ChatStore = InMemoryChatStore()) {
  * @param chats Сохранённые чаты для левой панели.
  * @param chatsLoaded Загружен ли список из БД.
  * @param activeChat Открытый чат; null — чат ещё не выбран, и правая панель пуста.
+ * @param serviceMode Открыт ли режим «Сервис»: тогда в левой панели чаты сервиса, а в правой
+ *        лента сервисного чата — она показывается и без локального активного чата, потому
+ *        что сервисный чат адресуется собственным идентификатором.
+ * @param serviceChats Чаты сервиса из `GET /api/chats` для левой панели.
+ * @param serviceChatsLoaded Прочитан ли список чатов сервиса.
+ * @param serviceChatsError Причина, по которой список сервиса не прочитался; null — отказа не было.
  */
 @Composable
 private fun WideApp(
     viewModel: ChatViewModel,
     chats: List<Chat>,
     chatsLoaded: Boolean,
-    activeChat: Chat?
+    activeChat: Chat?,
+    serviceMode: Boolean,
+    serviceChats: ServiceChatList,
+    serviceChatsLoaded: Boolean,
+    serviceChatsError: String?
 ) {
     Row(modifier = Modifier.fillMaxSize()) {
         // Список отделён от диалога и положен на поверхность: две области страницы
@@ -139,16 +198,24 @@ private fun WideApp(
                 loaded = chatsLoaded,
                 onOpen = { id -> viewModel.openChat(id) },
                 onNew = { viewModel.createChat() },
-                onDelete = { id -> viewModel.deleteChat(id) }
+                onDelete = { id -> viewModel.deleteChat(id) },
+                serviceMode = serviceMode,
+                serviceChats = serviceChats,
+                serviceChatsLoaded = serviceChatsLoaded,
+                serviceChatsError = serviceChatsError,
+                onServiceOpen = { id -> viewModel.openServiceChat(id) },
+                onServiceNew = { viewModel.createServiceChat() }
             )
         }
         VerticalDivider()
 
         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            if (activeChat != null) {
+            // В режиме «Сервис» лента показывается и без локального чата: сервисный чат
+            // открывается своим идентификатором, и в списке локальных ему места нет
+            if (serviceMode || activeChat != null) {
                 ChatScreen(
                     viewModel = viewModel,
-                    title = activeChat.title,
+                    title = activeChat?.title,
                     // Возврата и второй кнопки создания чата в шапке нет: список
                     // с кнопкой «Новый чат» стоит рядом и остаётся на виду
                     onBack = {},

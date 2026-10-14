@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.sp
  * @param onNewChat Создание нового чата и переход в него.
  * @param onInvariants Открытие шторки инвариантов проекта.
  * @param onProfile Открытие шторки профиля пользователя.
+ * @param onServer Открытие шторки настроек приватного сервиса: адрес, ключ, модель,
+ *        рамки запроса и переключатель режима чата.
  * @param showBack Показывать ли возврат к списку: на узком экране список — отдельный
  *        экран, и без возврата из чата не выйти; на широком список стоит рядом,
  *        и стрелка возврата не нужна.
@@ -38,7 +40,15 @@ import androidx.compose.ui.unit.sp
  *        есть в списке чатов, и вторая кнопка на той же странице повторяла бы её.
  * @param compareMode Включено ли сравнение сборок модели: под заголовком тогда стоит
  *        строка о сравнении, а не имя одной ответившей модели.
+ * @param showCompare Показывать ли кнопку сравнения сборок: в режиме приватного сервиса
+ *        её нет — сравнение относится к пути `/v1`, а не к сервисной сессии.
  * @param onToggleCompare Включение и выключение сравнения сборок.
+ * @param serviceMode Открыт ли чат приватного сервиса: его лента обновляется и делится
+ *        ссылкой, а не сравнивается по сборкам — чат живёт на сервисе и общий у клиентов.
+ * @param onRefresh Перечитывание списка чатов сервиса и истории открытого: так появляется
+ *        написанное другим клиентом — сервис о чужих записях сам не сообщает.
+ * @param onShare Показ и копирование ссылки на открытый чат сервиса: по ней второй клиент
+ *        с ключом открывает тот же разговор.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,14 +58,19 @@ fun ChatTopBar(
     model: String? = null,
     provider: String? = null,
     compareMode: Boolean = false,
+    showCompare: Boolean = true,
     onToggleCompare: () -> Unit = {},
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onNewChat: () -> Unit,
     onInvariants: () -> Unit,
     onProfile: () -> Unit,
+    onServer: () -> Unit,
     showBack: Boolean = true,
     showNewChat: Boolean = true,
+    serviceMode: Boolean = false,
+    onRefresh: () -> Unit = {},
+    onShare: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     TopAppBar(
@@ -108,12 +123,27 @@ fun ChatTopBar(
         actions = {
             // Сравнение сборок модели: включается из шапки, потому что это способ смотреть
             // на ответы, а не настройка чата — оно действует до выключения и в ленту
-            // обычного разговора ничего не пишет
-            TextButton(onClick = onToggleCompare) {
-                Text(
-                    text = if (compareMode) "Обычный чат" else "Сравнить сборки",
-                    style = MaterialTheme.typography.labelLarge
-                )
+            // обычного разговора ничего не пишет. В режиме сервиса кнопки нет
+            // ([showCompare]): сервис отвечает одной сессией, а не двумя сборками
+            if (showCompare) {
+                TextButton(onClick = onToggleCompare) {
+                    Text(
+                        text = if (compareMode) "Обычный чат" else "Сравнить сборки",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+            }
+            // Лента сервиса: «Обновить» перечитывает список чатов и историю открытого —
+            // так появляется написанное другим клиентом, потому что сервис о чужих
+            // записях сам не сообщает. «Поделиться» даёт ссылку на тот же чат: по ней
+            // второй клиент с ключом открывает этот разговор
+            if (serviceMode) {
+                TextButton(onClick = onRefresh) {
+                    Text("Обновить", style = MaterialTheme.typography.labelLarge)
+                }
+                TextButton(onClick = onShare) {
+                    Text("Поделиться", style = MaterialTheme.typography.labelLarge)
+                }
             }
             // Инварианты проекта: те же правила уходят в модель с каждым запросом,
             // поэтому правятся они там же, где видно остальные настройки агента
@@ -124,6 +154,11 @@ fun ChatTopBar(
             // запрос к модели; шторка открывается поверх чата, а не занимает ленту
             TextButton(onClick = onProfile) {
                 Text("Профиль", style = MaterialTheme.typography.labelLarge)
+            }
+            // Приватный сервис: его адрес, ключ и режим чата правятся поверх чата —
+            // выбранный режим определяет, куда уходит следующее сообщение
+            TextButton(onClick = onServer) {
+                Text("Сервер", style = MaterialTheme.typography.labelLarge)
             }
             // Новый чат: заводится сразу и открывается — настраивать перед первым
             // сообщением нечего, провайдера и модель выбирает конфигурация сервера

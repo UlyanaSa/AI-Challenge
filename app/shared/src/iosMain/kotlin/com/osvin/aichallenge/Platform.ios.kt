@@ -18,3 +18,19 @@ actual fun serverBaseUrl(): String = "http://localhost:8080"
  * поэтому их умножаем на 1000 и отбрасываем доли миллисекунды.
  */
 actual fun nowMillis(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
+
+/**
+ * Своего адреса у приложения iOS нет: запускают его не по ссылке, и собирать ссылку
+ * на чат не из чего — чат открывают по идентификатору.
+ */
+actual fun appAddress(): String? = null
+
+/** Адресных параметров у приложения iOS нет: `?chat=<id>` приходит только браузеру. */
+actual fun openedChatId(): String? = null
+
+/**
+ * Буфер обмена iOS (`UIPasteboard`) здесь не подключён: iOS-сборка клиента в этой задаче
+ * не собирается (§7), а непроверенная обвязка буфера осталась бы непроверенной и на живом
+ * устройстве. Ссылку поэтому показывают текстом, который можно выделить.
+ */
+actual fun copyToClipboard(text: String): Boolean = false

@@ -1,0 +1,97 @@
+# Запуск приватного AI-сервиса (день 30).
+#
+#   cp .env.example .env   # и вписать SERVICE_API_KEY
+#   docker compose up -d --build
+#
+# Ollama остаётся на macOS и наружу не публикуется: контейнер обращается к ней по
+# `host.docker.internal:11434` (`extra_hosts` превращает это имя в адрес хоста — на Linux
+# такого имени по умолчанию нет). Снаружи виден только API сервиса, и только с ключом.
+
+services:
+  ai-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-challenge-ai-service:1.0.0
+    container_name: ai-service
+
+    # Аварийное завершение процесса поднимает контейнер снова — состояние сервиса лежит
+    # в томе и в Ollama, поэтому повторный запуск продолжает работу, а не начинает её заново.
+    restart: unless-stopped
+
+    environment:
+      # Провайдер и адрес модели — из окружения, а не из кода: тот же сервер на хосте
+      # ходит в Ollama по 127.0.0.1, а в контейнере localhost — это сам контейнер.
+      LLM_PROVIDER: ${LLM_PROVIDER:-local}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:1.7b}
+
+      # Ключ доступа к API. Без него `/api/*` отвечает 503, поэтому запуск без ключа
+      # останавливается сразу с этой строкой, а не поднимает сервис, закрытый для всех.
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?SERVICE_API_KEY не задан: скопируйте .env.example в .env и впишите ключ}
+
+      # Порт слушают и хост, и контейнер: один и тот же номер, чтобы адрес в клиенте
+      # не расходился с адресом публикации.
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: ${SERVICE_PORT:-8080}
+
+      # Ограничения задания: частота на клиента, одновременные генерации, очередь
+      # ожидания, потолки контекста и ответа. Меняются здесь, в коде умолчаний нет вторым слоем.
+      SERVICE_RATE_LIMIT_PER_MINUTE: ${SERVICE_RATE_LIMIT_PER_MINUTE:-10}
+      SERVICE_MAX_CONCURRENT_GENERATIONS: ${SERVICE_MAX_CONCURRENT_GENERATIONS:-2}
+      SERVICE_QUEUE_LIMIT: ${SERVICE_QUEUE_LIMIT:-4}
+      SERVICE_QUEUE_WAIT_MS: ${SERVICE_QUEUE_WAIT_MS:-15000}
+      SERVICE_MAX_CONTEXT_TOKENS: ${SERVICE_MAX_CONTEXT_TOKENS:-4096}
+      SERVICE_MAX_GENERATION_TOKENS: ${SERVICE_MAX_GENERATION_TOKENS:-512}
+
+      # Сводка прошлого чата и потолок списка чатов. Промпт сводки не задаётся здесь:
+      # он многострочный и остаётся умолчанием из кода, как SERVICE_SYSTEM_PROMPT.
+      SERVICE_SUMMARY_ENABLED: ${SERVICE_SUMMARY_ENABLED:-true}
+      SERVICE_SUMMARY_MAX_TOKENS: ${SERVICE_SUMMARY_MAX_TOKENS:-256}
+      SERVICE_SUMMARY_MAX_MESSAGES: ${SERVICE_SUMMARY_MAX_MESSAGES:-40}
+      SERVICE_CHATS_LIST_LIMIT: ${SERVICE_CHATS_LIST_LIMIT:-100}
+
+      # Данные сервиса: каталог тома. Пути заданы здесь, а не в образе, потому что
+      # к ним же привязан том ниже — одно место на настройку и на монтирование.
+      CHAT_DB: /data/service-chats.db
+      MEMORY_FILE: /data/memory.json
+      PROFILE_FILE: /data/profile.json
+      INVARIANT_FILE: /data/invariants.json
+
+      # Память JVM: у контейнера по умолчанию её видно столько, сколько даёт Docker,
+      # а предел резервируется заранее — сервис держит 2 генерации и очередь к ним.
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=75}
+
+    ports:
+      # Сервис доступен по локальной сети: публикуется на всех интерфейсах хоста.
+      # Незащищённый Ollama при этом наружу не выставлен вовсе.
+      - "${SERVICE_PORT:-8080}:${SERVICE_PORT:-8080}"
+
+    extra_hosts:
+      # Linux: без этой строки имени host.docker.internal в контейнере не существует.
+      # На macOS и Windows оно есть и так, но лишняя запись ничего не меняет.
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # История чатов, профиль, память и инварианты: остановка и повторный запуск
+      # контейнера их не трогают (пункты 4.1 и 8.4 задания).
+      - service-data:/data
+
+    healthcheck:
+      # Состояние спрашивается у самого сервиса: `/api/health` отвечает и тогда, когда
+      # ключ ещё не введён человеком, — это проверка живости, а не авторизации.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${SERVICE_PORT:-8080}/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+    # Остановка даёт сервису договорить: незавершённые генерации отменяются, история
+    # не остаётся с вопросом без ответа (запись идёт только после успешного ответа).
+    stop_grace_period: 20s
+
+volumes:
+  # Именованный том, а не каталог хоста: сервис создаёт его сам при первом запуске,
+  # а `docker compose down` историю не удаляет — только `down -v`.
+  service-data:
+    name: ai-service-data

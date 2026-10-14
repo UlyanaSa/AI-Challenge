@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -15,9 +16,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.osvin.aichallenge.data.ChatMode
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.CompareFeed
 import com.osvin.aichallenge.data.InvariantSnapshot
+import com.osvin.aichallenge.data.ServerConnectionState
+import com.osvin.aichallenge.data.ServerSettings
+import com.osvin.aichallenge.data.ServiceShareLink
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
 
@@ -33,7 +38,14 @@ import com.osvin.aichallenge.ui.components.*
  * Профиль пользователя открывается шторкой из верхней панели: он общий для всех чатов
  * и подставляется в каждый запрос к модели. Инварианты — второй: это правила проекта,
  * которые ассистент нарушать не имеет права, и они тоже уходят в каждый запрос, поэтому
- * правятся поверх чата. Шторок памяти агента и подключения к GitHub здесь нет: чат ведёт
+ * правятся поверх чата. Третья шторка — «Сервер»: адрес и ключ приватного сервиса,
+ * модель и рамки запроса и переключатель режима. В режиме сервиса лента показывает
+ * разговор сервисной сессии ([ChatViewModel.serviceMessages]), а не локальный чат:
+ * это разные разговоры с разными хранилищами. Там же над лентой стоит сводка прошлого
+ * чата ([ServiceSummaryNote]) и кнопки «Обновить» и «Поделиться» ([ChatTopBar]): первый
+ * перечитывает список чатов и историю открытого — так показывается написанное другим
+ * клиентом, второй даёт ссылку на тот же чат. Шторок памяти агента и подключения
+ * к GitHub здесь нет: чат ведёт
  * обычную историю диалога ([com.osvin.aichallenge.data.ContextStrategy.FULL]), а инструменты
  * MCP локальному провайдеру не предлагаются.
  *
@@ -63,8 +75,24 @@ fun ChatScreen(
     showBack: Boolean = true,
     showNewChat: Boolean = true
 ) {
-    // Подписка на состояния из ViewModel
-    val messages by viewModel.messages.collectAsStateWithLifecycle()
+    // Настройки сервиса и итог его проверки: от режима зависит, чью ленту показывать
+    // и когда отправка доступна, поэтому они читаются до ленты
+    val serverSettings by viewModel.serverSettings.collectAsStateWithLifecycle()
+    val serviceConnection by viewModel.serviceConnection.collectAsStateWithLifecycle()
+    val serviceMode = serverSettings.mode == ChatMode.SERVICE
+
+    // Открытый чат сервиса: заголовок и сводку прошлого чата называет сервис, поэтому
+    // в режиме «Сервис» шапка и строка над лентой берут их отсюда, а не из локального чата,
+    // который может быть открыт в соседней панели
+    val serviceChatTitle by viewModel.serviceChatTitle.collectAsStateWithLifecycle()
+    val serviceSummary by viewModel.serviceSummary.collectAsStateWithLifecycle()
+    val serviceSummaryError by viewModel.serviceSummaryError.collectAsStateWithLifecycle()
+
+    // Подписка на состояния из ViewModel. В режиме сервиса лента — разговор сервисной
+    // сессии, а не локального чата: у них разные хранилища и разные сессии, и одна
+    // лента на двоих показала бы реплики одного разговора в другом
+    val messages by (if (serviceMode) viewModel.serviceMessages else viewModel.messages)
+        .collectAsStateWithLifecycle()
     // Профиль пользователя: что лежит на сервере и чем закончилось чтение или запись
     val profile by viewModel.profile.collectAsStateWithLifecycle()
     val profileError by viewModel.profileError.collectAsStateWithLifecycle()
@@ -84,6 +112,20 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
+    // Ссылка «Поделиться» и уложилась ли она в буфер обмена: показывается окном, потому
+    // что буфера на платформе может не быть — тогда её копируют выделением текста
+    var shareLink by remember { mutableStateOf<ServiceShareLink?>(null) }
+
+    // Подсказка пустой ленты: у сервисного чата она про сервис, а не про сессию агента
+    // устройства — разговоры у них в разных хранилищах
+    val emptyHint = if (serviceMode) {
+        "Напишите первое сообщение — чат заведётся на приватном сервисе и будет общим " +
+            "у всех клиентов, которых вы позовёте ссылкой."
+    } else {
+        "Напишите первое сообщение — у этого чата своя история и своя сессия агента, " +
+            "отдельная от остальных чатов."
+    }
+
     // Форма добавления инварианта и признак открытой шторки: как и у профиля, они
     // живут на экране, поэтому перерисовка списка сообщений не теряет набранный текст
     var invariantKind by rememberSaveable { mutableStateOf<String?>(null) }
@@ -99,6 +141,23 @@ fun ChatScreen(
     }
     var profileOpen by rememberSaveable { mutableStateOf(false) }
     val profileSheetState = rememberModalBottomSheetState()
+
+    // Черновик настроек сервиса и признак открытой шторки: как и у профиля, живут
+    // на экране, поэтому перерисовка ленты сообщений не теряет набранное
+    var serverDraft by rememberSaveable(stateSaver = SERVER_SETTINGS_SAVER) {
+        mutableStateOf(ServerSettings())
+    }
+    var serverOpen by rememberSaveable { mutableStateOf(false) }
+    val serverSheetState = rememberModalBottomSheetState()
+
+    // Шторка сервиса открывается с сохранёнными настройками, а не с прошлым черновиком:
+    // настройки могли не меняться, но ключ в памяти сессии один, и показывать в поле
+    // что-то кроме него значило бы расходиться с тем, чем подписаны запросы
+    LaunchedEffect(serverOpen, serverSettings) {
+        if (serverOpen) {
+            serverDraft = serverSettings
+        }
+    }
 
     // Шторка открывается с тем, что лежит на сервере, а не с прошлыми правками;
     // профиль мог прийти уже после открытия (медленная сеть) — тогда черновик
@@ -131,19 +190,30 @@ fun ChatScreen(
     Scaffold(
         topBar = {
             ChatTopBar(
-                title = title,
+                // В режиме сервиса заголовок — имя сервисного чата: локальный чат
+                // в соседней панели к этой ленте отношения не имеет
+                title = if (serviceMode) serviceChatTitle else title,
                 isOnline = isOnline,
                 // В сравнении одной модели в шапке нет: отвечают две сборки сразу,
                 // и назвать одну из них значило бы назвать ту, которой ответа не было
                 model = answerModel.takeIf { !compareMode },
                 provider = answerProvider,
                 compareMode = compareMode,
+                // Сравнение сборок — способ посмотреть ответы пути `/v1`, поэтому
+                // в режиме сервиса кнопки нет: вопрос уходит туда, где сравнения не бывает
+                showCompare = !serviceMode,
                 onToggleCompare = { viewModel.toggleCompare() },
+                // Лента сервиса: «Обновить» перечитывает список и историю открытого чата —
+                // так видно написанное другим клиентом; «Поделиться» даёт ссылку на тот же чат
+                serviceMode = serviceMode,
+                onRefresh = { viewModel.refreshService() },
+                onShare = { shareLink = viewModel.shareServiceChat() },
                 onBack = onBack,
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,
                 onInvariants = { invariantsOpen = true },
                 onProfile = { profileOpen = true },
+                onServer = { serverOpen = true },
                 showBack = showBack,
                 showNewChat = showNewChat
             )
@@ -159,11 +229,18 @@ fun ChatScreen(
                 // Ожидание сравнения считается тем же ожиданием: два ответа идут одним
                 // запросом, и второй вопрос, отправленный поверх первого, их перепутал бы
                 isLoading = uiState is ChatUiState.Loading || compare.loading,
-                enabled = isOnline == true
+                // В режиме сервиса отправка открыта только после успешной проверки связи:
+                // без неё нельзя решить, верен ли ключ и есть ли нужная модель, —
+                // и вопрос ушёл бы впустую. На пути `/v1` условие прежнее
+                enabled = if (serviceMode) {
+                    serviceConnection.state == ServerConnectionState.CONNECTED
+                } else {
+                    isOnline == true
+                }
             )
         }
     ) { padding ->
-        if (compareMode) {
+        if (compareMode && !serviceMode) {
             CompareMode(
                 feed = compare,
                 onClear = { viewModel.clearCompare() },
@@ -191,12 +268,22 @@ fun ChatScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Сводка прошлого чата — строкой над лентой, а не сообщением: её подставил
+                // сервис в запрос к модели, и в диалоге её репликой быть не должно (§5)
+                if (serviceMode && (serviceSummary != null || serviceSummaryError != null)) {
+                    item {
+                        ServiceSummaryNote(
+                            summary = serviceSummary,
+                            error = serviceSummaryError
+                        )
+                    }
+                }
+
                 // Пустой чат: подсказка вместо пустого экрана
                 if (messages.isEmpty() && uiState !is ChatUiState.Loading) {
                     item {
                         Text(
-                            text = "Напишите первое сообщение — у этого чата своя история " +
-                                "и своя сессия агента, отдельная от остальных чатов.",
+                            text = emptyHint,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -269,6 +356,102 @@ fun ChatScreen(
             )
         }
     }
+
+    // Шторка сервиса: адрес, ключ и режим чата. Отсюда и проверяют связь —
+    // без успешной проверки отправка в режиме сервиса закрыта, и причина видна здесь же
+    if (serverOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { serverOpen = false },
+            sheetState = serverSheetState
+        ) {
+            ServerSheet(
+                draft = serverDraft,
+                connection = serviceConnection,
+                onDraftChange = { serverDraft = it },
+                onCheck = { viewModel.checkServiceConnection(serverDraft) },
+                onSave = { viewModel.saveServerSettings(serverDraft) }
+            )
+        }
+    }
+
+    // Ссылка на общий чат: её показываем окном, а не только копируем в буфер, потому что
+    // буфера на платформе может не быть — тогда остаётся выделить текст и скопировать
+    // руками, и окно говорит об этом прямо, а не молчит о неудаче
+    shareLink?.let { link ->
+        AlertDialog(
+            onDismissRequest = { shareLink = null },
+            title = { Text("Ссылка на чат") },
+            text = {
+                Column {
+                    Text(
+                        text = if (link.copied) {
+                            "Ссылка скопирована в буфер обмена. Второй клиент с ключом сервиса " +
+                                "откроет по ней этот же чат:"
+                        } else {
+                            "Скопировать в буфер не удалось — выделите ссылку и скопируйте её вручную. " +
+                                "Второй клиент с ключом сервиса откроет по ней этот же чат:"
+                        },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // Текст выделяемый: это и есть запасной путь, когда буфера нет
+                    SelectionContainer {
+                        Text(
+                            text = link.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { shareLink = null }) {
+                    Text("Закрыть")
+                }
+            }
+        )
+    }
+}
+
+/**
+ * Строка сводки прошлого чата над лентой сервисного чата (§5).
+ *
+ * Сводку строит сервис при заведении чата и подставляет её модели; в ленте она стоит
+ * строкой, а не сообщением: репликой диалога она не была, и человеку важно видеть, что
+ * разговор начат не с пустого места. Причина отказа построения показывается отдельно
+ * и цветом ошибки — по ней понятно, почему сводки нет, а чат при этом уже заведён.
+ *
+ * @param summary Текст сводки из ответа сервиса; null — сводки нет.
+ * @param error Причина, по которой сводку не построили; null — отказа не было.
+ */
+@Composable
+private fun ServiceSummaryNote(
+    summary: String?,
+    error: String?,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            summary?.let {
+                Text(
+                    text = "Сводка прошлого чата: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            error?.let {
+                Text(
+                    text = "Сводку прошлого чата построить не удалось: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -324,4 +507,35 @@ private val EMPTY_INVARIANTS = InvariantSnapshot()
 private val USER_PROFILE_SAVER: Saver<UserProfile, Any> = listSaver<UserProfile, String>(
     save = { listOf(it.role, it.stack, it.style, it.format, it.constraints, it.signOff) },
     restore = { UserProfile(it[0], it[1], it[2], it[3], it[4], it[5]) }
+)
+
+/**
+ * Сохранение черновика настроек сервиса между пересозданиями экрана: [ServerSettings] —
+ * обычный объект данных, и `rememberSaveable` его без правила не сохранит. Список строк —
+ * как раз такой сохраняемый набор, поэтому режим и три числа переводятся в текст и обратно;
+ * неразобранное значение возвращается к умолчанию сервиса, а не роняет восстановление.
+ */
+private val SERVER_SETTINGS_SAVER: Saver<ServerSettings, Any> = listSaver<ServerSettings, String>(
+    save = {
+        listOf(
+            it.mode.name,
+            it.baseUrl,
+            it.apiKey,
+            it.model,
+            it.temperature.toString(),
+            it.maxTokens.toString(),
+            it.contextWindow.toString()
+        )
+    },
+    restore = {
+        ServerSettings(
+            mode = if (it[0] == ChatMode.SERVICE.name) ChatMode.SERVICE else ChatMode.CURRENT,
+            baseUrl = it[1],
+            apiKey = it[2],
+            model = it[3],
+            temperature = it[4].toDoubleOrNull() ?: 0.7,
+            maxTokens = it[5].toIntOrNull() ?: 512,
+            contextWindow = it[6].toIntOrNull() ?: 4096
+        )
+    }
 )

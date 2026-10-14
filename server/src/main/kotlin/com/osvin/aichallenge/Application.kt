@@ -37,6 +37,14 @@ import com.osvin.aichallenge.invariants.JsonFileInvariantStore
 import com.osvin.aichallenge.memory.JsonFileMemoryStore
 import com.osvin.aichallenge.models.*
 import com.osvin.aichallenge.profile.JsonFileProfileStore
+import com.osvin.aichallenge.service.ChatSessionStore
+import com.osvin.aichallenge.service.ServiceAuth
+import com.osvin.aichallenge.service.ServiceConfig
+import com.osvin.aichallenge.service.ServiceDeps
+import com.osvin.aichallenge.service.ServiceLimits
+import com.osvin.aichallenge.service.ServiceMetrics
+import com.osvin.aichallenge.service.SqliteChatStore
+import com.osvin.aichallenge.service.serviceApi
 import com.osvin.aichallenge.tuning.Tuning
 import com.osvin.aichallenge.tuning.Tunings
 import com.osvin.aichallenge.models.config.AppConfig
@@ -62,8 +70,6 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
-import io.ktor.server.plugins.ratelimit.RateLimit
-import io.ktor.server.plugins.ratelimit.RateLimitName
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
@@ -74,6 +80,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import java.io.File
+import java.nio.file.Path
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -82,7 +89,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
 
@@ -128,6 +134,27 @@ val llmProviderConfig: LlmProviderConfig = LlmProviderConfig.fromEnv(envFile() +
  * одну ветку маршрута: и чат, и проверка здоровья смотрят на [LlmClientFactory.provider].
  */
 val llmClientFactory = LlmClientFactory(llmProviderConfig, client, AgentLogger.Console)
+
+/**
+ * Настройки приватного AI-сервиса (день 30): адрес, ключи, ограничения и потолки.
+ *
+ * Читаются тем же словарём окружения, что и настройки провайдера, и по той же причине:
+ * переменные запуска важнее `.env`, а имена переменных знает только [ServiceConfig] —
+ * ни маршрут сервиса, ни клиент их не видят. Значения приходят запуском, а не кодом,
+ * потому что один и тот же сервер работает и на хосте, и в контейнере, где порт,
+ * адрес Ollama и ключ доступа задаёт окружение.
+ */
+val serviceConfig: ServiceConfig = ServiceConfig.fromEnv(envFile() + System.getenv())
+
+/**
+ * Хранилище сессий сервиса: история диалогов переживает перезапуск процесса.
+ *
+ * Открывается один раз на процесс, а не на поднятый сервер: тесты поднимают в одной JVM
+ * несколько серверов, и закрытие хранилища на остановке одного ломало бы остальные.
+ * Незавершённых записей при этом не остаётся — каждая запись идёт отдельной транзакцией,
+ * а журнал WAL восстанавливается при следующем открытии.
+ */
+val serviceStore: ChatSessionStore = SqliteChatStore(Path.of(serviceConfig.chatDbPath))
 
 /**
  * Сводки историй диалогов: отдельно от сообщений, по сессии.
@@ -244,8 +271,11 @@ fun main() {
     seedProjectInvariants()
     embeddedServer(
         Netty,
-        port = AppConfig.DEFAULT_PORT,
-        host = AppConfig.DEFAULT_HOST,
+        // Адрес и порт приходят запуском, а не кодом: тот же сервер работает на хосте и
+        // в контейнере, где порт публикации задаёт окружение. Умолчания прежние (8080, 0.0.0.0),
+        // поэтому запуск без переменных ничего не меняет.
+        port = serviceConfig.port,
+        host = serviceConfig.host,
         module = Application::module
     ).start(wait = true)
 }
@@ -391,6 +421,36 @@ fun Application.module(
         ToolServers.REPORT to reportTools.tools()
     )
 
+    // Состояние приватного AI-сервиса (день 30) собирается здесь, а не внутри маршрутов:
+    // место в очереди генераций и счётчики метрик общие на все запросы, поэтому и жить они
+    // должны на уровне приложения — маршрут, создавший их сам, считал бы только свои запросы.
+    // Хранилище сессий приходит извне ([serviceStore]) по той же причине: история диалогов
+    // переживает и запрос, и перезапуск сервера.
+    val serviceLimits = ServiceLimits(
+        rateLimitPerMinute = serviceConfig.rateLimitPerMinute,
+        maxConcurrent = serviceConfig.maxConcurrentGenerations,
+        queueLimit = serviceConfig.queueLimit,
+        queueWaitMillis = serviceConfig.queueWaitMillis
+    )
+    val serviceMetrics = ServiceMetrics(
+        config = serviceConfig,
+        activeGenerations = serviceLimits::activeGenerations,
+        queuedGenerations = serviceLimits::queuedGenerations,
+        sessions = serviceStore::counts
+    )
+    val serviceDeps = ServiceDeps(
+        config = serviceConfig,
+        store = serviceStore,
+        metrics = serviceMetrics,
+        limits = serviceLimits,
+        // Проверка ключа — общая на запросы поверхность: набор ключей и счётчики отказов
+        // не должны собираться заново на каждый запрос.
+        auth = ServiceAuth(serviceConfig.apiKeys),
+        // Транспорт тот же, что у чата страницы: провайдера выбирает запуск, а не маршрут,
+        // поэтому сервис не может отвечать моделью, которой сервер не пользуется.
+        llm = llmClients
+    )
+
     // Поддержка JSON для входящих и исходящих данных
     install(ContentNegotiation) {
         json(Json {
@@ -469,14 +529,16 @@ fun Application.module(
         allowMethod(HttpMethod.Delete)
         allowHeader(HttpHeaders.ContentType)
         allowHeader(HttpHeaders.Authorization)
+        // Ключ сервиса уезжает своим заголовком: без этой строки браузерная страница
+        // (у неё другой источник, чем у сервера, — порт разработки) не пройдёт предварительный
+        // запрос, и «ошибка авторизации» окажется ошибкой CORS.
+        allowHeader(ServiceAuth.HEADER)
     }
 
-    // Ограничение частоты запросов для защиты API
-    install(RateLimit) {
-        register(RateLimitName("chat")) {
-            rateLimiter(limit = 20, refillPeriod = 60.seconds)
-        }
-    }
+    // Ограничение частоты запросов, одновременных генераций и доступ по ключу живут
+    // в поверхности сервиса (`/api/*`, [serviceApi]): там же, где их считают метрики,
+    // и до обращения к модели. Общий плагин частоты здесь не регистрируется: он отвечал
+    // бы на отказ своим телом, а задание требует единого формата ошибки службы.
 
     // Остановка сервера гасит и сервер инструментов: он поднят нашим процессом, поэтому
     // его завершение — наша забота, иначе после остановки приложения в системе остался бы
@@ -491,6 +553,13 @@ fun Application.module(
     }
 
     routing {
+        // Приватный AI-сервис живёт под своим префиксом (`/api`), страница и агент — под
+        // прежним (`/v1`): два способа обращения к одной модели не мешают друг другу, потому
+        // что у сервиса свои сессии, свой ключ и свои ограничения, а прежние маршруты
+        // не знают ни о ключе, ни о лимитах. Клиент переключается между ними настройкой,
+        // а не другой сборкой сервера.
+        serviceApi(serviceDeps)
+
         /**
          * Проверка состояния сервера и провайдера модели.
          *
