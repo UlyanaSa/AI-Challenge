@@ -56,6 +56,11 @@ import kotlin.time.TimeSource
  *        вопрос даёт «Юпитер» в каждом прогоне. Температура клиента при этом не теряется:
  *        её видно в отчёте о токенах, а значение транспорта задаётся конфигурацией
  *        (`OLLAMA_TEMPERATURE`).
+ * @param numCtx Окно контекста в токенах: значение уходит демону полем `num_ctx` на каждый
+ *        запрос. Умолчание демона (4096) транспорт повторяет явно, чтобы поведение не менялось
+ *        от версии Ollama, а оптимизация дня 29 поднимает его вместе с длиной запроса
+ *        (`OLLAMA_NUM_CTX`). Поле транспорта, а не запроса: окно — свойство загруженной модели,
+ *        и два запроса с разными окнами заставили бы демон перезагружать её между вызовами.
  */
 class LocalLlmClient(
     private val model: String = DEFAULT_MODEL,
@@ -64,7 +69,8 @@ class LocalLlmClient(
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
     private val logger: AgentLogger = AgentLogger.Console,
     private val think: Boolean = DEFAULT_THINK,
-    private val temperature: Double = DEFAULT_TEMPERATURE
+    private val temperature: Double = DEFAULT_TEMPERATURE,
+    private val numCtx: Int = DEFAULT_NUM_CTX
 ) : LlmClient {
 
     override suspend fun complete(request: DeepSeekRequest): DeepSeekResponse {
@@ -72,7 +78,14 @@ class LocalLlmClient(
         val response = try {
             http.post("$baseUrl$CHAT_PATH") {
                 contentType(ContentType.Application.Json)
-                setBody(request.toOllama(model, think = think, temperatureOverride = temperature))
+                setBody(
+                    request.toOllama(
+                        model,
+                        think = think,
+                        temperatureOverride = temperature,
+                        numCtx = numCtx
+                    )
+                )
                 timeout { requestTimeoutMillis = timeoutMillis }
             }
         } catch (timeout: HttpRequestTimeoutException) {
@@ -154,6 +167,17 @@ class LocalLlmClient(
          * qwen3:1.7b решает задачу о ста дверях (`10`), без него называет `50`.
          */
         const val DEFAULT_THINK = true
+
+        /**
+         * Окно контекста по умолчанию: `4096` — умолчание демона Ollama.
+         *
+         * Не «сколько влезет» и не максимум модели (40960 у qwen3): окно занимает память
+         * под кэш внимания, и платить её за каждый запрос чата незачем. Значение повторяет
+         * умолчание демона явно — иначе окно менялось бы вместе с версией Ollama, а вместе
+         * с ним молча менялась бы и обрезка длинных запросов. Оптимизация дня 29 поднимает
+         * окно там, где запрос действительно длинный (см. `OLLAMA_NUM_CTX`).
+         */
+        const val DEFAULT_NUM_CTX = 4096
 
         /**
          * Температура по умолчанию для локальной модели: `0`.

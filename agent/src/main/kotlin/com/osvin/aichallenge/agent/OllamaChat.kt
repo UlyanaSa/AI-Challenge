@@ -58,12 +58,19 @@ internal data class OllamaChatRequest(
  *
  * @param temperature Температура генерации.
  * @param numPredict Бюджет ответа в токенах.
+ * @param numCtx Окно контекста: сколько токенов запроса и ответа вместе помещаются в модель.
+ *        Поле уходит явно, потому что умолчание демона (4096) меньше, чем контексты,
+ *        с которыми к нему приходят: у вопроса с историей сообщений и у вопроса с фрагментами
+ *        базы запрос перерастает умолчание, и демон молча обрезает его начало — ответ при этом
+ *        выглядит ответом, хотя вопрос до модели дошёл не весь. Значение задаёт конфигурация
+ *        ([LocalLlmClient.numCtx]).
  * @param stop Стоп-последовательности: пустой список не пишется, иначе поле обещало бы остановку.
  */
 @Serializable
 internal data class OllamaOptions(
     val temperature: Double? = null,
     @SerialName("num_predict") val numPredict: Int? = null,
+    @SerialName("num_ctx") val numCtx: Int? = null,
     val stop: List<String>? = null
 )
 
@@ -138,7 +145,8 @@ private val ollamaJson = Json { ignoreUnknownKeys = true; isLenient = true }
 internal fun DeepSeekRequest.toOllama(
     model: String,
     think: Boolean = false,
-    temperatureOverride: Double? = null
+    temperatureOverride: Double? = null,
+    numCtx: Int? = null
 ): OllamaChatRequest = OllamaChatRequest(
     model = model,
     messages = messages.withToolNames(),
@@ -149,6 +157,7 @@ internal fun DeepSeekRequest.toOllama(
     options = OllamaOptions(
         temperature = temperatureOverride ?: temperature,
         numPredict = maxTokens,
+        numCtx = numCtx,
         stop = stop?.takeIf { it.isNotEmpty() }
     )
 )

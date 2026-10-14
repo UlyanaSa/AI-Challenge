@@ -54,6 +54,7 @@ enum class LlmProvider(val wire: String) {
  * @param ollamaTimeoutMillis Срок одного запроса к Ollama.
  * @param ollamaThink Рассуждать ли локальной модели перед ответом.
  * @param ollamaTemperature Температура генерации локальной модели.
+ * @param ollamaNumCtx Окно контекста локальной модели в токенах.
  */
 data class LlmProviderConfig(
     val provider: LlmProvider = LlmProvider.CLOUD,
@@ -61,7 +62,8 @@ data class LlmProviderConfig(
     val ollamaModel: String = LocalLlmClient.DEFAULT_MODEL,
     val ollamaTimeoutMillis: Long = LocalLlmClient.DEFAULT_TIMEOUT_MILLIS,
     val ollamaThink: Boolean = LocalLlmClient.DEFAULT_THINK,
-    val ollamaTemperature: Double = LocalLlmClient.DEFAULT_TEMPERATURE
+    val ollamaTemperature: Double = LocalLlmClient.DEFAULT_TEMPERATURE,
+    val ollamaNumCtx: Int = LocalLlmClient.DEFAULT_NUM_CTX
 ) {
 
     /**
@@ -93,6 +95,9 @@ data class LlmProviderConfig(
         /** Температура генерации локальной модели. */
         const val ENV_OLLAMA_TEMPERATURE = "OLLAMA_TEMPERATURE"
 
+        /** Окно контекста локальной модели в токенах. */
+        const val ENV_OLLAMA_NUM_CTX = "OLLAMA_NUM_CTX"
+
         /**
          * Настройки из окружения: сначала значение переменной, иначе умолчание.
          *
@@ -118,7 +123,12 @@ data class LlmProviderConfig(
             ollamaThink = env[ENV_OLLAMA_THINK]?.trim()?.lowercase()?.let { thinkFlag(it) }
                 ?: LocalLlmClient.DEFAULT_THINK,
             ollamaTemperature = env[ENV_OLLAMA_TEMPERATURE]?.trim()?.toDoubleOrNull()?.takeIf { it >= 0 }
-                ?: LocalLlmClient.DEFAULT_TEMPERATURE
+                ?: LocalLlmClient.DEFAULT_TEMPERATURE,
+            // Малое окно не отбрасывается как опечатка: урезанное окно — осознанный выбор
+            // для коротких служебных вызовов (проверка правил, извлечение памяти), и запрещать
+            // его значило бы отнять у конфигурации рабочую настройку.
+            ollamaNumCtx = env[ENV_OLLAMA_NUM_CTX]?.trim()?.toIntOrNull()?.takeIf { it > 0 }
+                ?: LocalLlmClient.DEFAULT_NUM_CTX
         )
 
         /** Флаг рассуждения по строке конфигурации; null — значение не распознано. */
@@ -174,7 +184,8 @@ class LlmClientFactory(
             timeoutMillis = config.ollamaTimeoutMillis,
             logger = logger,
             think = config.ollamaThink,
-            temperature = config.ollamaTemperature
+            temperature = config.ollamaTemperature,
+            numCtx = config.ollamaNumCtx
         )
 
         LlmProvider.CLOUD -> DeepSeekClient(

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.osvin.aichallenge.data.Chat
 import com.osvin.aichallenge.data.ChatMessage
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.CompareFeed
 import com.osvin.aichallenge.data.ContextStrategy
 import com.osvin.aichallenge.data.GenerationSettings
 import com.osvin.aichallenge.data.InvariantSnapshot
@@ -73,6 +74,12 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     // активного чата, поэтому настройки живут в репозитории рядом с активным чатом
     val settings: StateFlow<GenerationSettings> = repository.settings
 
+    // Лента сравнения ещё и переключается: два окна отвечают на один вопрос, и их видно
+    // вместо обычной ленты активного чата
+    val compare: StateFlow<CompareFeed> = repository.compare
+    private val _compareMode = MutableStateFlow(false)
+    val compareMode: StateFlow<Boolean> = _compareMode.asStateFlow()
+
     // Признак того, что список сохранённых чатов уже загружен из хранилища
     private val _chatsLoaded = MutableStateFlow(false)
     val chatsLoaded: StateFlow<Boolean> = _chatsLoaded.asStateFlow()
@@ -101,6 +108,9 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
      * Открытие чата из списка: продолжаем его историю и его сессию агента.
      */
     fun openChat(id: String) {
+        // Лента сравнения принадлежит разговору, а не приложению: ходы собраны из истории
+        // этого чата, и в другом чате они были бы ответами на вопросы, которых там не было
+        repository.clearCompare()
         viewModelScope.launch {
             repository.openChat(id)
         }
@@ -134,8 +144,39 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
      */
     fun sendMessage(text: String) {
         viewModelScope.launch {
-            repository.sendMessage(text, settings.value)
+            // Режим сравнения меняет не то, что видно, а то, кому задаётся вопрос:
+            // одна сборка модели отвечает или обе сразу. Развилки в экране нет намеренно —
+            // иначе кнопка отправки и подсказка о состоянии разошлись бы с тем, что уходит.
+            if (_compareMode.value) {
+                repository.sendCompare(text, settings.value)
+            } else {
+                repository.sendMessage(text, settings.value)
+            }
         }
+    }
+
+    /**
+     * Включение и выключение сравнения сборок модели.
+     *
+     * Режим живёт в модели представления, а не в хранилище чата: это способ посмотреть
+     * на ответы, а не свойство диалога, — включённое сравнение не должно переживать
+     * перезапуск приложения и менять обычную ленту чата.
+     *
+     * При включении читается описание панелей: до первого вопроса видно, какие сборки
+     * отвечают и чем они отличаются. Отказ чтения сравнение не выключает — вопрос можно
+     * задать, и окна подпишутся заголовками из ответов.
+     */
+    fun toggleCompare() {
+        val enabled = !_compareMode.value
+        _compareMode.value = enabled
+        if (enabled) {
+            viewModelScope.launch { repository.loadCompare() }
+        }
+    }
+
+    /** Очистка ленты сравнения: следующий вопрос задаётся окнам заново, без истории. */
+    fun clearCompare() {
+        repository.clearCompare()
     }
 
     /**

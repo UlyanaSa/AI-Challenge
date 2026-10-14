@@ -36,6 +36,9 @@ import androidx.compose.ui.unit.sp
  *        и стрелка возврата не нужна.
  * @param showNewChat Показывать ли создание чата в шапке: на широком экране кнопка
  *        есть в списке чатов, и вторая кнопка на той же странице повторяла бы её.
+ * @param compareMode Включено ли сравнение сборок модели: под заголовком тогда стоит
+ *        строка о сравнении, а не имя одной ответившей модели.
+ * @param onToggleCompare Включение и выключение сравнения сборок.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,6 +47,8 @@ fun ChatTopBar(
     isOnline: Boolean?,
     model: String? = null,
     provider: String? = null,
+    compareMode: Boolean = false,
+    onToggleCompare: () -> Unit = {},
     onBack: () -> Unit,
     onTitleClick: () -> Unit,
     onNewChat: () -> Unit,
@@ -88,9 +93,28 @@ fun ChatTopBar(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                // В сравнении отвечают две сборки сразу, и строка называет не модель,
+                // а то, что их две: имя каждой стоит над своим окном
+                if (compareMode) {
+                    Text(
+                        text = "сравнение двух сборок локальной модели",
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         },
         actions = {
+            // Сравнение сборок модели: включается из шапки, потому что это способ смотреть
+            // на ответы, а не настройка чата — оно действует до выключения и в ленту
+            // обычного разговора ничего не пишет
+            TextButton(onClick = onToggleCompare) {
+                Text(
+                    text = if (compareMode) "Обычный чат" else "Сравнить сборки",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
             // Инварианты проекта: те же правила уходят в модель с каждым запросом,
             // поэтому правятся они там же, где видно остальные настройки агента
             TextButton(onClick = onInvariants) {

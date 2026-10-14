@@ -16,6 +16,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.osvin.aichallenge.data.ChatUiState
+import com.osvin.aichallenge.data.CompareFeed
 import com.osvin.aichallenge.data.InvariantSnapshot
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
@@ -75,6 +76,9 @@ fun ChatScreen(
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     val answerModel by viewModel.answerModel.collectAsStateWithLifecycle()
     val answerProvider by viewModel.answerProvider.collectAsStateWithLifecycle()
+    // Сравнение сборок модели: включено ли оно и что ответили окна
+    val compare by viewModel.compare.collectAsStateWithLifecycle()
+    val compareMode by viewModel.compareMode.collectAsStateWithLifecycle()
 
     // Локальное состояние ввода
     var inputText by remember { mutableStateOf("") }
@@ -129,8 +133,12 @@ fun ChatScreen(
             ChatTopBar(
                 title = title,
                 isOnline = isOnline,
-                model = answerModel,
+                // В сравнении одной модели в шапке нет: отвечают две сборки сразу,
+                // и назвать одну из них значило бы назвать ту, которой ответа не было
+                model = answerModel.takeIf { !compareMode },
                 provider = answerProvider,
+                compareMode = compareMode,
+                onToggleCompare = { viewModel.toggleCompare() },
                 onBack = onBack,
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,
@@ -148,11 +156,24 @@ fun ChatScreen(
                     viewModel.sendMessage(inputText)
                     inputText = ""
                 },
-                isLoading = uiState is ChatUiState.Loading,
+                // Ожидание сравнения считается тем же ожиданием: два ответа идут одним
+                // запросом, и второй вопрос, отправленный поверх первого, их перепутал бы
+                isLoading = uiState is ChatUiState.Loading || compare.loading,
                 enabled = isOnline == true
             )
         }
     ) { padding ->
+        if (compareMode) {
+            CompareMode(
+                feed = compare,
+                onClear = { viewModel.clearCompare() },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .background(MaterialTheme.colorScheme.background)
+            )
+            return@Scaffold
+        }
         Box(
             // Лента по центру и не шире строки чтения: на широком экране браузера
             // сообщение во всю ширину окна читать нельзя — глаз теряет начало строки
@@ -247,6 +268,48 @@ fun ChatScreen(
                 onSave = { viewModel.saveProfile(profileDraft) }
             )
         }
+    }
+}
+
+/**
+ * Режим сравнения: две сборки модели отвечают на один вопрос одновременно.
+ *
+ * Строка над окнами называет, что сравнивают, и даёт очистку: ходы сравнения живут до
+ * перезапуска, а очистка нужна перед новым вопросом — иначе следующее обращение уносит
+ * модели историю прошлых ответов, и сравнивать становится нечего.
+ *
+ * @param feed Лента сравнения: ходы, описание окон и состояние запроса.
+ * @param onClear Очистка ходов сравнения.
+ */
+@Composable
+private fun CompareMode(
+    feed: CompareFeed,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 2.dp)
+        ) {
+            Text(
+                text = "Один вопрос — два ответа: как модель отвечает сейчас и как — оптимизированная сборка",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onClear, enabled = feed.turns.isNotEmpty() && !feed.loading) {
+                Text("Очистить сравнение", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        // Отказ всего запроса стоит над окнами: причина относится к обоим — ответов нет
+        // ни у одной сборки. Отказ одной сборки печатается в её окне ([ComparePanes])
+        feed.error?.let { reason ->
+            ErrorMessage(reason, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
+        ComparePanes(feed = feed, modifier = Modifier.fillMaxSize())
     }
 }
 

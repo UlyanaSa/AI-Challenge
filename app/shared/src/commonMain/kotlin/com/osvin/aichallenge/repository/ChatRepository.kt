@@ -230,6 +230,13 @@ class ChatRepository(
     private val _answerProvider = MutableStateFlow<String?>(null)
     val answerProvider: StateFlow<String?> = _answerProvider.asStateFlow()
 
+    // Лента сравнения двух сборок модели: свои ходы, своё состояние запроса. Держится
+    // отдельно от ленты чата, потому что на один вопрос сравнение отвечает дважды, и второй
+    // ответ в обычной ленте выглядел бы повтором. В хранилище сравнение не пишется вовсе:
+    // сравнивают сборки модели, а не ведут диалог (см. [CompareFeed]).
+    private val _compare = MutableStateFlow(CompareFeed())
+    val compare: StateFlow<CompareFeed> = _compare.asStateFlow()
+
     /**
      * Проверка доступности сервера.
      */
@@ -573,6 +580,167 @@ class ChatRepository(
             _state.value = ChatUiState.Error(e.message ?: "Сетевая ошибка")
         }
     }
+
+    /**
+     * Описание панелей сравнения: чем одна сборка модели отличается от другой.
+     *
+     * Читается при включении сравнения, до первого вопроса: окна подписываются заголовком,
+     * моделью, окном контекста и бюджетом, и по этим подписям видно, что именно сравнивают.
+     * Настройки приходят с сервера, а не задаются в интерфейсе: сравнивают серверные
+     * сборки, и клиент, назвавший их сам, показывал бы свои умолчания вместо серверных.
+     *
+     * Отказ чтения не выключает сравнение: вопрос всё равно можно задать, и ответы придут
+     * с заголовками окон ([PaneAnswer.title]) — подписи будут короче, но верные.
+     */
+    suspend fun loadCompare() {
+        try {
+            val response = client.get("$baseUrl/v1/chat/dual")
+            if (response.status.isSuccess()) {
+                val info = response.body<DualChatInfo>()
+                _compare.value = _compare.value.copy(panes = info.panes, error = null)
+            } else {
+                _compare.value = _compare.value.copy(
+                    error = "Описание сборок недоступно: сервер ответил ${response.status.value}"
+                )
+                platformLog("agent", "[agent] Сравнение: описание сборок не загружено: ${response.status.value}")
+            }
+        } catch (e: Exception) {
+            _compare.value = _compare.value.copy(
+                error = e.message ?: "Описание сборок недоступно: нет соединения"
+            )
+            platformLog("agent", "[agent] Сравнение: описание сборок не загружено: ${e.message ?: "нет соединения"}")
+        }
+    }
+
+    /**
+     * Вопрос обеим сборкам сразу: один запрос, два ответа, оба окна пишут одновременно.
+     *
+     * История у окон своя и собирается из ходов: каждая сборка продолжает свой разговор,
+     * а не читает ответы соседки. Вопрос в ленте хранится один раз ([CompareTurn]):
+     * спрашивали у двух сборок не два вопроса, а один.
+     *
+     * Ответ одной панели может не прийти, и это не отменяет сравнение: причина отказа
+     * остаётся в её окне ([PaneAnswer.error]). Общий отказ (сервер недоступен, набор
+     * настроек отвергнут) остаётся строкой над окнами, а вопрос в ленту не попадает.
+     */
+    suspend fun sendCompare(message: String, settings: GenerationSettings = GenerationSettings()) {
+        if (message.isBlank()) return
+
+        val asker = _activeChat.value
+        if (asker == null) {
+            _compare.value = _compare.value.copy(error = "Чат не выбран")
+            return
+        }
+        // Лента монитора — не диалог: в неё пишет приложение, и вопроса человека там нет
+        if (asker.pinned) return
+
+        val feed = _compare.value
+        // Вопрос печатается в обоих окнах сразу, ещё до ответа: иначе панели выглядят
+        // пустыми всё время, пока модель думает, и непонятно, ушёл вопрос или нет
+        _compare.value = feed.copy(loading = true, error = null, pendingQuestion = message)
+
+        try {
+            val response = client.post("$baseUrl/v1/chat/dual") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    DualChatRequest(
+                        message = message,
+                        baselineHistory = history(feed, Pane.BASELINE),
+                        optimizedHistory = history(feed, Pane.OPTIMIZED),
+                        systemPrompt = settings.systemPrompt.ifBlank { null },
+                        maxTokens = settings.maxTokens,
+                        stop = settings.stopWords.ifEmpty { null },
+                        temperature = settings.temperature
+                    )
+                )
+            }
+
+            if (response.status.isSuccess()) {
+                val answers = response.body<DualChatResponse>().answers
+                val turn = CompareTurn(
+                    question = message,
+                    // Панель, которой в ответе нет, называется отказом: пустое окно
+                    // с вечным ожиданием читалось бы как «модель ещё думает»
+                    baseline = answers.firstOrNull { it.pane == Pane.BASELINE } ?: missing(Pane.BASELINE, feed),
+                    optimized = answers.firstOrNull { it.pane == Pane.OPTIMIZED } ?: missing(Pane.OPTIMIZED, feed)
+                )
+                _compare.value = _compare.value.copy(
+                    turns = _compare.value.turns + turn,
+                    panes = panesFrom(turn, _compare.value),
+                    loading = false,
+                    pendingQuestion = null,
+                    error = null
+                )
+                _isServerOnline.value = true
+                turn.optimized?.tokens?.let { report ->
+                    platformLog("agent", report.logEntry(turn.optimized.model ?: MODEL_NOT_NAMED))
+                }
+            } else {
+                val reason = runCatching { response.body<ErrorResponse>().error }.getOrNull()
+                val error = reason ?: "Ошибка сервера: ${response.status.value}"
+                platformLog("agent", "[agent] Сравнение: отказ сервера: $error")
+                _compare.value = _compare.value.copy(loading = false, pendingQuestion = null, error = error)
+            }
+        } catch (e: Exception) {
+            _isServerOnline.value = false
+            platformLog("agent", "[agent] Сравнение: сервер недоступен: ${e.message ?: "нет соединения"}")
+            _compare.value = _compare.value.copy(
+                loading = false,
+                pendingQuestion = null,
+                error = e.message ?: "Сервер недоступен: нет соединения"
+            )
+        }
+    }
+
+    /**
+     * Очистка ленты сравнения: ходы убираются, описание окон остаётся.
+     *
+     * Описание перечитывать не нужно — сборки те же, — а вот контекст разговора у окон
+     * начинается заново: очистка для того и нужна, чтобы следующий вопрос задавался
+     * по чистому листу, без истории предыдущих ответов в запросе.
+     */
+    fun clearCompare() {
+        _compare.value = CompareFeed(panes = _compare.value.panes)
+    }
+
+    /** История одного окна: его вопросы и его ответы, старые — первыми. */
+    private fun history(feed: CompareFeed, pane: String): List<PaneMessage>? = feed.turns
+        .flatMap { turn ->
+            buildList {
+                add(PaneMessage(role = MessageRole.USER.wire, content = turn.question))
+                // Отказ в историю не идёт: слова модели в ответе нет, и пустая реплика
+                // ассистента сбивала бы следующее обращение
+                turn.answer(pane)
+                    ?.takeIf { !it.failed && it.reply.isNotBlank() }
+                    ?.let { add(PaneMessage(role = MessageRole.ASSISTANT.wire, content = it.reply)) }
+            }
+        }
+        .takeIf { it.isNotEmpty() }
+
+    /** Ответ-отказ панели, которой не было в ответе сервера: окно называет причину, а не молчит. */
+    private fun missing(pane: String, feed: CompareFeed): PaneAnswer = PaneAnswer(
+        pane = pane,
+        title = feed.pane(pane)?.title.orEmpty(),
+        error = "Сборка не ответила: сервер вернул ответы без её окна"
+    )
+
+    /**
+     * Заголовки и настройки окон из ответа: они нужны и тогда, когда описание панелей
+     * не прочиталось. Прочитанное описание не переписывается настройками ответа: у него
+     * те же поля, но полнее — с температурой, рассуждением и шаблоном промпта.
+     */
+    private fun panesFrom(turn: CompareTurn, feed: CompareFeed): List<PaneInfo> =
+        listOfNotNull(turn.baseline, turn.optimized)
+            .filter { answer -> feed.panes.none { it.pane == answer.pane } }
+            .map { answer ->
+                PaneInfo(
+                    pane = answer.pane,
+                    title = answer.title,
+                    model = answer.model.orEmpty(),
+                    provider = answer.provider.orEmpty()
+                )
+            }
+            .let { fromAnswers -> feed.panes + fromAnswers }
 
     /**
      * Снимок памяти профиля: слои и каталог типов. Тот же для всех чатов, поэтому
