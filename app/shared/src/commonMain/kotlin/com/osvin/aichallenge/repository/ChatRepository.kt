@@ -122,7 +122,17 @@ class ChatRepository(
      * ([runCurrencyMonitor]): проверять срок приходится на медленном сервере, а ждать
      * в проверке настоящие двадцать секунд нечем.
      */
-    private val currencyReadTimeoutMs: Long = CURRENCY_READ_TIMEOUT_MS
+    private val currencyReadTimeoutMs: Long = CURRENCY_READ_TIMEOUT_MS,
+    /**
+     * Хранилище настроек сервиса на устройстве: адрес, ключ, модель и рамки запроса
+     * переживают перезапуск приложения ([ServerSettings]).
+     *
+     * Параметром, а не платформенной функцией внутри, — по тому же счёту, что и хранилище
+     * чатов ([store]): у Android его подставляет точка входа вместе с `Context` (там
+     * `SharedPreferences`), у браузера — `localStorage`, а проверки кладут настройки
+     * в память процесса и на диск машины не пишут.
+     */
+    private val settingsStorage: SettingsStorage = InMemorySettingsStorage()
 ) {
     // Внутренние потоки данных (StateFlow)
     private val _chats = MutableStateFlow<List<Chat>>(emptyList())
@@ -251,12 +261,20 @@ class ChatRepository(
     val compare: StateFlow<CompareFeed> = _compare.asStateFlow()
 
     // Настройки приватного сервиса `/api/…` (`ChatMode.SERVICE`): адрес, ключ и рамки
-    // запроса. Живут в памяти процесса намеренно — ключ доступа на устройстве не хранится,
-    // и после перезапуска приложения его вводят заново (см. [ServerSettings]). Здесь же,
-    // а не в слое интерфейса: от режима зависит, кому адресован запрос, а это решает
+    // запроса. Поднимаются из хранилища устройства ([settingsStorage]) — без этого после
+    // обновления страницы приложение возвращалось в локальный режим, и чаты сервиса,
+    // живые в его SQLite, не подгружались: спрашивать о них стало некому. Здесь же, а не
+    // в слое интерфейса: от режима зависит, кому адресован запрос, а это решает
     // репозиторий, а не экран.
     private val _serverSettings = MutableStateFlow(ServerSettings())
     val serverSettings: StateFlow<ServerSettings> = _serverSettings.asStateFlow()
+
+    init {
+        // Настройки прошлого запуска ставятся до того, как их начнут читать экран
+        // и [loadServiceChats]: режим «Сервис» — это то, по чему решается, спрашивать
+        // ли сервис вообще
+        restoredServerSettings()?.let { _serverSettings.value = it }
+    }
 
     // Итог проверки подключения к сервису: своё поле, а не общий [isServerOnline] —
     // путь `/v1` и сервис `/api/…` отказывают по разным причинам, и сводить их в один
@@ -271,9 +289,12 @@ class ChatRepository(
     private val _serviceMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val serviceMessages: StateFlow<List<ChatMessage>> = _serviceMessages.asStateFlow()
 
-    // Идентификатор открытой сессии сервиса; null — сессии ещё нет. Хранится в памяти:
-    // сессию ведёт сервис, и второй её копии на устройстве не нужно — после перезапуска
-    // приложения сервисная переписка начинается заново, как и настройки к ней.
+    // Идентификатор открытой сессии сервиса; null — сессии ещё нет. На экране живёт
+    // в памяти, а на устройстве — записью [SETTINGS_LAST_CHAT]: саму сессию ведёт сервис,
+    // и второй её копии у клиента не нужно, но идентификатор нужен — по нему после
+    // перезапуска приложения открывается тот же разговор, а история поднимается из сервиса
+    // ([loadServiceHistory]). Ставится он только через [setServiceChat], чтобы экран
+    // и устройство не разошлись.
     private val _serviceChatId = MutableStateFlow<String?>(null)
     val serviceChatId: StateFlow<String?> = _serviceChatId.asStateFlow()
 
@@ -673,6 +694,7 @@ class ChatRepository(
     fun updateServerSettings(settings: ServerSettings) {
         val previous = _serverSettings.value
         _serverSettings.value = settings
+        persistServerSettings(settings)
         if (settings.baseUrl != previous.baseUrl || settings.apiKey != previous.apiKey) {
             forgetServiceChat()
             forgetServiceChats()
@@ -680,9 +702,68 @@ class ChatRepository(
         }
     }
 
+    /**
+     * Настройки сервиса, записанные прошлым запуском; null — их не сохраняли.
+     *
+     * Читаются только целиком: адрес без ключа или ключ без адреса — это не настройка,
+     * а её обломок, и восстановить половину значило бы отправить запрос не туда, куда
+     * человек настраивал. Незнакомый режим — тоже отказ поднимать настройки: подставить
+     * вместо него текущий значило бы увести запрос на другой путь молча.
+     */
+    private fun restoredServerSettings(): ServerSettings? {
+        val mode = settingsStorage.read(SETTINGS_MODE)?.let { stored ->
+            ChatMode.entries.firstOrNull { it.name == stored }
+        } ?: return null
+        val baseUrl = settingsStorage.read(SETTINGS_BASE_URL) ?: return null
+        val defaults = ServerSettings()
+        return ServerSettings(
+            mode = mode,
+            baseUrl = baseUrl,
+            apiKey = settingsStorage.read(SETTINGS_API_KEY).orEmpty(),
+            model = settingsStorage.read(SETTINGS_MODEL) ?: defaults.model,
+            temperature = settingsStorage.read(SETTINGS_TEMPERATURE)?.toDoubleOrNull()
+                ?: defaults.temperature,
+            maxTokens = settingsStorage.read(SETTINGS_MAX_TOKENS)?.toIntOrNull()
+                ?: defaults.maxTokens,
+            contextWindow = settingsStorage.read(SETTINGS_CONTEXT_WINDOW)?.toIntOrNull()
+                ?: defaults.contextWindow
+        )
+    }
+
+    /** Кладёт настройки сервиса на устройство: их же читает следующий запуск. */
+    private fun persistServerSettings(settings: ServerSettings) {
+        settingsStorage.write(SETTINGS_MODE, settings.mode.name)
+        settingsStorage.write(SETTINGS_BASE_URL, settings.baseUrl)
+        settingsStorage.write(SETTINGS_API_KEY, settings.apiKey)
+        settingsStorage.write(SETTINGS_MODEL, settings.model)
+        settingsStorage.write(SETTINGS_TEMPERATURE, settings.temperature.toString())
+        settingsStorage.write(SETTINGS_MAX_TOKENS, settings.maxTokens.toString())
+        settingsStorage.write(SETTINGS_CONTEXT_WINDOW, settings.contextWindow.toString())
+    }
+
+    /**
+     * Идентификатор сервисного чата, открытого прошлым запуском: по нему приложение
+     * возвращается в тот же разговор. null — открывать нечего: чат не открывали или удалили.
+     */
+    fun rememberedServiceChatId(): String? =
+        settingsStorage.read(SETTINGS_LAST_CHAT)?.takeIf { it.isNotBlank() }
+
+    /**
+     * Сделать сессию сервиса текущей (или отпустить её — `null`) и запомнить это на устройстве.
+     *
+     * Присвоение и память в одном месте намеренно: идентификатор, оставшийся на устройстве
+     * от прошлого разговора, но забытый на экране (или наоборот), вернул бы человека
+     * в чужой чат — а разойтись им теперь есть от чего: экран живёт до перезапуска,
+     * запись на устройстве — дольше.
+     */
+    private fun setServiceChat(chatId: String?) {
+        _serviceChatId.value = chatId
+        settingsStorage.write(SETTINGS_LAST_CHAT, chatId)
+    }
+
     /** Отпустить открытую сессию сервиса, её ленту, заголовок и сводку: она не этого сервиса. */
     private fun forgetServiceChat() {
-        _serviceChatId.value = null
+        setServiceChat(null)
         _serviceChatTitle.value = null
         _serviceMessages.value = emptyList()
         _serviceSummary.value = null
@@ -761,7 +842,7 @@ class ChatRepository(
         _state.value = ChatUiState.Loading
         return try {
             val created = serviceClient.createChat(_serverSettings.value, title = null)
-            _serviceChatId.value = created.chatId
+            setServiceChat(created.chatId)
             _serviceMessages.value = emptyList()
             applyServiceChat(created)
             _state.value = ChatUiState.Idle
@@ -798,7 +879,7 @@ class ChatRepository(
      */
     suspend fun openServiceChat(chatId: String) {
         forgetServiceChat()
-        _serviceChatId.value = chatId
+        setServiceChat(chatId)
         loadServiceHistory()
     }
 
@@ -901,7 +982,7 @@ class ChatRepository(
                 // Сводку и заголовок берём из того же ответа: это уже другая сессия,
                 // и то, что в шапке и строке сводки, должно быть про неё
                 val fresh = serviceClient.createChat(settings, title = null)
-                _serviceChatId.value = fresh.chatId
+                setServiceChat(fresh.chatId)
                 applyServiceChat(fresh)
                 serviceClient.send(settings, fresh.chatId, text)
             }
@@ -2094,5 +2175,37 @@ class ChatRepository(
 
         /** Миллисекунд в часе: по нему считается номер часа UTC. */
         const val HOUR_MS = 3_600_000L
+
+        /**
+         * Имена настроек сервиса в хранилище устройства ([settingsStorage]).
+         *
+         * Имя — одно на поле и в одном месте: настройку пишет репозиторий и читает он же
+         * при следующем запуске ([restoredServerSettings]), и разошедшееся имя обернулось бы
+         * настройкой, которая «не сохраняется» — а именно этот отказ и починили.
+         * Префикс `service.` отделяет их от записей других настроек, которые могут
+         * появиться в том же хранилище.
+         */
+        const val SETTINGS_MODE = "service.mode"
+
+        /** Адрес сервиса: без него настройки не поднимаются (см. [restoredServerSettings]). */
+        const val SETTINGS_BASE_URL = "service.baseUrl"
+
+        /** Ключ доступа: лежит на устройстве, поэтому вход в сервис переживает перезапуск. */
+        const val SETTINGS_API_KEY = "service.apiKey"
+
+        /** Имя модели, которое просят у сервиса. */
+        const val SETTINGS_MODEL = "service.model"
+
+        /** Температура генерации; хранится текстом, как и остальные числа настроек. */
+        const val SETTINGS_TEMPERATURE = "service.temperature"
+
+        /** Бюджет ответа в токенах. */
+        const val SETTINGS_MAX_TOKENS = "service.maxTokens"
+
+        /** Потолок контекстного окна. */
+        const val SETTINGS_CONTEXT_WINDOW = "service.contextWindow"
+
+        /** Чат сервиса, открытый прошлым запуском: в него приложение возвращается после обновления. */
+        const val SETTINGS_LAST_CHAT = "service.lastChatId"
     }
 }

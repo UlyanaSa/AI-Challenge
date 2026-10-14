@@ -1,5 +1,7 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.data.SettingsStorage
+
 interface Platform {
     val name: String
 }
@@ -50,6 +52,22 @@ expect fun openedChatId(): String?
  * показывают — но текстом, который можно выделить, и без обещания «скопировано».
  */
 expect fun copyToClipboard(text: String): Boolean
+
+/**
+ * Хранилище настроек сервиса у текущей платформы: то, чем они переживают перезапуск.
+ *
+ * Отдельная функция, а не параметр точки входа, потому что адрес и ключ сервиса читает
+ * репозиторий, а не экран: до этой правки настройки жили в памяти сессии, и после
+ * обновления страницы приложение возвращалось в локальный режим, а чаты сервиса —
+ * живые на сервере — не подгружались. Браузер держит настройки в `localStorage`
+ * (`window.localStorage`), Android подставляет `SharedPreferences` из своей точки входа
+ * (`SharedPreferences` требует `Context`, а его в общем коде нет намеренно).
+ *
+ * Там, где постоянного хранилища нет, возвращается память процесса
+ * ([com.osvin.aichallenge.data.InMemorySettingsStorage]): обещать сохранение на диске
+ * и не сохранять — хуже, чем честно не сохранять.
+ */
+expect fun platformSettingsStorage(): SettingsStorage
 
 /** Имя параметра адреса, которым делятся чатом: `<адрес>/?chat=<id>` (§5). */
 const val CHAT_QUERY_PARAM = "chat"

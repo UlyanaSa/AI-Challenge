@@ -117,6 +117,30 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     private val _chatsLoaded = MutableStateFlow(false)
     val chatsLoaded: StateFlow<Boolean> = _chatsLoaded.asStateFlow()
 
+    /**
+     * Идентификатор чата из адреса страницы (`?chat=<id>`), прочитанный при создании модели.
+     *
+     * Хранится здесь, а не в экране: к нему возвращаются при сохранении настроек сервиса —
+     * до ввода ключа сервис чат не отдаёт, и открыть его нужно ещё раз. Адрес страницы дальше
+     * не меняется, поэтому чтение одно на всё приложение.
+     */
+    private val sharedChatId: String? = openedChatId()
+
+    /**
+     * Чат, который нужно открыть самому: из адреса страницы (`?chat=<id>`) или последний
+     * открытый ([ChatRepository.rememberedServiceChatId]); null — открывать нечего.
+     *
+     * Одна ветка на оба случая намеренно: и ссылка, и возврат в приложение после обновления
+     * страницы означают одно — «открой этот разговор», — и вторая копия правила разошлась бы
+     * с первой. Без ссылки чат берётся только в режиме «Сервис»: последний открытый чат
+     * сервисный, и открывать его в локальном режиме значило бы переключить режим за человека.
+     */
+    private fun chatToOpen(): String? {
+        sharedChatId?.let { return it }
+        if (repository.serverSettings.value.mode != ChatMode.SERVICE) return null
+        return repository.rememberedServiceChatId()
+    }
+
     init {
         // Восстанавливаем чаты, затем проверяем связь. Закреплённого чата курсов
         // в списке больше нет, поэтому ни он не заводится, ни монитор не стартует:
@@ -200,11 +224,25 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
      * Сохранение настроек сервиса из шторки «Сервер»: адрес, ключ, модель и рамки запроса.
      *
      * Сохраняет репозиторий: смена адреса или ключа сбрасывает сессию сервиса, а это —
-     * его состояние, не экрана. Синхронно: хранить нечего (настройки живут в памяти),
-     * поэтому и корутины не нужно.
+     * его состояние, не экрана. Синхронно: настройки кладутся в хранилище устройства
+     * ([com.osvin.aichallenge.data.SettingsStorage]) без обращения к сети, поэтому
+     * и корутины для самого сохранения не нужно.
+     *
+     * В режиме «Сервис» после сохранения список читается заново: настройки могли сменить
+     * адрес или ключ, и прежний снимок к ним не относится. Заодно это вторая попытка для
+     * чата из ссылки — до ввода ключа сервис его не отдаёт, а открытого чата после сброса
+     * сессии уже нет, и без этого шага ссылка открывалась бы в пустую ленту.
      */
     fun saveServerSettings(settings: ServerSettings) {
         repository.updateServerSettings(settings)
+        if (settings.mode != ChatMode.SERVICE) return
+        viewModelScope.launch {
+            repository.loadServiceChats()
+            val shared = chatToOpen()
+            if (shared != null && repository.serviceChatId.value == null) {
+                repository.openServiceChat(shared)
+            }
+        }
     }
 
     /**
@@ -257,13 +295,21 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     }
 
     /**
-     * Открытие чата, которым поделились ссылкой (`?chat=<id>`): режим переводится
-     * в «Сервис», чат открывается. Ключ после перезапуска вводят заново — он живёт
-     * только в памяти, и без него сервис ответит отказом.
+     * Открытие чата, которым поделились ссылкой (`?chat=<id>`), а если ссылки нет —
+     * последнего открытого сервисного чата: режим переводится в «Сервис», чат открывается.
+     *
+     * Последний открытый чат нужен для возврата: настройки сервиса и его идентификатор
+     * лежат в хранилище устройства ([com.osvin.aichallenge.data.SettingsStorage]), поэтому
+     * после обновления страницы человек попадает в свой разговор, а не в пустую ленту
+     * (браузер помнит их в `localStorage`, Android — в `SharedPreferences`).
+     *
+     * Идентификатор читается моделью, а не экраном: тем же значением она возвращает
+     * чат из ссылки после сохранения настроек, и второй копии разбора адреса быть не должно.
      */
-    fun openSharedServiceChat(id: String) {
+    fun openSharedChat() {
+        val shared = chatToOpen() ?: return
         viewModelScope.launch {
-            repository.openSharedServiceChat(id)
+            repository.openSharedServiceChat(shared)
         }
     }
 

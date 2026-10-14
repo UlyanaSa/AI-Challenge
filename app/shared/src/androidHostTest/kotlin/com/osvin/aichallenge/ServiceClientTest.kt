@@ -3,10 +3,12 @@ package com.osvin.aichallenge
 import com.osvin.aichallenge.data.ChatMode
 import com.osvin.aichallenge.data.ChatUiState
 import com.osvin.aichallenge.data.InMemoryChatStore
+import com.osvin.aichallenge.data.InMemorySettingsStorage
 import com.osvin.aichallenge.data.MessageRole
 import com.osvin.aichallenge.data.ServerConnectionState
 import com.osvin.aichallenge.data.ServerSettings
 import com.osvin.aichallenge.data.ServiceChatRequest
+import com.osvin.aichallenge.data.SettingsStorage
 import com.osvin.aichallenge.repository.ChatRepository
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -481,6 +483,72 @@ class ServiceClientTest {
         assertEquals(null, chatIdFromUrl(null))
     }
 
+    /**
+     * Настройки сервиса переживают перезапуск приложения: второй репозиторий над тем же
+     * хранилищем поднимает и режим, и адрес, и ключ, и рамки запроса.
+     *
+     * Это починка бага «при обновлении страницы старые чаты не подгружаются»: без настроек
+     * клиент возвращался в локальный режим, и о чатах сервиса — живых в его SQLite —
+     * не спрашивал вовсе. Проверяется целиком, а не отдельным полем: поднятая половина
+     * настроек увела бы запрос не туда, куда человек настраивал.
+     */
+    @Test
+    fun settingsSurviveRestartOverTheSameStorage() {
+        val storage = InMemorySettingsStorage()
+        val saved = settings(
+            baseUrl = "http://service.local:8090",
+            apiKey = "ключ-сервиса",
+            model = "qwen3:4b",
+            temperature = 0.2,
+            maxTokens = 128,
+            contextWindow = 2048
+        )
+        ChatRepository(BASE_URL, InMemoryChatStore(), settingsStorage = storage)
+            .updateServerSettings(saved)
+
+        val afterRestart = ChatRepository(BASE_URL, InMemoryChatStore(), settingsStorage = storage)
+
+        assertEquals(saved, afterRestart.serverSettings.value)
+    }
+
+    /**
+     * Последний открытый сервисный чат помнится: после перезапуска приложение возвращается
+     * в тот же разговор, а не в пустую ленту.
+     *
+     * Забывается он вместе с сессией: при смене адреса или ключа чат принадлежит уже
+     * другому сервису, и открывать его на новом адресе значило бы искать чужое.
+     */
+    @Test
+    fun lastServiceChatIsRememberedAndForgottenWithTheSession() = runBlocking {
+        val storage = InMemorySettingsStorage()
+        val repository = repository(settingsStorage = storage) { path ->
+            when (path) {
+                "/api/chats/9c1e" -> Stub(
+                    """{"chatId":"9c1e","title":"Поездка","messages":[{"role":"user","content":"Сколько стоит?","createdAt":1}]}"""
+                )
+                else -> error("неожиданный путь: $path")
+            }
+        }
+        repository.updateServerSettings(settings())
+        repository.openServiceChat("9c1e")
+
+        assertEquals(
+            "9c1e",
+            ChatRepository(BASE_URL, InMemoryChatStore(), settingsStorage = storage)
+                .rememberedServiceChatId(),
+            "чат должен подниматься после перезапуска приложения"
+        )
+
+        repository.updateServerSettings(settings(baseUrl = "http://other.local:8090"))
+
+        assertEquals(
+            null,
+            ChatRepository(BASE_URL, InMemoryChatStore(), settingsStorage = storage)
+                .rememberedServiceChatId(),
+            "чат прежнего сервиса не должен открываться на новом адресе"
+        )
+    }
+
     private companion object {
         const val BASE_URL = "http://localhost:8080"
 
@@ -513,9 +581,14 @@ class ServiceClientTest {
         /**
          * Репозиторий над подставным сервисом: ответ выбирается по пути запроса,
          * а все запросы складываются в [requests] — по ним и проверяется провод.
+         *
+         * [settingsStorage] подставляется, когда проверяется память настроек между
+         * запусками: без него репозиторий держит их в памяти процесса, и «перезапуска»
+         * в проверке не получится.
          */
         fun repository(
             requests: MutableList<HttpRequestData> = mutableListOf(),
+            settingsStorage: SettingsStorage = InMemorySettingsStorage(),
             response: (String) -> Stub
         ): ChatRepository = ChatRepository(
             BASE_URL,
@@ -523,7 +596,8 @@ class ServiceClientTest {
             testClient(MockEngine { request ->
                 requests += request
                 respondStub(response(request.url.encodedPath))
-            })
+            }),
+            settingsStorage = settingsStorage
         )
 
         fun testClient(engine: MockEngine) = HttpClient(engine) {

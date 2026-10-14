@@ -1,5 +1,7 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.data.InMemorySettingsStorage
+import com.osvin.aichallenge.data.SettingsStorage
 import platform.Foundation.NSDate
 import platform.Foundation.timeIntervalSince1970
 import platform.UIKit.UIDevice
@@ -34,3 +36,11 @@ actual fun openedChatId(): String? = null
  * устройстве. Ссылку поэтому показывают текстом, который можно выделить.
  */
 actual fun copyToClipboard(text: String): Boolean = false
+
+/**
+ * Сборка iOS в этой задаче не собирается (§7), поэтому и своего хранилища настроек
+ * у неё нет: непроверенная обвязка `NSUserDefaults` осталась бы непроверенной, как
+ * и буфер обмена выше. Запасной вариант — память процесса: настройки живут до конца
+ * запуска, и обещать больше нечем.
+ */
+actual fun platformSettingsStorage(): SettingsStorage = InMemorySettingsStorage()

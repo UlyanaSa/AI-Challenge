@@ -29,6 +29,7 @@ import com.osvin.aichallenge.data.ChatMode
 import com.osvin.aichallenge.data.ChatStore
 import com.osvin.aichallenge.data.InMemoryChatStore
 import com.osvin.aichallenge.data.ServiceChatList
+import com.osvin.aichallenge.data.SettingsStorage
 import com.osvin.aichallenge.repository.ChatRepository
 
 /**
@@ -50,16 +51,25 @@ import com.osvin.aichallenge.repository.ChatRepository
  * @param store Хранилище чатов. Android подставляет реализацию на Room, поэтому
  * чаты, их истории и сессии агента живут в БД устройства до удаления чата;
  * на остальных таргетах всё живёт в памяти процесса.
+ * @param settingsStorage Хранилище настроек сервиса: адрес, ключ, модель и рамки запроса.
+ * По умолчанию — хранилище платформы ([platformSettingsStorage]): в браузере это
+ * `localStorage`, поэтому после обновления страницы режим «Сервис» остаётся включённым,
+ * список чатов читается снова, а открытый разговор возвращается на место. Android
+ * подставляет `SharedPreferences` своей точкой входа — `SharedPreferences` требует
+ * `Context`, которого в общем коде нет намеренно.
  */
 @Composable
 @Preview
-fun App(store: ChatStore = InMemoryChatStore()) {
+fun App(
+    store: ChatStore = InMemoryChatStore(),
+    settingsStorage: SettingsStorage = platformSettingsStorage()
+) {
     // Адрес сервера агента: Android-эмулятор ходит через 10.0.2.2,
     // браузер и десктоп — через localhost
     val baseUrl = serverBaseUrl()
 
     // Инициализация репозитория и ViewModel через Lifecycle
-    val repository = remember { ChatRepository(baseUrl, store) }
+    val repository = remember { ChatRepository(baseUrl, store, settingsStorage = settingsStorage) }
     val viewModel: ChatViewModel = viewModel { ChatViewModel(repository) }
 
     val chats by viewModel.chats.collectAsStateWithLifecycle()
@@ -81,11 +91,11 @@ fun App(store: ChatStore = InMemoryChatStore()) {
     }
 
     // Чат из адреса (`?chat=<id>`): по ссылке второго клиента открывается тот же сервисный
-    // чат, и режим переводится в «Сервис» — в локальном его не нашлось бы. Читается один раз
-    // при старте: адрес страницы дальше не меняется
-    val sharedChatId = remember { openedChatId() }
-    LaunchedEffect(sharedChatId) {
-        if (sharedChatId != null) viewModel.openSharedServiceChat(sharedChatId)
+    // чат, и режим переводится в «Сервис» — в локальном его не нашлось бы. Идентификатор
+    // читает модель: тем же значением она возвращает чат после сохранения настроек, когда
+    // сервис уже готов его отдать
+    LaunchedEffect(Unit) {
+        viewModel.openSharedChat()
     }
 
     // Номер экрана нужен только узкой раскладке: на широкой оба экрана видно сразу

@@ -1,5 +1,6 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.data.SettingsStorage
 import kotlin.js.Date
 import kotlinx.browser.window
 import web.navigator.navigator
@@ -37,3 +38,19 @@ actual fun openedChatId(): String? = chatIdFromUrl(window.location.search)
 actual fun copyToClipboard(text: String): Boolean = runCatching {
     navigator.clipboard.writeTextAsync(text)
 }.isSuccess
+
+/**
+ * Хранилище настроек сервиса: `localStorage` браузера.
+ *
+ * Реализация та же, что у Kotlin/Wasm, но своими средствами: у js-таргета браузерные API
+ * приходят из `kotlinx.browser`, и второго `@JsFun`-объявления того же `localStorage`
+ * здесь не нужно.
+ */
+actual fun platformSettingsStorage(): SettingsStorage = object : SettingsStorage {
+
+    override fun read(key: String): String? = window.localStorage.getItem(key)?.takeIf { it.isNotEmpty() }
+
+    override fun write(key: String, value: String?) {
+        if (value == null) window.localStorage.removeItem(key) else window.localStorage.setItem(key, value)
+    }
+}

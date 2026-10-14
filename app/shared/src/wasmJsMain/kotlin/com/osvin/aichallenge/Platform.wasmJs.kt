@@ -1,5 +1,6 @@
 package com.osvin.aichallenge
 
+import com.osvin.aichallenge.data.SettingsStorage
 import kotlin.JsFun
 import kotlin.js.ExperimentalWasmJsInterop
 
@@ -54,3 +55,39 @@ actual fun openedChatId(): String? = chatIdFromUrl(jsLocationSearch())
 
 /** Буфер обмена браузера, объявленный через [JsFun]. */
 actual fun copyToClipboard(text: String): Boolean = jsCopyToClipboard(text)
+
+/**
+ * Хранилище настроек сервиса: `localStorage` браузера, объявленный через [JsFun].
+ *
+ * Объявлений три, а не одно с возвратом значения, потому что у `localStorage` нет
+ * операции «прочитать или записать»: чтение, запись и удаление — разные вызовы.
+ * Отсутствующая запись отдаётся пустой строкой, а не `null`: так разбор читается
+ * без лишнего шага и совпадает с тем, что о разделении «нет записи» и «пустая строка»
+ * сказано в [SettingsStorage].
+ *
+ * Долговечность `localStorage` не наша: браузер сам решает, что делать с хранилищем
+ * при переполнении или в приватном окне, и обещать здесь больше браузера нельзя.
+ */
+private class WasmSettingsStorage : SettingsStorage {
+
+    override fun read(key: String): String? = jsLocalStorageGet(key).takeIf { it.isNotEmpty() }
+
+    override fun write(key: String, value: String?) {
+        if (value == null) jsLocalStorageRemove(key) else jsLocalStorageSet(key, value)
+    }
+}
+
+@OptIn(ExperimentalWasmJsInterop::class)
+@JsFun("(key) => { const value = window.localStorage.getItem(key); return value === null ? '' : value; }")
+private external fun jsLocalStorageGet(key: String): String
+
+@OptIn(ExperimentalWasmJsInterop::class)
+@JsFun("(key, value) => { window.localStorage.setItem(key, value); }")
+private external fun jsLocalStorageSet(key: String, value: String)
+
+@OptIn(ExperimentalWasmJsInterop::class)
+@JsFun("(key) => { window.localStorage.removeItem(key); }")
+private external fun jsLocalStorageRemove(key: String)
+
+/** Настройки сервиса переживают перезапуск страницы в `localStorage` браузера. */
+actual fun platformSettingsStorage(): SettingsStorage = WasmSettingsStorage()

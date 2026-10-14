@@ -1,6 +1,8 @@
 package com.osvin.aichallenge
 
 import android.os.Build
+import com.osvin.aichallenge.data.InMemorySettingsStorage
+import com.osvin.aichallenge.data.SettingsStorage
 
 class AndroidPlatform : Platform {
     override val name: String = "Android ${Build.VERSION.SDK_INT}"
@@ -29,3 +31,11 @@ actual fun openedChatId(): String? = null
  * показывают текстом, который можно выделить.
  */
 actual fun copyToClipboard(text: String): Boolean = false
+
+/**
+ * Хранилище настроек сервиса у Android-приложения подставляет его точка входа:
+ * `SharedPreferences` требует `Context`, а держателя контекста в общем слое нет намеренно —
+ * тем же счётом, что и с буфером обмена выше. Запасной вариант здесь — память процесса:
+ * настройки, положенные сюда, живут до конца запуска, и молча обещать больше нельзя.
+ */
+actual fun platformSettingsStorage(): SettingsStorage = InMemorySettingsStorage()
