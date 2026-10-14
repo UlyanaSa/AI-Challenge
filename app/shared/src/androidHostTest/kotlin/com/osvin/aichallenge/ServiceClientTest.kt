@@ -484,6 +484,55 @@ class ServiceClientTest {
     }
 
     /**
+     * Отказ сети, пришедший не исключением Kotlin, — тоже отказ.
+     *
+     * На веб-таргете недоступный сервис отвечает JS-ошибкой отвергнутого `fetch`: это
+     * [Throwable], но не [Exception], и `catch (e: Exception)` её пропускал — страница
+     * падала с «Uncaught runtime errors» вместо строки «Недоступен». Проверка держит
+     * именно эту форму отказа: [Throwable] без [Exception], как на живом браузере.
+     */
+    @Test
+    fun unreachableServiceIsReportedWhenFailureIsNotAKotlinException() = runBlocking {
+        val repository = ChatRepository(
+            BASE_URL,
+            InMemoryChatStore(),
+            testClient(MockEngine { throw Throwable("Fail to fetch") })
+        )
+
+        val report = repository.checkServiceConnection(settings())
+
+        assertEquals(ServerConnectionState.UNAVAILABLE, report.state)
+        assertTrue(report.message.startsWith("Недоступен"), report.message)
+    }
+
+    /**
+     * Ссылка переводит режим в «Сервис» и оставляет это на устройстве: после обновления
+     * страницы тот же разговор должен открыться снова, а не потеряться вместе с режимом.
+     *
+     * Проверяются оба конца: режим поднимается из хранилища, и идентификатор чата из ссылки
+     * остаётся там же — иначе клиент вернулся бы в локальный режим, ровно как в отказе,
+     * ради которого настройки и стали хранить.
+     */
+    @Test
+    fun sharedLinkKeepsServiceModeAndChatAcrossRestart() = runBlocking {
+        val storage = InMemorySettingsStorage()
+        val repository = repository(settingsStorage = storage) { path ->
+            when (path) {
+                "/api/chats/9c1e" -> Stub(
+                    """{"chatId":"9c1e","title":"Поездка","messages":[{"role":"user","content":"Сколько стоит?","createdAt":1}]}"""
+                )
+                else -> error("неожиданный путь: $path")
+            }
+        }
+
+        repository.openSharedServiceChat("9c1e")
+
+        val afterRestart = ChatRepository(BASE_URL, InMemoryChatStore(), settingsStorage = storage)
+        assertEquals(ChatMode.SERVICE, afterRestart.serverSettings.value.mode)
+        assertEquals("9c1e", afterRestart.rememberedServiceChatId())
+    }
+
+    /**
      * Настройки сервиса переживают перезапуск приложения: второй репозиторий над тем же
      * хранилищем поднимает и режим, и адрес, и ключ, и рамки запроса.
      *

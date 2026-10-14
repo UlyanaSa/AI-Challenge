@@ -26,6 +26,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.CancellationException
 
 /**
  * Отказ приватного сервиса `/api/…`: тело `{code, message, requestId}` в виде исключения.
@@ -70,7 +71,7 @@ class ServiceClient(private val client: HttpClient) {
      * демон или не загружена модель. Формат ошибки тут свой, не общий `{code,message,requestId}`,
      * поэтому разбираем [ServiceHealth], а не [ServiceErrorBody].
      */
-    suspend fun health(settings: ServerSettings): ServiceHealth {
+    suspend fun health(settings: ServerSettings): ServiceHealth = call {
         val response = client.get(settings.baseUrl + API_HEALTH)
         log("GET", API_HEALTH, response)
         val body = runCatching { response.body<ServiceHealth>() }.getOrNull()
@@ -80,17 +81,17 @@ class ServiceClient(private val client: HttpClient) {
                 ?: "сервис ответил кодом ${response.status.value}"
             throw ServiceApiException(code = SERVICE_UNAVAILABLE, message = reason)
         }
-        return body ?: ServiceHealth(status = "ok")
+        body ?: ServiceHealth(status = "ok")
     }
 
     /** Список моделей сервиса: `GET /api/models`. Требует ключ. */
-    suspend fun models(settings: ServerSettings): List<ServiceModel> {
+    suspend fun models(settings: ServerSettings): List<ServiceModel> = call {
         val response = client.get(settings.baseUrl + API_MODELS) {
             header(API_KEY_HEADER, settings.apiKey)
         }
         log("GET", API_MODELS, response)
         failOrThrow(response)
-        return response.body<ServiceModels>().models
+        response.body<ServiceModels>().models
     }
 
     /**
@@ -100,7 +101,7 @@ class ServiceClient(private val client: HttpClient) {
      * не выбирается: это дело сервиса (§1.2), и клиент, назвавший его сам, показал бы
      * сводку не того диалога, который человек считает прошлым.
      */
-    suspend fun createChat(settings: ServerSettings, title: String?): ServiceChatCreated {
+    suspend fun createChat(settings: ServerSettings, title: String?): ServiceChatCreated = call {
         val response = client.post(settings.baseUrl + API_CHATS) {
             contentType(ContentType.Application.Json)
             header(API_KEY_HEADER, settings.apiKey)
@@ -108,7 +109,7 @@ class ServiceClient(private val client: HttpClient) {
         }
         log("POST", API_CHATS, response)
         failOrThrow(response)
-        return response.body()
+        response.body()
     }
 
     /**
@@ -117,29 +118,29 @@ class ServiceClient(private val client: HttpClient) {
      * @param limit Сколько чатов просить; null — умолчание сервиса. Больше его потолка
      *        присылать бессмысленно: сервис обрежет сам (§1.1).
      */
-    suspend fun chats(settings: ServerSettings, limit: Int? = null): ServiceChatList {
+    suspend fun chats(settings: ServerSettings, limit: Int? = null): ServiceChatList = call {
         val response = client.get(settings.baseUrl + API_CHATS) {
             header(API_KEY_HEADER, settings.apiKey)
             limit?.let { parameter(LIMIT_QUERY, it) }
         }
         log("GET", API_CHATS, response)
         failOrThrow(response)
-        return response.body()
+        response.body()
     }
 
     /** История сессии: `GET /api/chats/{id}`. Нет сессии — `chat_not_found`. */
-    suspend fun history(settings: ServerSettings, chatId: String): ServiceChatHistory {
+    suspend fun history(settings: ServerSettings, chatId: String): ServiceChatHistory = call {
         val path = "$API_CHATS/$chatId"
         val response = client.get(settings.baseUrl + path) {
             header(API_KEY_HEADER, settings.apiKey)
         }
         log("GET", path, response)
         failOrThrow(response)
-        return response.body()
+        response.body()
     }
 
     /** Один ход чата: `POST /api/chat`. Тело — [ServiceChatRequest] по контракту. */
-    suspend fun send(settings: ServerSettings, chatId: String, message: String): ServiceChatResponse {
+    suspend fun send(settings: ServerSettings, chatId: String, message: String): ServiceChatResponse = call {
         val response = client.post(settings.baseUrl + API_CHAT) {
             contentType(ContentType.Application.Json)
             header(API_KEY_HEADER, settings.apiKey)
@@ -156,18 +157,51 @@ class ServiceClient(private val client: HttpClient) {
         }
         log("POST", API_CHAT, response)
         failOrThrow(response)
-        return response.body()
+        response.body()
     }
 
     /** Удаление сессии: `DELETE /api/chats/{id}`. */
     suspend fun deleteChat(settings: ServerSettings, chatId: String) {
-        val path = "$API_CHATS/$chatId"
-        val response = client.delete(settings.baseUrl + path) {
-            header(API_KEY_HEADER, settings.apiKey)
+        call {
+            val path = "$API_CHATS/$chatId"
+            val response = client.delete(settings.baseUrl + path) {
+                header(API_KEY_HEADER, settings.apiKey)
+            }
+            log("DELETE", path, response)
+            failOrThrow(response)
         }
-        log("DELETE", path, response)
-        failOrThrow(response)
     }
+
+    /**
+     * Ход к сервису, у которого на выходе один вид отказа: [ServiceApiException].
+     *
+     * Сеть отказывает по-разному. Сервис, который ответил, разбирается по контракту
+     * ([failOrThrow]): код в теле и `Retry-After`. Сервис, до которого запрос не дошёл,
+     * на веб-таргете отвечает JS-ошибкой отвергнутого `fetch` — это [Throwable], но не
+     * исключение Kotlin, и `catch (e: Exception)` у вызывающего её пропускал: страница
+     * падала с «Uncaught runtime errors» вместо строки «Недоступен». Здесь у обоих
+     * отказов одна форма, и вызывающему разбирать второй вид не нужно.
+     *
+     * Отмена корутины отказом не считается и пробрасывается дальше: иначе работа,
+     * брошенная экраном, выглядела бы сбоем сервиса.
+     *
+     * @param block Ход к сервису целиком: запрос, разбор ответа и проверка кода.
+     */
+    private suspend fun <T> call(block: suspend () -> T): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ServiceApiException) {
+            // Свой отказ проходит как есть: у него уже есть код контракта, а по коду
+            // выбирается поведение (повторить, завести сессию заново, спросить ключ)
+            throw e
+        } catch (e: Throwable) {
+            // Подробность — в лог, а человеку причина словами: текст движка («Fail to fetch»)
+            // не подсказывает, что править, а адрес сервиса в логе и так виден строкой выше
+            platformLog("service", "отказ соединения: ${e.message ?: "причина не названа"}")
+            throw ServiceApiException(code = SERVICE_UNREACHABLE, message = "сервис не отвечает")
+        }
 
     /**
      * Отказ сервиса как исключение: тело `{code, message, requestId}` и `Retry-After`.
@@ -207,5 +241,13 @@ class ServiceClient(private val client: HttpClient) {
 
         /** Код для отказа, у которого своего кода не нашлось: дальше решает состояние соединения. */
         const val SERVICE_UNAVAILABLE = "service_unavailable"
+
+        /**
+         * Код отказа «запрос не дошёл»: сервис не ответил вовсе — ни кодом, ни телом.
+         *
+         * Свой код, а не [SERVICE_UNAVAILABLE]: тот приходит от ответившего сервиса (503),
+         * и по нему видно, что служба жива, но не может ответить. Здесь её не слышно.
+         */
+        const val SERVICE_UNREACHABLE = "service_unreachable"
     }
 }
