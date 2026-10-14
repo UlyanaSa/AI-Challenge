@@ -22,7 +22,7 @@ actual fun openedChatId(): String? = null
  * Системный буфер AWT здесь не подключён: десктопный таргет не собирается, и непроверенная
  * обвязка буфера осталась бы непроверенной. Ссылку поэтому показывают текстом для выделения.
  */
-actual fun copyToClipboard(text: String): Boolean = false
+actual suspend fun copyToClipboard(text: String): Boolean = false
 
 /**
  * Десктопный таргет не собирается, поэтому своего хранилища настроек у него нет:

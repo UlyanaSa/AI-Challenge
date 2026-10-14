@@ -25,6 +25,7 @@ import com.osvin.aichallenge.data.ServerSettings
 import com.osvin.aichallenge.data.ServiceShareLink
 import com.osvin.aichallenge.data.UserProfile
 import com.osvin.aichallenge.ui.components.*
+import kotlinx.coroutines.launch
 
 /**
  * Экран одного чата: история активного чата и обмен сообщениями с агентом.
@@ -115,6 +116,10 @@ fun ChatScreen(
     // Ссылка «Поделиться» и уложилась ли она в буфер обмена: показывается окном, потому
     // что буфера на платформе может не быть — тогда её копируют выделением текста
     var shareLink by remember { mutableStateOf<ServiceShareLink?>(null) }
+
+    // Ссылка копируется асинхронно — ответ буфера приходит после вызова, — поэтому ожидание
+    // живёт в корутине экрана: нажатие не может получить исход сразу
+    val screenScope = rememberCoroutineScope()
 
     // Подсказка пустой ленты: у сервисного чата она про сервис, а не про сессию агента
     // устройства — разговоры у них в разных хранилищах. Ссылку обещаем только там, где
@@ -216,7 +221,9 @@ fun ChatScreen(
                 serviceMode = serviceMode,
                 canShare = viewModel.canShareServiceChat,
                 onRefresh = { viewModel.refreshService() },
-                onShare = { shareLink = viewModel.shareServiceChat() },
+                onShare = {
+                    screenScope.launch { shareLink = viewModel.shareServiceChat() }
+                },
                 onBack = onBack,
                 onTitleClick = { viewModel.checkHealth() },
                 onNewChat = onNewChat,

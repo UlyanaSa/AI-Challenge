@@ -30,7 +30,7 @@ actual fun openedChatId(): String? = null
  * (ни одного держателя контекста в слое репозитория нет намеренно). Ссылку поэтому
  * показывают текстом, который можно выделить.
  */
-actual fun copyToClipboard(text: String): Boolean = false
+actual suspend fun copyToClipboard(text: String): Boolean = false
 
 /**
  * Хранилище настроек сервиса у Android-приложения подставляет его точка входа:

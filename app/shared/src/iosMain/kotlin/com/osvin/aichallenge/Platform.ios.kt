@@ -35,7 +35,7 @@ actual fun openedChatId(): String? = null
  * не собирается (§7), а непроверенная обвязка буфера осталась бы непроверенной и на живом
  * устройстве. Ссылку поэтому показывают текстом, который можно выделить.
  */
-actual fun copyToClipboard(text: String): Boolean = false
+actual suspend fun copyToClipboard(text: String): Boolean = false
 
 /**
  * Сборка iOS в этой задаче не собирается (§7), поэтому и своего хранилища настроек

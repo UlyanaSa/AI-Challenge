@@ -1,8 +1,10 @@
 package com.osvin.aichallenge
 
 import com.osvin.aichallenge.data.SettingsStorage
+import kotlin.coroutines.resume
 import kotlin.js.Date
 import kotlinx.browser.window
+import kotlinx.coroutines.suspendCancellableCoroutine
 import web.navigator.navigator
 
 class JsPlatform: Platform {
@@ -31,13 +33,20 @@ actual fun appAddress(): String? = window.location.origin + window.location.path
 actual fun openedChatId(): String? = chatIdFromUrl(window.location.search)
 
 /**
- * Буфер обмена браузера. Промис `writeText` переживает вызов, поэтому успехом считается
- * сам вызов: отказ (например, страница не в защищённом контексте) приходит уже после
- * возврата, и тогда человек увидит ссылку текстом и скопирует её руками.
+ * Буфер обмена браузера: ответ на запись (`writeTextAsync`) дожидается здесь, а не
+ * подразумевается. Раньше успехом считался сам вызов, и отказ промиса — страница не в фокусе,
+ * нет разрешения, не защищённый контекст — оставался незамеченным: окно говорило «Ссылка
+ * скопирована», хотя буфер был пуст. Теперь отказ виден и человек получает ссылку текстом.
  */
-actual fun copyToClipboard(text: String): Boolean = runCatching {
-    navigator.clipboard.writeTextAsync(text)
-}.isSuccess
+actual suspend fun copyToClipboard(text: String): Boolean {
+    val write = runCatching { navigator.clipboard.writeTextAsync(text) }.getOrNull() ?: return false
+    return suspendCancellableCoroutine { cont ->
+        write.then(
+            { if (cont.isActive) cont.resume(true) },
+            { if (cont.isActive) cont.resume(false) }
+        )
+    }
+}
 
 /**
  * Хранилище настроек сервиса: `localStorage` браузера.

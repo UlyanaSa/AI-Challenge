@@ -2,7 +2,9 @@ package com.osvin.aichallenge
 
 import com.osvin.aichallenge.data.SettingsStorage
 import kotlin.JsFun
+import kotlin.coroutines.resume
 import kotlin.js.ExperimentalWasmJsInterop
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * В Kotlin/Wasm нет ни `System.currentTimeMillis()`, ни `kotlin.js.Date`:
@@ -28,13 +30,17 @@ private external fun jsAppAddress(): String
 private external fun jsLocationSearch(): String
 
 /**
- * Буфер обмена браузера: кладём текст и говорим, был ли он доступен. Промис `writeText`
- * переживает вызов, поэтому успехом считается сам вызов, — а там, где буфера нет,
- * ссылку показывают текстом, который можно выделить.
+ * Буфер обмена браузера: кладём текст и дожидаемся ответа на запись.
+ *
+ * Ответ приходит промисом `writeText`, поэтому наружу отдаётся не «вызов сделан», а исход:
+ * без этого окно говорило «Ссылка скопирована» при пустом буфере (страница не в фокусе —
+ * обычное дело для фоновой вкладки, — нет разрешения, чужой фрейм). Неудача промиса
+ * обрабатывается здесь же: непойманный отказ ронял страницу накладкой
+ * «Uncaught runtime errors».
  */
 @OptIn(ExperimentalWasmJsInterop::class)
-@JsFun("(text) => { if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); return true; } return false; }")
-private external fun jsCopyToClipboard(text: String): Boolean
+@JsFun("(text, done) => { const c = (typeof navigator !== 'undefined' && navigator.clipboard) ? navigator.clipboard : null; if (!c || !c.writeText) { done(false); return; } c.writeText(text).then(() => done(true), () => done(false)); }")
+private external fun jsCopyToClipboard(text: String, done: (Boolean) -> Unit)
 
 class WasmPlatform: Platform {
     override val name: String = "Web with Kotlin/Wasm"
@@ -53,8 +59,10 @@ actual fun appAddress(): String? = jsAppAddress()
 /** Параметры адреса страницы, объявленные через [JsFun]: по `?chat=<id>` открывается чат (§5). */
 actual fun openedChatId(): String? = chatIdFromUrl(jsLocationSearch())
 
-/** Буфер обмена браузера, объявленный через [JsFun]. */
-actual fun copyToClipboard(text: String): Boolean = jsCopyToClipboard(text)
+/** Буфер обмена браузера, объявленный через [JsFun]: ждёт ответа на запись. */
+actual suspend fun copyToClipboard(text: String): Boolean = suspendCancellableCoroutine { cont ->
+    jsCopyToClipboard(text) { copied -> if (cont.isActive) cont.resume(copied) }
+}
 
 /**
  * Хранилище настроек сервиса: `localStorage` браузера, объявленный через [JsFun].

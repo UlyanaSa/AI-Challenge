@@ -486,6 +486,27 @@ class ServiceClientTest {
     }
 
     /**
+     * Ссылка на чат: адрес страницы остаётся рабочим, а слэш перед `?chat=` — один.
+     *
+     * Склейка «в лоб» давала на живом приложении `http://localhost:8081//?chat=…`, и это
+     * видел человек, которому ссылку отдают: он открывает её вторым клиентом. Проверяются
+     * оба конца — вид адреса (каталог слэшем, файл без) и то, что собранную ссылку читает
+     * тот же разбор `?chat=`, каким её открывает приложение.
+     */
+    @Test
+    fun chatLinkKeepsTheAddressUsable() {
+        val root = "http://localhost:8081/"
+        val directory = "http://localhost:8081/app/"
+        val file = "http://localhost:8081/app/index.html"
+
+        assertEquals("http://localhost:8081/?chat=9c1e", chatLinkTo(root, "9c1e"))
+        assertEquals("http://localhost:8081/app/?chat=9c1e", chatLinkTo(directory, "9c1e"))
+        assertEquals("http://localhost:8081/app/?chat=9c1e", chatLinkTo("http://localhost:8081/app", "9c1e"))
+        assertEquals("http://localhost:8081/app/index.html?chat=9c1e", chatLinkTo(file, "9c1e"))
+        assertEquals("9c1e", chatIdFromUrl(chatLinkTo(file, "9c1e")))
+    }
+
+    /**
      * Где у платформы нет адреса своей страницы, ссылки на чат не существует.
      *
      * Android-хост-тесты идут на андроидных actual'ах: `appAddress` там null, буфера обмена

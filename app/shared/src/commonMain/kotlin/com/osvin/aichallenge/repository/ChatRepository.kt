@@ -2,6 +2,7 @@ package com.osvin.aichallenge.repository
 
 import com.osvin.aichallenge.data.*
 import com.osvin.aichallenge.appAddress
+import com.osvin.aichallenge.chatLinkTo
 import com.osvin.aichallenge.copyToClipboard
 import com.osvin.aichallenge.nowMillis
 import com.osvin.aichallenge.platformLog
@@ -955,15 +956,16 @@ class ChatRepository(
     /**
      * Ссылка на открытый чат сервиса для «Поделиться» (§5): `<адрес приложения>/?chat=<id>`.
      *
-     * Копирование в буфер пробуем здесь же и исход возвращаем наружу ([ServiceShareLink]):
-     * где буфера нет, ссылку показывают текстом для выделения. null — делиться нечем:
-     * либо открытого чата нет, либо платформа не знает адреса страницы, и ссылки не собрать
+     * Копирование в буфер пробуем здесь же ([copyToClipboard]) и исход возвращаем наружу
+     * ([ServiceShareLink]): там, где буфера нет или запись отклонена, ссылку показывают
+     * текстом для выделения, а не обещают «скопировано». null — делиться нечем: либо
+     * открытого чата нет, либо платформа не знает адреса страницы, и ссылки не собрать
      * ([canShareServiceChat]).
      */
-    fun shareServiceChat(): ServiceShareLink? {
+    suspend fun shareServiceChat(): ServiceShareLink? {
         val chatId = _serviceChatId.value?.takeIf { it.isNotBlank() } ?: return null
         val address = appAddress() ?: return null
-        val text = "$address/?chat=$chatId"
+        val text = chatLinkTo(address, chatId)
         return ServiceShareLink(text = text, copied = copyToClipboard(text))
     }
 

@@ -1994,6 +1994,37 @@ Multiplatform — и измерена пятью рычагами: окно ко
 отвечает 400. Подробности, живой пример ответов (`baseline` уходит в C# на вопросе про `suspend`,
 `optimized` отвечает про корутины Kotlin) — в `docs/task-29-local-llm-tuning.md`.
 
+### task-30
+
+День 30. Приватный AI-сервис на локальной модели: ключ, лимиты, метрики, контейнер
+
+**Что сделано.** Локальная модель вынесена в отдельный сервис (`:server`, поверхность `/api/*`):
+доступ по ключу (`X-API-Key`), лимит частоты и параллельности с очередью, потолки окна контекста и
+бюджета ответа, метрики (запросы, задержки, токены, ресурсы, очередь), единый формат ошибок,
+история чатов в SQLite. Клиент (`app/shared`) получил шторку «Приватный сервис»: режим, адрес,
+ключ, модель, температура, бюджет ответа и окно контекста, «Проверить подключение» с четырьмя
+различимыми состояниями и список моделей сервиса. Разговоры сервиса — его собственные: список,
+заведение, история, удаление и ход в чат живут на сервере, поэтому один чат открывается вторым
+клиентом с ключом по ссылке `<адрес приложения>/?chat=<id>`, а сводку прошлого разговора сервис
+строит сам и подставляет новому чату. Настройки подключения переживают перезапуск клиента
+(web — `localStorage`, Android — `SharedPreferences`, ключ в их числе), поэтому обновление
+страницы не теряет ни режим, ни открытый чат — это починка отказа «при обновлении страницы старые
+чаты не подгружаются».
+
+**Числа.** Приёмка сервиса — 29 проверок из 29 (`build/day30/verify.py`), приёмка списка чатов,
+общего чата и сводки — 19 из 19 (`build/day30/verify-chats.py`), проверки клиента — 58 из 58
+(`:app:shared:testAndroidHostTest`). Нагрузка (`build/day30/load.py`): пять одновременных запросов —
+5 успехов (стена 3 533 мс, в работе не больше 2, в очереди до 3), десять одновременных — 1 успех и
+9 отказов (очередь до 4), пятнадцать за минуту — 10 успехов и 5 отказов по частоте. Живьём:
+веб-клиент на http://127.0.0.1:8081 и приложение на эмуляторе Android против сервиса на хосте
+(в эмуляторе — `http://10.0.2.2:8080`): 50 чатов сервиса, семь настроек в `SharedPreferences`,
+тот же чат и та же история после перезапуска приложения.
+
+**Что не проверено.** Контейнер (`Dockerfile`, `docker-compose.yml`) — на машине нет Docker;
+JVM- и iOS-таргеты клиента не собирались; ветка «ссылка скопирована» у «Поделиться» в
+headless-браузере недостижима (запись в буфер отклоняется `NotAllowedError`, окно честно говорит
+«не удалось» и показывает ссылку). Подробности — в `docs/task-30-private-ai-service.md`.
+
 ### Running the apps
 
 Use the run configurations provided by the run widget in your IDE's toolbar. You can also use these commands and options:
@@ -2023,6 +2054,7 @@ Use the run configurations provided by the run widget in your IDE's toolbar. You
 - Web app:
   - Wasm target (faster, modern browsers): `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun`
   - JS target (slower, supports older browsers): `./gradlew :app:webApp:jsBrowserDevelopmentRun`
+- Chat with a private local service (day 30): `SERVICE_API_KEY=$(cat /tmp/day30.key) CHAT_DB=build/day30/service-chats.db ./gradlew :server:run` — сервис на порту 8080 (поверхность `/api/*`, ключ, лимиты, метрики, чаты в SQLite); клиент — `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun` (http://127.0.0.1:8081, шторка «Сервис» в шапке чата) или `./gradlew :app:androidApp:assembleDebug` и `adb install -r app/androidApp/build/outputs/apk/debug/androidApp-debug.apk` (в эмуляторе адрес сервиса — `http://10.0.2.2:8080`). Настройки сервиса: `SERVICE_API_KEY`/`SERVICE_API_KEYS`, `SERVICE_RATE_LIMIT_PER_MINUTE`, `SERVICE_MAX_CONCURRENT_GENERATIONS`, `SERVICE_QUEUE_LIMIT`, `SERVICE_QUEUE_WAIT_MS`, `SERVICE_MAX_CONTEXT_TOKENS`, `SERVICE_MAX_GENERATION_TOKENS`, `SERVICE_SUMMARY_ENABLED`/`_PROMPT`/`_MAX_TOKENS`/`_MAX_MESSAGES`, `SERVICE_CHATS_LIST_LIMIT`; приёмка — `python3 build/day30/verify.py` и `python3 build/day30/verify-chats.py http://127.0.0.1:8082` (вторая требует чистой базы)
 - Chat with a local model (day 27): демон — `brew services start ollama`, модель — `ollama pull qwen3:1.7b`; сервер с локальным транспортом — `LLM_PROVIDER=local ./gradlew :server:run`, затем веб-приложение `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun` (страница на http://127.0.0.1:8081). Запросы идут на демон по `http://127.0.0.1:11434/api/chat` (`POST /api/chat`) и без потоковой выдачи (`stream: false`); ключ облака не нужен — облачный клиент в этом режиме не создаётся вовсе. Проверка здоровья: `GET /v1/health` в локальном режиме спрашивает у демона `GET /api/tags` и отвечает 503, если демона нет или модель не загружена; недоступный демон даёт 503, таймаут — 504, HTTP-ошибка Ollama — 400/502, пустой ответ — 400
 - RAG с локальной моделью (день 28): `LLM_PROVIDER=local ./gradlew :rag:ragDemo -Pdemo.live=1 --args="--dir=build/rag-local"` — те же десять контрольных вопросов и тот же конвейер, но генерация локальная (индекс и поиск локальны и раньше — Ollama `bge-m3`); рядом прогон облачной моделью `./gradlew :rag:ragDemo -Pdemo.live=1 --args="--dir=build/rag-cloud"` для сравнения. Страница сравнения: `LLM_PROVIDER=local ./gradlew :rag-ui:run` (http://127.0.0.1:8098, раздел «Сравнение моделей») — обе модели на одном индексе, качество, скорость и стабильность; без ключа облака сравнение идёт по локальной модели и говорит об этом
 - Сравнение сборок локальной модели (день 29): `LLM_PROVIDER=local ./gradlew :server:run` (порт 8080, `GET/POST /v1/chat/dual`) и `./gradlew :app:webApp:wasmJsBrowserDevelopmentRun` (http://127.0.0.1:8081) — кнопка «Сравнить сборки» в шапке чата открывает два окна: слева чат дня 27 как есть, справа оптимизированная сборка (окно 8192, инструкция под кейс, бюджет 512). Обе панели считаются параллельно; режим только локальный — в облачной конфигурации маршрут отвечает 400. Окно контекста — `OLLAMA_NUM_CTX` (по умолчанию 4096, умолчание демона), модель — `OLLAMA_MODEL`
@@ -2037,6 +2069,7 @@ Use the run button in your IDE's editor gutter, or run tests using Gradle tasks:
 - Agent tests: `./gradlew :agent:test`
 - Server tests: `./gradlew :server:test`
 - Local LLM tests (day 27): `./gradlew :agent:test` — 9 проверок провода `LocalLlmClientTest` на подставном движке и 7 проверок выбора провайдера `LlmProviderTest`; `./gradlew :server:test` — 4 проверки маршрута `LocalProviderRouteTest`. Живой прогон на настоящем демоне — `./gradlew :agent:test --tests "*LocalLlmClientLiveTest" -Pollama.live=1`; без флага `ollama.live` он пропускается
+- Service client tests (day 30): `./gradlew :app:shared:testAndroidHostTest` — 58 проверок, из них 20 в `ServiceClientTest`: состояния подключения (четыре, включая отказ, пришедший не исключением Kotlin), общий чат по ссылке, хранение настроек сервиса и запомненный чат, сборка ссылки `<адрес>?chat=<id>`. Живого сервиса не требуют — запросы идут на подставной движок
 - Local model in RAG (day 28): тот же `./gradlew :rag:test` и `./gradlew :rag-ui:test` — конвейер и страница проверяются на подставном клиенте модели и о провайдере машины не знают. Сравнение моделей проверяется отдельно (`CompareSessionTest`, три проверки): качество, скорость и стабильность по двум моделям с разными повторами, отсутствие облачной модели без ключа и отказ модели, названный на её уровне
 - Model tuning tests (day 29): `./gradlew :llm-tuning:test` — 4 проверки прогона на подставном клиенте модели: итог профиля складывается из оценок, фактов, времени и токенов ответов; отказ вопроса назван причиной и не мешает ответить на остальные; базовый профиль спрашивает как чат дня 27, профиль с инструкцией — системным сообщением; прогон из одних отказов даёт нули и не падает. Демона и модели не требуют
 - Currency monitor tests: `./gradlew :currency-monitor:test`
